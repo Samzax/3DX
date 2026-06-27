@@ -725,7 +725,7 @@ function calculateFeatures() {
 
   // racial ASI code stays here…
 
-  if (classEntries.length === 0 && !raceData) {
+  if (classEntries.length === 0) {
     featuresContainer.innerHTML =
       '<p class="text-gray-400">Add a class to see features.</p>';
     return;
@@ -739,7 +739,7 @@ function calculateFeatures() {
     ) || 1;
 
     const classCfg = CLASSDATA[className];   // from classes.js
-    const classRef = classCfg && classCfg.ref;  // or just use classCfg if you put levels there
+    const classRef = classCfg;  // class config holds levels/featureDetails directly
 
     if (!classRef || !classRef.levels) return;
 

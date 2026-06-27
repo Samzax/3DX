@@ -339,6 +339,9 @@
         }
     }
     </script>
+
+    <!-- Socket.IO client (served by server.js) -->
+    <script src="/socket.io/socket.io.js"></script>
 </head>
 <body>
     <!-- Login Modal -->
@@ -367,7 +370,7 @@
     <div id="tool-menu">
         <div id="tool-move-wrapper" style="position: relative;">
             <button id="btn-tool-move" class="tool-button" title="Move Tool (Hold for options)">
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24" 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
             </button>
             <div id="move-submenu">
                 <button id="btn-move-standard" class="menu-button">Standard (X/Z)</button>
@@ -486,9 +489,9 @@
         
         // --- Firebase State REMOVED ---
         
-        // --- NEW: Local Storage Key ---
-        const LOCAL_MAP_KEY = 'vtt_map_data_player'; // Chave específica do Jogador
-        // --- END NEW ---
+        // --- Socket.IO connection (created on login) ---
+        let socket = null;
+        // --- END ---
         
         let currentTool = null; 
         let currentMoveMode = 'standard'; 
@@ -686,8 +689,7 @@
             // --- Start Animation ---
             animate();
             
-            // --- NEW: Load from Local Storage ---
-            loadMapFromLocalStorage();
+            // O mapa chega do servidor assim que o jogador faz login (ver initSocket).
         }
 
         function onWindowResize() {
@@ -747,14 +749,20 @@
                     switch (currentTool) {
                         case 'move':
                             if (selectedObject) {
-                                // --- MODIFIED: Salvar no localStorage ao largar ---
-                                const finalPosition = snapToGrid(selectedObject.position);
-                                selectedObject.position.x = finalPosition.x;
-                                selectedObject.position.y = selectedObject.position.y;
-                                selectedObject.position.z = finalPosition.z;
-                                saveMapToLocalStorage();
-                                // --- END MODIFIED ---
-                                controls.target.copy(selectedObject.position); 
+                                // Emitir o movimento para o servidor (mapa partilhado)
+                                const docId = selectedObject.userData.syncId;
+                                if (docId && socket) {
+                                    const finalPosition = snapToGrid(selectedObject.position);
+                                    socket.emit('move-object', {
+                                        id: docId,
+                                        position: {
+                                            x: finalPosition.x,
+                                            y: selectedObject.position.y, // Manter o Y
+                                            z: finalPosition.z
+                                        }
+                                    });
+                                }
+                                controls.target.copy(selectedObject.position);
                                 deselectObject();
                             }
                             break;
@@ -925,7 +933,7 @@
                 objectMesh.castShadow = true;
                 objectMesh.receiveShadow = true;
                 objectMesh.userData.halfHeight = halfHeight;
-                objectMesh.userData.localId = id; // VINCULAR AO ID LOCAL
+                objectMesh.userData.syncId = id; // VINCULAR AO ID DE SINCRONIA
                 
                 if (data.type === 'character') {
                     objectMesh.userData.characterData = data.characterData;
@@ -1226,7 +1234,7 @@
             const finalGeometry = new THREE.BufferGeometry().setFromPoints(points);
             const finalLine = new THREE.Line(finalGeometry, rulerLineMaterial.clone());
             finalLine.material.color.setHex(data.color);
-            finalLine.userData.localId = id; // Vincular ao ID local
+            finalLine.userData.syncId = id; // Vincular ao ID de sincronia
             finalLine.userData.rulerData = data; 
             
             rulerSegments.push(finalLine);
@@ -1252,20 +1260,18 @@
            }
            
            updateRulerTooltip(finalGeometryPoints, true);
-           
-           // Criar localmente
+
+           // Emitir para o servidor; o listener 'ruler-added' criará a linha partilhada
            const dataToSave = {
                 points: finalGeometryPoints.map(p => ({x: p.x, y: p.y, z: p.z})),
                 mode: currentRulerMode,
                 color: currentRulerColor
             };
-           const localId = crypto.randomUUID();
-           createRulerLineFromData(localId, dataToSave);
-           
+           if (socket) socket.emit('add-ruler', dataToSave);
+
            if (shouldClearPoints) {
                 clearInProgressRuler();
            }
-           saveMapToLocalStorage(); // Salvar
         }
         
        function clearInProgressRuler() {
@@ -1282,87 +1288,125 @@
         // --- MODIFIED: clearRuler agora limpa localmente ---
         function clearRuler() {
            clearInProgressRuler(); // Limpar pré-visualização local
-            
-            // Limpar da cena
-            rulerSegments.forEach(segment => {
-                scene.remove(segment);
-                segment.geometry.dispose();
-            });
-            rulerSegments = [];
-            rulerTooltip.style.display = 'none'; 
-            saveMapToLocalStorage(); // Salvar a remoção
+
+           // Emitir para o servidor; o listener 'rulers-cleared' fará a remoção da cena
+           if (socket) socket.emit('clear-rulers');
+
+           rulerTooltip.style.display = 'none';
         }
         // --- End Ruler Tool Logic ---
         
-        // --- NEW: Local Storage Functions ---
-        function saveMapToLocalStorage() {
-            try {
-                // Serializar objetos
-                const serializableObjects = objects.map(obj => {
-                    const data = {
-                        position: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
-                        type: obj.userData.objectType,
-                        characterData: obj.userData.characterData,
-                        localId: obj.userData.localId
-                    };
-                    return data;
-                });
-                
-                // Serializar réguas
-                const serializableRulers = rulerSegments.map(seg => {
-                    return {
-                        ...seg.userData.rulerData,
-                        localId: seg.userData.localId
-                    };
-                });
-                
-                const mapData = {
-                    objects: serializableObjects,
-                    rulers: serializableRulers
-                };
-                
-                localStorage.setItem(LOCAL_MAP_KEY, JSON.stringify(mapData));
-                
-            } catch (e) {
-                console.error("Erro ao salvar mapa no localStorage:", e);
-            }
-        }
-        
-        function loadMapFromLocalStorage() {
-            try {
-                const mapDataString = localStorage.getItem(LOCAL_MAP_KEY);
-                if (!mapDataString) {
-                    return; // Nenhum mapa salvo
-                }
-                
-                const mapData = JSON.parse(mapDataString);
-                
-                // Limpar cena atual (objetos)
+        // --- Socket.IO: receive and share the GM's map in real time ---
+        function initSocket(username) {
+            socket = io();
+
+            socket.on('connect', () => {
+                console.log('Conectado ao servidor com ID:', socket.id);
+                socket.emit('login', username);
+                sessionStorage.setItem('vtt_username', username);
+            });
+
+            socket.on('login-success', (userData) => {
+                console.log('Jogador autenticado:', userData);
+                if (loginOverlay) loginOverlay.classList.add('hidden');
+            });
+
+            // Estado completo do mapa ao conectar
+            socket.on('map-state', (data) => {
                 objects.forEach(obj => scene.remove(obj));
                 objects = [];
-                // Limpar cena atual (réguas)
                 rulerSegments.forEach(seg => scene.remove(seg));
                 rulerSegments = [];
-                
-                // Carregar objetos
-                if (mapData.objects) {
-                    mapData.objects.forEach(objData => {
-                        createObjectFromData(objData.localId, objData);
-                    });
+
+                data.objects.forEach(objData => createObjectFromData(objData.id, objData));
+                data.rulers.forEach(rulerData => createRulerLineFromData(rulerData.id, rulerData));
+            });
+
+            socket.on('object-added', (data) => {
+                if (!objects.find(o => o.userData.syncId === data.id)) {
+                    createObjectFromData(data.id, data);
                 }
-                
-                // Carregar réguas
-                if (mapData.rulers) {
-                    mapData.rulers.forEach(rulerData => {
-                        createRulerLineFromData(rulerData.localId, rulerData);
-                    });
+            });
+
+            socket.on('object-moved', (data) => {
+                const object = objects.find(o => o.userData.syncId === data.id);
+                if (object) {
+                    object.position.set(data.position.x, data.position.y, data.position.z);
                 }
-                
-            } catch (e) {
-                console.error("Erro ao carregar mapa do localStorage:", e);
-            }
+            });
+
+            socket.on('object-deleted', (data) => {
+                const object = objects.find(o => o.userData.syncId === data.id);
+                if (object) {
+                    if (selectedObject === object) deselectObject();
+                    scene.remove(object);
+                    objects = objects.filter(o => o.userData.syncId !== data.id);
+                }
+            });
+
+            socket.on('ruler-added', (data) => {
+                if (!rulerSegments.find(s => s.userData.syncId === data.id)) {
+                    createRulerLineFromData(data.id, data);
+                }
+            });
+
+            socket.on('rulers-cleared', () => {
+                rulerSegments.forEach(segment => {
+                    scene.remove(segment);
+                    segment.geometry.dispose();
+                });
+                rulerSegments = [];
+            });
+
+            socket.on('error', (message) => {
+                console.error('Erro do servidor:', message);
+                showLoginError(message);
+                if (loginBtn) {
+                    loginBtn.disabled = false;
+                    loginBtn.textContent = 'Login';
+                }
+            });
+
+            socket.on('disconnect', () => {
+                console.log('Desconectado do servidor.');
+            });
         }
-        // --- END NEW ---
+
+        // --- Login handling ---
+        const loginOverlay = document.getElementById('login-overlay');
+        const usernameInput = document.getElementById('username-input');
+        const loginBtn = document.getElementById('login-btn');
+        const loginError = document.getElementById('login-error');
+
+        function showLoginError(message) {
+            if (!loginError) return;
+            loginError.textContent = message;
+            loginError.classList.remove('hidden');
+            setTimeout(() => loginError.classList.add('hidden'), 3000);
+        }
+
+        function handleLogin() {
+            const username = usernameInput.value.trim();
+            if (!username || username.length < 2) {
+                showLoginError('Username must be at least 2 characters');
+                return;
+            }
+            loginBtn.disabled = true;
+            loginBtn.textContent = 'Connecting...';
+            initSocket(username);
+        }
+
+        loginBtn.addEventListener('click', handleLogin);
+        usernameInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') handleLogin();
+        });
+
+        // Auto-login if a username is already stored for this tab's session
+        const storedUsername = sessionStorage.getItem('vtt_username');
+        if (storedUsername) {
+            usernameInput.value = storedUsername;
+            handleLogin();
+        }
 
         // --- Init ---
         try {

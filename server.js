@@ -59,7 +59,7 @@ app.use(express.static(path.join(__dirname)));
 // Routes
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'character_creator.html')));
 app.get('/gm', (req, res) => res.sendFile(path.join(__dirname, '3d_tabletop.html')));
-app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'player_screen.html')));
+app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'player_Screen.html')));
 
 // Helper: Check if user is GM
 function isGM(username) {

@@ -413,6 +413,26 @@
 
             socket.on('connect', () => {
                 console.log('Conectado ao servidor com ID:', socket.id);
+                // Auto-login as GM on this single connection
+                socket.emit('login', 'GM');
+                sessionStorage.setItem('vtt_username', 'GM');
+            });
+
+            // --- GM login + character sync ---
+            socket.on('login-success', (userData) => {
+                console.log('GM logged in:', userData);
+                const loginOverlay = document.getElementById('login-overlay');
+                if (loginOverlay) loginOverlay.classList.add('hidden');
+            });
+
+            socket.on('load-user-characters', (characters) => {
+                console.log('GM received characters:', characters);
+                loadCharactersToMenu(characters);
+            });
+
+            socket.on('character-updated', (charData) => {
+                console.log('Character updated:', charData);
+                socket.emit('get-characters'); // Refresh the menu
             });
 
             // --- Ouvintes de Sincronização ---
@@ -484,43 +504,8 @@
                 console.log('Desconectado do servidor.');
             });
         }
-        // GM Auto-login
-let currentUsername = 'GM';
-
-function initGMSocket() {
-  socket = io();
-
-  socket.on('connect', () => {
-    console.log('GM connected to server');
-    socket.emit('login', 'GM');
-    sessionStorage.setItem('vtt_username', 'GM');
-  });
-
-  socket.on('login-success', (userData) => {
-    console.log('GM logged in:', userData);
-    // Hide login overlay if it exists
-    const loginOverlay = document.getElementById('login-overlay');
-    if (loginOverlay) {
-      loginOverlay.classList.add('hidden');
-    }
-  });
-
-  socket.on('load-user-characters', (characters) => {
-    console.log('GM received all characters:', characters);
-    loadCharactersToMenu(characters);
-  });
-
-  socket.on('character-updated', (charData) => {
-    console.log('Character updated:', charData);
-    socket.emit('get-characters'); // Refresh
-  });
-
-  // ... rest of existing socket handlers
-}
-
-// Call this instead of previous initSocket
-initGMSocket();
-
+        // GM auto-login and character sync are handled inside initSocket(),
+        // which is called once from init() — a single Socket.IO connection.
         // --- END NEW ---
 
         function init() {
@@ -582,7 +567,7 @@ initGMSocket();
             menuButtons.token.addEventListener('click', () => setSelectedObjectType('token'));
             menuButtons.cube.addEventListener('click', () => setSelectedObjectType('cube'));
             menuButtons.sphere.addEventListener('click', () => setSelectedObjectType('sphere'));
-            loadCharactersFromStorage(); // Carrega personagens do localStorage
+            // Characters are loaded from the server via Socket.IO (see initSocket).
 
             // --- Tool Menu Listeners (Left) ---
             toolMenuButtons.move = document.getElementById('btn-tool-move');
@@ -1044,36 +1029,29 @@ initGMSocket();
         // --- End UI Management ---
         
         // --- Character Loader Function ---
-        function loadCharactersFromStorage() {
+        function loadCharactersToMenu(characters) {
             const listContainer = document.getElementById('character-button-list');
-            listContainer.innerHTML = ''; 
-            
-            try {
-                const characters = JSON.parse(localStorage.getItem(CHARACTER_STORAGE_KEY) || '[]');
-                if (characters.length === 0) {
-                    listContainer.innerHTML = '<p style="font-size: 12px; color: #999;">No characters found.</p>';
-                    return;
-                }
-                
-                characters.forEach(char => {
-                    const charBtn = document.createElement('button');
-                    charBtn.className = 'menu-button';
-                    charBtn.textContent = `Char: ${char.name}`;
-                    charBtn.title = `${char.name} - ${char.race}`;
-                    charBtn.style.color = char.color;
-                    charBtn.style.fontWeight = 'bold';
-                    charBtn.style.borderLeft = `5px solid ${char.color}`;
-                    charBtn.dataset.charId = char.id;
-                    charBtn.addEventListener('click', () => {
-                        setSelectedObjectType('character', char);
-                    });
-                    listContainer.appendChild(charBtn);
-                });
+            listContainer.innerHTML = '';
 
-            } catch (e) {
-                console.error("Error loading characters from localStorage:", e);
-                listContainer.innerHTML = '<p style="font-size: 12px; color: #f00;">Error loading characters.</p>';
+            if (!Array.isArray(characters) || characters.length === 0) {
+                listContainer.innerHTML = '<p style="font-size: 12px; color: #999;">No characters found. Create one in the Character Creator!</p>';
+                return;
             }
+
+            characters.forEach(char => {
+                const charBtn = document.createElement('button');
+                charBtn.className = 'menu-button';
+                charBtn.textContent = `Char: ${char.name}`;
+                charBtn.title = `${char.name} - ${char.race}`;
+                charBtn.style.color = char.color;
+                charBtn.style.fontWeight = 'bold';
+                charBtn.style.borderLeft = `5px solid ${char.color}`;
+                charBtn.dataset.charId = char.id;
+                charBtn.addEventListener('click', () => {
+                    setSelectedObjectType('character', char);
+                });
+                listContainer.appendChild(charBtn);
+            });
         }
         
         // --- Character Model Functions (Copied from Creator) ---
@@ -1371,13 +1349,12 @@ initGMSocket();
         // --- MODIFIED: clearRuler agora emite para o servidor ---
         function clearRuler() {
            clearInProgressRuler(); // Limpar pré-visualização local
-            
-           // Emitir para o servidor
+
+           // Emitir para o servidor; o listener 'rulers-cleared' fará a remoção da cena.
+           // (Não esvaziar rulerSegments aqui, senão o listener não teria o que remover.)
            socket.emit('clear-rulers');
-           
-           // O listener tratará da remoção
-           rulerSegments = [];
-           rulerTooltip.style.display = 'none'; 
+
+           rulerTooltip.style.display = 'none';
         }
         // --- End Ruler Tool Logic ---
 
