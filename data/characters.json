@@ -1,0 +1,329 @@
+{
+  "ee88c442-4c9a-4647-91f9-c22856953e51": {
+    "id": "ee88c442-4c9a-4647-91f9-c22856953e51",
+    "name": "asasda",
+    "classes": [],
+    "race": "Elf",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1.3,
+      "headSize": 1.1,
+      "armLength": 0.9
+    },
+    "owner": "save"
+  },
+  "f7148d48-afaf-4339-907a-5896c63ddc55": {
+    "id": "f7148d48-afaf-4339-907a-5896c63ddc55",
+    "name": "asasdass",
+    "classes": [],
+    "race": "Elf",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1.3,
+      "headSize": 1.1,
+      "armLength": 0.9
+    },
+    "owner": "save"
+  },
+  "fa4258cb-112a-46ad-9b82-797717c2d729": {
+    "id": "fa4258cb-112a-46ad-9b82-797717c2d729",
+    "name": "asasdass",
+    "classes": [],
+    "race": "Elf",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1.3,
+      "headSize": 1.1,
+      "armLength": 0.9
+    },
+    "owner": "save"
+  },
+  "10bf7f96-d9ae-482a-b2a5-ffd4804102b7": {
+    "id": "10bf7f96-d9ae-482a-b2a5-ffd4804102b7",
+    "name": "asasdass",
+    "classes": [],
+    "race": "Human",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1.3,
+      "headSize": 1.1,
+      "armLength": 0.9
+    },
+    "owner": "save"
+  },
+  "16759df6-52fc-4eb5-b6e6-2a5e110d0961": {
+    "id": "16759df6-52fc-4eb5-b6e6-2a5e110d0961",
+    "name": "sas",
+    "classes": [],
+    "race": "Human",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "sadas"
+  },
+  "4b21cdbc-db4d-4f73-9bef-528cdcb282fd": {
+    "id": "4b21cdbc-db4d-4f73-9bef-528cdcb282fd",
+    "name": "sas",
+    "classes": [],
+    "race": "Human",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "sadas"
+  },
+  "6353b3f2-ef4a-4f8f-90ec-63213ee8427f": {
+    "id": "6353b3f2-ef4a-4f8f-90ec-63213ee8427f",
+    "name": "asas",
+    "classes": [],
+    "race": "Human",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "sas"
+  },
+  "022eec57-59b5-467b-9a59-2b7cf4d8e294": {
+    "id": "022eec57-59b5-467b-9a59-2b7cf4d8e294",
+    "name": "asa",
+    "classes": [],
+    "race": "Human",
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "sas"
+  },
+  "20b82b4f-01da-4aa6-8d40-80c8abfc76f1": {
+    "id": "20b82b4f-01da-4aa6-8d40-80c8abfc76f1",
+    "name": "sasas",
+    "classes": [
+      {
+        "name": "Fighter",
+        "level": 1
+      },
+      {
+        "name": "Fighter",
+        "level": 1
+      },
+      {
+        "name": "Rogue",
+        "level": 1
+      }
+    ],
+    "race": "Human",
+    "subrace": null,
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "asa"
+  },
+  "eec4806c-ff0f-4d70-9a4e-3f6286b3af26": {
+    "id": "eec4806c-ff0f-4d70-9a4e-3f6286b3af26",
+    "name": "sasas",
+    "classes": [
+      {
+        "name": "Fighter",
+        "level": 2
+      },
+      {
+        "name": "Fighter",
+        "level": 1
+      },
+      {
+        "name": "Rogue",
+        "level": 1
+      }
+    ],
+    "race": "Human",
+    "subrace": null,
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "asa"
+  },
+  "d914ad3b-d325-4dcc-9b5f-37bc97407040": {
+    "id": "d914ad3b-d325-4dcc-9b5f-37bc97407040",
+    "name": "asa",
+    "classes": [
+      {
+        "name": "Barbarian",
+        "level": 1
+      },
+      {
+        "name": "Barbarian",
+        "level": 1
+      }
+    ],
+    "race": "Human",
+    "subrace": null,
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "asas"
+  },
+  "83bbe65e-57f7-4b7e-bce3-f4cc6b2ff995": {
+    "id": "83bbe65e-57f7-4b7e-bce3-f4cc6b2ff995",
+    "name": "asa",
+    "classes": [
+      {
+        "name": "Barbarian",
+        "level": 1
+      },
+      {
+        "name": "Fighter",
+        "level": 1
+      }
+    ],
+    "race": "Human",
+    "subrace": null,
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "sasa"
+  },
+  "006151b5-9c99-4c1f-90ac-c45048fe4f6d": {
+    "id": "006151b5-9c99-4c1f-90ac-c45048fe4f6d",
+    "name": "asa",
+    "classes": [
+      {
+        "name": "Barbarian",
+        "level": 1
+      }
+    ],
+    "race": "Human",
+    "subrace": null,
+    "color": "#dd4444",
+    "stats": {
+      "str": 8,
+      "dex": 8,
+      "con": 8,
+      "int": 8,
+      "wis": 8,
+      "cha": 8
+    },
+    "appearance": {
+      "height": 1,
+      "headSize": 1,
+      "armLength": 1
+    },
+    "owner": "sas"
+  }
+}

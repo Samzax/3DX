@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+
+<html lang="en"><head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Character Creator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+          #login-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: rgba(0, 0, 0, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  }
+
+  #login-modal {
+    background-color: #2d2d2d;
+    border: 2px solid #555;
+    border-radius: 12px;
+    padding: 40px;
+    width: 90%;
+    max-width: 400px;
+    color: #f0f0f0;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+  }
+
+  #login-modal h2 {
+    margin-top: 0;
+    color: #60A5FA;
+    text-align: center;
+    margin-bottom: 30px;
+  }
+
+  #login-modal input {
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 20px;
+    background-color: #1a1a1a;
+    border: 1px solid #444;
+    border-radius: 6px;
+    color: #f0f0f0;
+    font-size: 16px;
+  }
+
+  #login-modal input:focus {
+    outline: none;
+    border-color: #60A5FA;
+  }
+
+  #login-modal button {
+    width: 100%;
+    padding: 12px;
+    background-color: #60A5FA;
+    color: #1a1a1a;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  #login-modal button:hover {
+    background-color: #3b82f6;
+  }
+
+  #login-modal button:disabled {
+    background-color: #555;
+    cursor: not-allowed;
+  }
+
+  #login-error {
+    color: #ff4444;
+    margin-top: 10px;
+    text-align: center;
+    font-size: 14px;
+  }
+
+  .hidden {
+    display: none !important;
+  }
+        body {
+            background-color: #1a1a1a; /* Dark background */
+            color: #f0f0f0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        #preview-canvas {
+            width: 100%;
+            height: 300px;
+            border-radius: 0.5rem;
+            background-color: #4a4a4a;
+        }
+        /* --- New Stat & Class Styles --- */
+        .stat-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr;
+            align-items: center;
+            margin-bottom: 8px;
+            text-align: center;
+        }
+        .stat-row label {
+            text-align: left;
+            font-weight: 500;
+        }
+        .stat-btn {
+            background-color: #4B5563; /* gray-600 */
+            border: none;
+            color: white;
+            border-radius: 9999px; /* rounded-full */
+            width: 28px;
+            height: 28px;
+            font-weight: bold;
+            cursor: pointer;
+            margin: 0 auto;
+        }
+        .stat-btn:hover {
+            background-color: #6B7280; /* gray-500 */
+        }
+        .stat-btn:disabled {
+            background-color: #374151; /* gray-700 */
+            color: #9CA3AF; /* gray-400 */
+            cursor: not-allowed;
+        }
+        #points-pool {
+            text-align: center;
+            font-size: 1.25rem; /* text-xl */
+            font-weight: 600; /* font-semibold */
+            margin-bottom: 1rem;
+        }
+        #points-pool span {
+            color: #60A5FA; /* blue-400 */
+            font-size: 1.5rem; /* text-2xl */
+        }
+        /* --- Modified Class Entry Style --- */
+        .class-entry {
+            display: grid; /* Changed to grid */
+            grid-template-columns: 3fr 1fr 40px; /* Layout for Select, Input, Button */
+            gap: 8px;
+            margin-bottom: 8px;
+            align-items: center;
+        }
+        .class-entry select, .class-entry input,
+        /* --- New Subrace Selector Style --- */
+        #subrace-selector-container select {
+            flex-grow: 1;
+            /* Common styles for select and input */
+            width: 100%;
+            background-color: #374151; /* gray-700 */
+            border: 1px solid #4B5563; /* gray-600 */
+            border-radius: 0.375rem; /* rounded-md */
+            padding: 0.5rem; /* p-2 */
+            color: white;
+            font-size: 14px;
+        }
+        .class-entry input {
+            /* Specific to level input */
+            text-align: center;
+            -moz-appearance: textfield; /* Remove arrows in Firefox */
+        }
+        /* Remove arrows in Chrome/Safari */
+        .class-entry input::-webkit-outer-spin-button,
+        .class-entry input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .btn-remove-class {
+            background-color: #DC2626; /* red-600 */
+            color: white;
+            border: none;
+            border-radius: 0.375rem; /* rounded-md */
+            padding: 0 0.75rem;
+            height: 38px; /* Match input height */
+            font-weight: bold;
+            cursor: pointer;
+        }
+        /* --- New Race Info Panel Style --- */
+        #race-info-panel {
+            background-color: #374151; /* gray-700 */
+            border-radius: 0.375rem; /* rounded-md */
+            padding: 1rem; /* p-4 */
+            /* margin-top: 2rem; -- REMOVED */
+            max-height: 80vh; /* CHANGED from 400px */
+            overflow-y: auto; /* Add scrollbar if needed */
+        }
+        #race-info-panel h3 {
+            font-size: 1.25rem; /* text-xl */
+            font-weight: 600; /* font-semibold */
+            margin-bottom: 0.5rem; /* mb-2 */
+            color: #60A5FA; /* blue-400 */
+        }
+        #race-info-panel h4 {
+            font-size: 1.125rem; /* text-lg */
+            font-weight: 600; /* font-semibold */
+            margin-top: 0.75rem; /* mt-3 */
+            margin-bottom: 0.25rem; /* mb-1 */
+            color: #9CA3AF; /* gray-400 */
+        }
+        #race-info-panel p {
+            margin-bottom: 0.5rem; /* mb-2 */
+            font-size: 0.875rem; /* text-sm */
+            line-height: 1.4;
+        }
+        #race-info-panel p strong {
+            font-weight: 600;
+            color: #D1D5DB; /* gray-300 */
+        }
+        /* --- End New Styles --- */
+    </style>
+    <!-- Import Map for Three.js -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.skypack.dev/three@0.132.2/build/three.module.js",
+            "three/addons/": "https://cdn.skypack.dev/three@0.132.2/examples/jsm/"
+        }
+    }
+    </script>
+<style>*, ::before, ::after{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgb(59 130 246 / 0.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }::backdrop{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgb(59 130 246 / 0.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }/* ! tailwindcss v3.4.17 | MIT License | https://tailwindcss.com */*,::after,::before{box-sizing:border-box;border-width:0;border-style:solid;border-color:#e5e7eb}::after,::before{--tw-content:''}:host,html{line-height:1.5;-webkit-text-size-adjust:100%;-moz-tab-size:4;tab-size:4;font-family:ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";font-feature-settings:normal;font-variation-settings:normal;-webkit-tap-highlight-color:transparent}body{margin:0;line-height:inherit}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,pre,samp{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-feature-settings:normal;font-variation-settings:normal;font-size:1em}small{font-size:80%}sub,sup{font-size:75%;line-height:0;position:relative;vertical-align:baseline}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}button,input,optgroup,select,textarea{font-family:inherit;font-feature-settings:inherit;font-variation-settings:inherit;font-size:100%;font-weight:inherit;line-height:inherit;letter-spacing:inherit;color:inherit;margin:0;padding:0}button,select{text-transform:none}button,input:where([type=button]),input:where([type=reset]),input:where([type=submit]){-webkit-appearance:button;background-color:transparent;background-image:none}:-moz-focusring{outline:auto}:-moz-ui-invalid{box-shadow:none}progress{vertical-align:baseline}::-webkit-inner-spin-button,::-webkit-outer-spin-button{height:auto}[type=search]{-webkit-appearance:textfield;outline-offset:-2px}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-file-upload-button{-webkit-appearance:button;font:inherit}summary{display:list-item}blockquote,dd,dl,figure,h1,h2,h3,h4,h5,h6,hr,p,pre{margin:0}fieldset{margin:0;padding:0}legend{padding:0}menu,ol,ul{list-style:none;margin:0;padding:0}dialog{padding:0}textarea{resize:vertical}input::placeholder,textarea::placeholder{opacity:1;color:#9ca3af}[role=button],button{cursor:pointer}:disabled{cursor:default}audio,canvas,embed,iframe,img,object,svg,video{display:block;vertical-align:middle}img,video{max-width:100%;height:auto}[hidden]:where(:not([hidden=until-found])){display:none}.container{width:100%}@media (min-width: 640px){.container{max-width:640px}}@media (min-width: 768px){.container{max-width:768px}}@media (min-width: 1024px){.container{max-width:1024px}}@media (min-width: 1280px){.container{max-width:1280px}}@media (min-width: 1536px){.container{max-width:1536px}}.mx-auto{margin-left:auto;margin-right:auto}.mb-1{margin-bottom:0.25rem}.mb-4{margin-bottom:1rem}.mb-8{margin-bottom:2rem}.mt-2{margin-top:0.5rem}.mt-6{margin-top:1.5rem}.mb-3{margin-bottom:0.75rem}.mt-4{margin-top:1rem}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.h-10{height:2.5rem}.h-48{height:12rem}.w-full{width:100%}.max-w-7xl{max-width:80rem}.grid-cols-1{grid-template-columns:repeat(1, minmax(0, 1fr))}.items-center{align-items:center}.justify-between{justify-content:space-between}.gap-8{gap:2rem}.space-y-2 > :not([hidden]) ~ :not([hidden]){--tw-space-y-reverse:0;margin-top:calc(0.5rem * calc(1 - var(--tw-space-y-reverse)));margin-bottom:calc(0.5rem * var(--tw-space-y-reverse))}.overflow-y-auto{overflow-y:auto}.rounded-lg{border-radius:0.5rem}.rounded-md{border-radius:0.375rem}.border{border-width:1px}.border-gray-600{--tw-border-opacity:1;border-color:rgb(75 85 99 / var(--tw-border-opacity, 1))}.bg-gray-600{--tw-bg-opacity:1;background-color:rgb(75 85 99 / var(--tw-bg-opacity, 1))}.bg-gray-700{--tw-bg-opacity:1;background-color:rgb(55 65 81 / var(--tw-bg-opacity, 1))}.bg-gray-800{--tw-bg-opacity:1;background-color:rgb(31 41 55 / var(--tw-bg-opacity, 1))}.bg-blue-600{--tw-bg-opacity:1;background-color:rgb(37 99 235 / var(--tw-bg-opacity, 1))}.bg-red-600{--tw-bg-opacity:1;background-color:rgb(220 38 38 / var(--tw-bg-opacity, 1))}.p-8{padding:2rem}.p-2{padding:0.5rem}.p-6{padding:1.5rem}.p-1{padding:0.25rem}.p-3{padding:0.75rem}.p-4{padding:1rem}.px-4{padding-left:1rem;padding-right:1rem}.py-2{padding-top:0.5rem;padding-bottom:0.5rem}.py-3{padding-top:0.75rem;padding-bottom:0.75rem}.text-center{text-align:center}.text-2xl{font-size:1.5rem;line-height:2rem}.text-4xl{font-size:2.25rem;line-height:2.5rem}.text-lg{font-size:1.125rem;line-height:1.75rem}.text-sm{font-size:0.875rem;line-height:1.25rem}.text-xl{font-size:1.25rem;line-height:1.75rem}.font-bold{font-weight:700}.font-medium{font-weight:500}.font-semibold{font-weight:600}.text-blue-400{--tw-text-opacity:1;color:rgb(96 165 250 / var(--tw-text-opacity, 1))}.text-gray-300{--tw-text-opacity:1;color:rgb(209 213 219 / var(--tw-text-opacity, 1))}.text-white{--tw-text-opacity:1;color:rgb(255 255 255 / var(--tw-text-opacity, 1))}.text-gray-400{--tw-text-opacity:1;color:rgb(156 163 175 / var(--tw-text-opacity, 1))}.text-yellow-300{--tw-text-opacity:1;color:rgb(253 224 71 / var(--tw-text-opacity, 1))}.shadow-lg{--tw-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);--tw-shadow-colored:0 10px 15px -3px var(--tw-shadow-color), 0 4px 6px -4px var(--tw-shadow-color);box-shadow:var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow)}.transition{transition-property:color, background-color, border-color, fill, stroke, opacity, box-shadow, transform, filter, -webkit-text-decoration-color, -webkit-backdrop-filter;transition-property:color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter;transition-property:color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter, -webkit-text-decoration-color, -webkit-backdrop-filter;transition-timing-function:cubic-bezier(0.4, 0, 0.2, 1);transition-duration:150ms}.duration-200{transition-duration:200ms}.hover\:bg-gray-700:hover{--tw-bg-opacity:1;background-color:rgb(55 65 81 / var(--tw-bg-opacity, 1))}.hover\:bg-blue-700:hover{--tw-bg-opacity:1;background-color:rgb(29 78 216 / var(--tw-bg-opacity, 1))}.hover\:bg-red-700:hover{--tw-bg-opacity:1;background-color:rgb(185 28 28 / var(--tw-bg-opacity, 1))}.focus\:border-blue-500:focus{--tw-border-opacity:1;border-color:rgb(59 130 246 / var(--tw-border-opacity, 1))}.focus\:ring-blue-500:focus{--tw-ring-opacity:1;--tw-ring-color:rgb(59 130 246 / var(--tw-ring-opacity, 1))}@media (min-width: 768px){.md\:grid-cols-3{grid-template-columns:repeat(3, minmax(0, 1fr))}}</style><style>
+:root {
+  --scale-value: 1;
+  --transition-duration: 250ms;
+  --transition-delay: 0ms;
+}
+.ztf-parent {
+  overflow: hidden !important;
+}
+.ztf-video {
+  transition-property: transform !important;
+  transform: scale(var(--scale-value)) !important;
+  transition-timing-function: ease-in-out !important;
+  transition-delay: var(--transition-delay) !important;
+  transition-duration: var(--transition-duration) !important;
+}
+</style></head>
+<body class="p-8">
+    <!-- Login Modal -->
+<div id="login-overlay">
+  <div id="login-modal">
+    <h2>🎲 VTT Login</h2>
+    <input type="text" id="username-input" placeholder="Enter your username" autocomplete="username" maxlength="20">
+    <button id="login-btn">Login</button>
+    <div id="login-error" class="hidden">Username must be at least 2 characters</div>
+  </div>
+</div>
+
+    
+    <div class="container mx-auto max-w-7xl"> <!-- CHANGED from 6xl -->
+        <h1 class="text-4xl font-bold text-center mb-8">Character Creator</h1>
+        
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-8"> <!-- CHANGED from 2 to 3 -->
+            
+            <!-- Left Side: Form (Column 1) -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-semibold mb-4">Character Details</h2>
+                
+                <form id="creator-form">
+                    <!-- Name -->
+                    <div class="mb-4">
+                        <label for="char-name" class="block text-sm font-medium text-gray-300 mb-1">Character Name</label>
+                        <input type="text" id="char-name" class="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-white focus:ring-blue-500 focus:border-blue-500" required="">
+                    </div>
+
+                    <!-- Class Section (Modified) -->
+                    <div class="mb-4">
+                        <div class="flex justify-between items-center mb-1">
+                            <label class="block text-sm font-medium text-gray-300">Class(es)</label>
+                            <span class="text-lg font-semibold">Total Level: <span id="total-level" class="text-blue-400">1</span></span>
+                        </div>
+                        
+                        <div id="class-container">
+                            <!-- First class entry is now dynamic -->
+                       </div>
+                        <button type="button" id="btn-add-multiclass" class="w-full mt-2 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 text-sm">
+                            Add Class
+                        </button>
+                    </div>
+
+                    <!-- Race -->
+                    <div class="mb-4">
+                        <label for="char-race" class="block text-sm font-medium text-gray-300 mb-1">Race</label>
+                        <select id="char-race" class="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-white focus:ring-blue-500 focus:border-blue-500">
+                            <option>Human</option>
+                            <option>Elf</option>
+                            <option>Dwarf</option>
+                            <option>Halfling</option>
+                        </select>
+                    </div>
+
+                    <!-- --- New Subrace Container --- -->
+                    <div id="subrace-selector-container" class="mb-4 hidden"></div>
+                    <!-- --- End New Subrace Container --- -->
+
+
+                    <!-- Stat Point-Buy Section -->
+                    <h2 class="text-2xl font-semibold mb-4 mt-6">Base Stats (Point Buy)</h2>
+                    <div id="points-pool">Points Left: <span id="points-left">27</span></div>
+                    <div id="stats-container" class="space-y-2">
+                        <!-- STR -->
+                        <div class="stat-row">
+                            <label for="stat-str">Strength</label>
+                            <button type="button" class="stat-btn" data-stat="str" data-op="-" disabled="">-</button>
+                            <span id="stat-str" class="text-xl font-bold">8</span>
+                            <button type="button" class="stat-btn" data-stat="str" data-op="+">+</button>
+                        </div>
+                        <!-- DEX -->
+                        <div class="stat-row">
+                            <label for="stat-dex">Dexterity</label>
+                            <button type="button" class="stat-btn" data-stat="dex" data-op="-" disabled="">-</button>
+                            <span id="stat-dex" class="text-xl font-bold">8</span>
+                            <button type="button" class="stat-btn" data-stat="dex" data-op="+">+</button>
+                        </div>
+                        <!-- CON -->
+                        <div class="stat-row">
+                            <label for="stat-con">Constitution</label>
+                            <button type="button" class="stat-btn" data-stat="con" data-op="-" disabled="">-</button>
+                            <span id="stat-con" class="text-xl font-bold">8</span>
+                            <button type="button" class="stat-btn" data-stat="con" data-op="+">+</button>
+                        </div>
+                        <!-- INT -->
+                        <div class="stat-row">
+                            <label for="stat-int">Intelligence</label>
+                            <button type="button" class="stat-btn" data-stat="int" data-op="-" disabled="">-</button>
+                            <span id="stat-int" class="text-xl font-bold">8</span>
+                            <button type="button" class="stat-btn" data-stat="int" data-op="+">+</button>
+                        </div>
+                        <!-- WIS -->
+                        <div class="stat-row">
+                            <label for="stat-wis">Wisdom</label>
+                            <button type="button" class="stat-btn" data-stat="wis" data-op="-" disabled="">-</button>
+                            <span id="stat-wis" class="text-xl font-bold">8</span>
+                            <button type="button" class="stat-btn" data-stat="wis" data-op="+">+</button>
+                        </div>
+                        <!-- CHA -->
+                        <div class="stat-row">
+                            <label for="stat-cha">Charisma</label>
+                            <button type="button" class="stat-btn" data-stat="cha" data-op="-" disabled="">-</button>
+                            <span id="stat-cha" class="text-xl font-bold">8</span>
+                            <button type="button" class="stat-btn" data-stat="cha" data-op="+">+</button>
+                        </div>
+                    </div>
+                    <!-- End Stat Section -->
+
+                    <!-- New Features Section -->
+                    <h2 class="text-2xl font-semibold mb-4 mt-6">Features &amp; Bonuses</h2>
+                    <div id="features-container" class="bg-gray-700 rounded-md p-4 space-y-2"><div class="text-yellow-300 font-medium">Race ASI: +1 to all stats</div></div>
+                    <!-- End New Features Section -->
+
+
+                    <!-- Appearance (Color) -->
+                    <h2 class="text-2xl font-semibold mb-4 mt-6">Appearance</h2>
+                    <div class="mb-4">
+                        <label for="char-color" class="block text-sm font-medium text-gray-300 mb-1">Token Color</label>
+                        <input type="color" id="char-color" class="w-full h-10 bg-gray-700 border border-gray-600 rounded-md p-1" value="#dd4444">
+                    </div>
+
+                    <!-- Appearance Sliders -->
+                    <div class="mb-4">
+                        <label for="char-height" class="block text-sm font-medium text-gray-300 mb-1">Height (Torso)</label>
+                        <input type="range" id="char-height" min="0.5" max="1.5" value="1" step="0.1" class="w-full">
+                    </div>
+                    <div class="mb-4">
+                        <label for="char-head-size" class="block text-sm font-medium text-gray-300 mb-1">Head Size</label>
+                        <input type="range" id="char-head-size" min="0.5" max="1.5" value="1" step="0.1" class="w-full">
+                    </div>
+                    <div class="mb-4">
+                        <label for="char-arm-length" class="block text-sm font-medium text-gray-300 mb-1">Arm Length</label>
+                        <input type="range" id="char-arm-length" min="0.5" max="1.5" value="1" step="0.1" class="w-full">
+                    </div>
+                    <!-- End Sliders -->
+
+
+                    <!-- Save Button -->
+                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-md transition duration-200 mt-6">
+                        Save Character
+                    </button>
+                </form>
+                
+                <div id="message-box" class="mt-4 text-center p-3 rounded-md hidden"></div>
+
+            </div>
+
+            <!-- Middle Side: Preview (Column 2) -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-semibold mb-4">Preview</h2>
+                <div id="preview-canvas-container">
+                    <canvas id="preview-canvas" width="335" height="300" style="width: 335px; height: 300px; touch-action: none;"></canvas>
+                </div>
+                
+                <!-- Race Info Panel REMOVED From Here -->
+
+                <h3 class="text-xl font-semibold mt-6 mb-3">Saved Characters</h3>
+                <div id="character-list" class="bg-gray-700 rounded-md p-4 h-48 overflow-y-auto">
+                    <!-- Character list will be populated by JS -->
+                    <p class="text-gray-400">No characters saved yet.</p>
+                </div>
+                <button id="clear-chars-btn" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 mt-4" style="display: none;">
+                    Clear All Characters
+                </button>
+            </div>
+
+            <!-- Right Side: Race Info (Column 3) -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
+                <h2 class="text-2xl font-semibold mb-4">Race Information</h2>
+                <!-- --- New Race Info Panel (Moved Here) --- -->
+                <div id="race-info-panel">
+                        <h3>Human Traits</h3>
+                        <p>Humans are the most adaptable and ambitious people among the common races. Whatever drives them, humans are the innovators, the achievers, and the pioneers of the worlds.</p>
+                        <p><strong>Ability Score Increase:</strong> Your ability scores each increase by 1.</p>
+                        <p><strong>Age:</strong> Humans reach adulthood in their late teens and live less than a century.</p>
+                        <p><strong>Size:</strong> Humans vary widely in height and build, from barely 5 feet to well over 6 feet tall. Your size is Medium.</p>
+                        <p><strong>Speed:</strong> Your base walking speed is 30 feet.</p>
+                        <p><strong>Languages:</strong> You can speak, read, and write Common and one extra language of your choice.</p></div>
+                <!-- --- End New Race Info Panel --- -->
+            </div>
+
+        </div>
+    </div>
+    
+  <!-- Load class definitions (exposes window.CLASSES) -->
+  <script src="./classes.js"></script>
+
+  <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  // `classes.js` exposes `CLASSES` as a global on the window when loaded
+  // (the file also uses module.exports for Node). We include it as a
+  // regular script tag (see above) and read from window.CLASSES here.
+
+  const CLASSDATA = window.CLASSES || {};      // fallback to empty object
+  const CLASS_OPTIONS = Object.keys(CLASSDATA)
+  .map(name => `<option value="${name}">${name}</option>`)
+  .join('');
+        let scene, camera, renderer, controls;
+        let previewModel; // Group to hold all body parts
+        let modelMaterial;
+        let eyeMaterial;
+
+        // Body parts
+        let torso, head, leftEye, rightEye, leftArm, rightArm, leftLeg, rightLeg;
+        
+        // Base dimensions for scaling
+        const BASE_TORSO_HEIGHT = 1;
+        const BASE_HEAD_RADIUS = 0.4;
+        const BASE_ARM_LENGTH = 0.8;
+
+        const form = document.getElementById('creator-form');
+        const colorInput = document.getElementById('char-color');
+        const nameInput = document.getElementById('char-name');
+        // --- Modified Class/Race Elements ---
+        const raceInput = document.getElementById('char-race');
+        const classContainer = document.getElementById('class-container');
+        const btnAddMulticlass = document.getElementById('btn-add-multiclass');
+        // --- New Subrace Element ---
+        const subraceContainer = document.getElementById('subrace-selector-container');
+        // --- End Modified ---
+        const charListDiv = document.getElementById('character-list');
+        const clearBtn = document.getElementById('clear-chars-btn');
+        const messageBox = document.getElementById('message-box');
+        const raceInfoPanel = document.getElementById('race-info-panel');
+
+        // Slider inputs
+        const heightSlider = document.getElementById('char-height');
+        const headSlider = document.getElementById('char-head-size');
+        const armSlider = document.getElementById('char-arm-length');
+
+        // --- Stat Point-Buy Logic ---
+        const totalLevelEl = document.getElementById('total-level');
+        const pointsLeftEl = document.getElementById('points-left');
+        const statsContainer = document.getElementById('stats-container');
+        
+        let stats = { str: 8, dex: 8, con: 8, int: 8, wis: 8, cha: 8 };
+        let pointsLeft = 27;
+        
+        const POINT_BUY_COST = {
+            8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9
+        };
+
+        function calculateTotalPoints() {
+            return 27; // Always 27 for Point Buy
+        }
+
+        function calculateUsedPoints() {
+            let used = 0;
+            for (const stat in stats) {
+                used += POINT_BUY_COST[stats[stat]];
+            }
+            return used;
+        }
+
+        function updatePointsUI() {
+            const totalPoints = calculateTotalPoints();
+            const usedPoints = calculateUsedPoints();
+            pointsLeft = totalPoints - usedPoints;
+            pointsLeftEl.textContent = pointsLeft;
+
+            document.querySelectorAll('.stat-btn').forEach(btn => {
+                const op = btn.dataset.op;
+                const stat = btn.dataset.stat;
+                const currentVal = stats[stat];
+
+                if (op === '+') {
+                    if (currentVal >= 15) {
+                        btn.disabled = true; // Max
+                    } else {
+                        const nextVal = currentVal + 1;
+                        const cost = POINT_BUY_COST[nextVal] - POINT_BUY_COST[currentVal];
+                        btn.disabled = cost > pointsLeft;
+                    }
+                } else if (op === '-') {
+                    btn.disabled = currentVal <= 8; // Min
+                }
+            });
+        }
+
+        function handleStatChange(stat, op) {
+            const currentVal = stats[stat];
+            if (op === '+' && currentVal < 15) {
+                stats[stat]++;
+            } else if (op === '-' && currentVal > 8) {
+                stats[stat]--;
+            }
+            document.getElementById(`stat-${stat}`).textContent = stats[stat];
+            updatePointsUI();
+        }
+        // --- End Stat Logic ---
+
+
+        
+        // --- New Refactored Race Info Data ---
+        const RACE_DATA = {
+            'Human': {
+                base: {
+                    asi: ["+1 to all stats"],
+                    htmlContent: `
+                        <h3>Human Traits</h3>
+                        <p>Humans are the most adaptable and ambitious people among the common races. Whatever drives them, humans are the innovators, the achievers, and the pioneers of the worlds.</p>
+                        <p><strong>Ability Score Increase:</strong> Your ability scores each increase by 1.</p>
+                        <p><strong>Age:</strong> Humans reach adulthood in their late teens and live less than a century.</p>
+                        <p><strong>Size:</strong> Humans vary widely in height and build, from barely 5 feet to well over 6 feet tall. Your size is Medium.</p>
+                        <p><strong>Speed:</strong> Your base walking speed is 30 feet.</p>
+                        <p><strong>Languages:</strong> You can speak, read, and write Common and one extra language of your choice.</p>`
+                }
+            },
+            'Elf': {
+                base: {
+                    asi: ["DEX +2"],
+                    htmlContent: `
+                        <h3>Elf Traits</h3>
+                        <p>Elves are a magical people of otherworldly grace, living in the world but not entirely part of it.</p>
+                        <p><strong>Ability Score Increase:</strong> Your Dexterity score increases by 2.</p>
+                        <p><strong>Age:</strong> Although elves reach physical maturity at about the same age as humans, the elven understanding of adulthood goes beyond physical growth to encompass worldly experience. An elf typically claims adulthood and an adult name around the age of 100 and can live to be 750 years old.</p>
+                        <p><strong>Size:</strong> Elves range from under 5 to over 6 feet tall and have slender builds. Your size is Medium.</p>
+                        <p><strong>Speed:</strong> Your base walking speed is 30 feet.</p>
+                        <p><strong>Darkvision:</strong> You have superior vision in dark and dim conditions. You can see in dim light within 60 feet of you as if it were bright light, and in darkness as if it were dim light.</p>
+                        <p><strong>Keen Senses:</strong> You have proficiency in the Perception skill.</p>
+                        <p><strong>Fey Ancestry:</strong> You have advantage on saving throws against being charmed, and magic can’t put you to sleep.</p>
+                        <p><strong>Trance:</strong> Elves don’t need to sleep. Instead, they meditate deeply, remaining semiconscious, for 4 hours a day.</p>`
+                },
+                subraces: {
+                    'High Elf': {
+                        asi: ["INT +1"],
+                        htmlContent: `
+                            <h4>Subrace: High Elf</h4>
+                            <p><strong>Ability Score Increase:</strong> Your Intelligence score increases by 1.</p>
+                            <p><strong>Elf Weapon Training:</strong> You have proficiency with the longsword, shortsword, shortbow, and longbow.</p>
+                            <p><strong>Cantrip:</strong> You know one cantrip of your choice from the wizard spell list. Intelligence is your spellcasting ability for it.</p>`
+                    },
+                    'Wood Elf': {
+                        asi: ["WIS +1"],
+                        htmlContent: `
+                            <h4>Subrace: Wood Elf</h4>
+                            <p><strong>Ability Score Increase:</strong> Your Wisdom score increases by 1.</p>
+                            <p><strong>Elf Weapon Training:</strong> You have proficiency with the longsword, shortsword, shortbow, and longbow.</p>
+                            <p><strong>Fleet of Foot:</strong> Your base walking speed increases to 35 feet.</p>
+                            <p><strong>Mask of the Wild:</strong> You can attempt to hide even when you are only lightly obscured by foliage, heavy rain, falling snow, mist, and other natural phenomena.</p>`
+                    }
+                }
+            },
+            'Dwarf': {
+                base: {
+                    asi: ["CON +2"],
+                    htmlContent: `
+                        <h3>Dwarf Traits</h3>
+                        <p>Bold and hardy, dwarves are known as skilled warriors, miners, and workers of stone and metal.</p>
+                        <p><strong>Ability Score Increase:</strong> Your Constitution score increases by 2.</p>
+                        <p><strong>Age:</strong> Dwarves mature at the same rate as humans, but they’re considered young until they reach the age of 50. On average, they live about 350 years.</p>
+                        <p><strong>Size:</strong> Dwarves stand between 4 and 5 feet tall and average about 150 pounds. Your size is Medium.</p>
+                        <p><strong>Speed:</strong> Your base walking speed is 25 feet. Your speed is not reduced by wearing heavy armor.</p>
+                        <p><strong>Darkvision:</strong> Accustomed to life underground, you have superior vision in dark and dim conditions. You can see in dim light within 60 feet of you as if it were bright light, and in darkness as if it were dim light.</p>
+                        <p><strong>Dwarven Resilience:</strong> You have advantage on saving throws against poison, and you have resistance against poison damage.</p>
+                        <p><strong>Dwarven Combat Training:</strong> You have proficiency with the battleaxe, handaxe, light hammer, and warhammer.</p>`
+                },
+                subraces: {
+                    'Hill Dwarf': {
+                        asi: ["WIS +1"],
+                        htmlContent: `
+                            <h4>Subrace: Hill Dwarf</h4>
+                            <p><strong>Ability Score Increase:</strong> Your Wisdom score increases by 1.</p>
+                            <p><strong>Dwarven Toughness:</strong> Your hit point maximum increases by 1, and it increases by 1 every time you gain a level.</p>`
+                    },
+                    'Mountain Dwarf': {
+                        asi: ["STR +2"],
+                        htmlContent: `
+                            <h4>Subrace: Mountain Dwarf</h4>
+                            <p><strong>Ability Score Increase:</strong> Your Strength score increases by 2.</p>
+                            <p><strong>Dwarven Armor Training:</strong> You have proficiency with light and medium armor.</p>`
+                    }
+                }
+            },
+            'Halfling': {
+                base: {
+                    asi: ["DEX +2"],
+                    htmlContent: `
+                        <h3>Halfling Traits</h3>
+                        <p>Your halfling character has a number of traits in common with all other halflings.</p>
+                        <p><strong>Ability Score Increase:</strong> Your Dexterity score increases by 2.</p>
+                        <p><strong>Age:</strong> A halfling reaches adulthood at the age of 20 and generally lives into the middle of his or her second century.</p>
+                        <p><strong>Size:</strong> Halflings average about 3 feet tall and weigh about 40 pounds. Your size is Small.</p>
+                        <p><strong>Speed:</strong> Your base walking speed is 25 feet.</p>
+                        <p><strong>Lucky:</strong> When you roll a 1 on the d20 for an attack roll, ability check, or saving throw, you can reroll the die and must use the new roll.</p>
+                        <p><strong>Brave:</strong> You have advantage on saving throws against being frightened.</p>
+                        <p><strong>Halfling Nimbleness:</strong> You can move through the space of any creature that is of a size larger than yours.</p>`
+                },
+                subraces: {
+                    'Lightfoot': {
+                        asi: ["CHA +1"],
+                        htmlContent: `
+                            <h4>Subrace: Lightfoot</h4>
+                            <p><strong>Ability Score Increase:</strong> Your Charisma score increases by 1.</p>
+                            <p><strong>Naturally Stealthy:</strong> You can attempt to hide even when you are obscured only by a creature that is at least one size larger than you.</p>`
+                    },
+                    'Stout': {
+                        asi: ["CON +1"],
+                        htmlContent: `
+                            <h4>Subrace: Stout</h4>
+                            <p><strong>Ability Score Increase:</strong> Your Constitution score increases by 1.</p>
+                            <p><strong>Stout Resilience:</strong> You have advantage on saving throws against poison, and you have resistance against poison damage.</p>`
+                    }
+                }
+            }
+        };
+        // --- End New Race Info Data ---
+
+
+        // --- Modified Multiclass Logic ---
+        let classCount = 0; // Start at 0
+        const MAX_CLASSES = 3;
+
+        function createClassEntry(isFirst = false) {
+            if (classCount >= MAX_CLASSES) return;
+
+            classCount++;
+            const entryDiv = document.createElement('div');
+            entryDiv.className = 'class-entry';
+
+            const newSelect = document.createElement('select');
+            newSelect.className = 'class-name-select';
+            newSelect.innerHTML = CLASS_OPTIONS;
+
+            const newLevelInput = document.createElement('input');
+            newLevelInput.type = 'number';
+            newLevelInput.className = 'class-level-input';
+            newLevelInput.value = 1;
+            newLevelInput.min = 1;
+            newLevelInput.max = 20;
+
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'btn-remove-class';
+            removeBtn.textContent = 'X';
+            removeBtn.onclick = () => {
+                classContainer.removeChild(entryDiv);
+                classCount--;
+                btnAddMulticlass.style.display = 'block';
+                updateCharacterSheet(); // Recalculate everything
+            };
+            
+            // First class cannot be removed
+            if (isFirst) {
+                removeBtn.style.display = 'none';
+            }
+
+            entryDiv.appendChild(newSelect);
+            entryDiv.appendChild(newLevelInput);
+            entryDiv.appendChild(removeBtn);
+            classContainer.appendChild(entryDiv);
+
+            if (classCount >= MAX_CLASSES) {
+                btnAddMulticlass.style.display = 'none';
+            }
+            
+            // Add listeners to new elements
+            newSelect.addEventListener('input', updateCharacterSheet);
+            newLevelInput.addEventListener('input', updateCharacterSheet);
+        }
+
+        // --- New Character Sheet Update Functions ---
+        function updateCharacterSheet() {
+            calculateTotalLevel();
+            calculateFeatures(); // This will now also update racial features
+        }
+
+        function calculateTotalLevel() {
+            let totalLevel = 0;
+            document.querySelectorAll('.class-level-input').forEach(input => {
+                totalLevel += parseInt(input.value) || 0;
+            });
+            totalLevelEl.textContent = totalLevel;
+            return totalLevel;
+        }
+
+function calculateFeatures() {
+  const featuresContainer = document.getElementById('features-container');
+  featuresContainer.innerHTML = '';
+
+  let totalASIs = 0;
+  const classEntries = document.querySelectorAll('.class-entry');
+
+  // racial ASI code stays here…
+
+  if (classEntries.length === 0 && !raceData) {
+    featuresContainer.innerHTML =
+      '<p class="text-gray-400">Add a class to see features.</p>';
+    return;
+  }
+
+  classEntries.forEach(entry => {
+    const className = entry.querySelector('.class-name-select').value;
+    const classLevel = parseInt(
+      entry.querySelector('.class-level-input').value,
+      10
+    ) || 1;
+
+    const classCfg = CLASSDATA[className];   // from classes.js
+    const classRef = classCfg && classCfg.ref;  // or just use classCfg if you put levels there
+
+    if (!classRef || !classRef.levels) return;
+
+    // 2.1. Level‑based features from CLASSES
+    for (let lvl = 1; lvl <= classLevel; lvl++) {
+      const lvlInfo = classRef.levels[lvl];
+      if (!lvlInfo || !Array.isArray(lvlInfo.features)) continue;
+
+      lvlInfo.features.forEach(featName => {
+        const featEl = document.createElement('div');
+        featEl.className = 'text-blue-300 text-sm';
+
+        const detail =
+          classRef.featureDetails && classRef.featureDetails[featName]
+            ? classRef.featureDetails[featName]
+            : '';
+
+        featEl.textContent = `${className} ${lvl}: ${featName}${detail ? ' – ' + detail : ''}`;
+        featuresContainer.appendChild(featEl);
+      });
+    }
+
+    // 2.2. ASI unlocks from CLASSES
+    if (Array.isArray(classCfg?.asiLevels)) {
+      const gained = classCfg.asiLevels.filter(l => l <= classLevel).length;
+      totalASIs += gained;
+    }
+  });
+
+  if (totalASIs > 0) {
+    const asiEl = document.createElement('div');
+    asiEl.className = 'text-green-300 font-medium';
+    asiEl.textContent = `Class ASI Unlocks: ${totalASIs}`;
+    featuresContainer.appendChild(asiEl);
+  }
+}
+
+
+        // --- End Character Sheet Update Functions ---
+
+        // --- Modified Race Info Update Function ---
+        function updateRaceSelection() {
+            const selectedRaceName = raceInput.value;
+            const raceData = RACE_DATA[selectedRaceName];
+            
+            subraceContainer.innerHTML = ''; // Clear old subrace selector
+
+            if (raceData && raceData.subraces) {
+                // Create label
+                const label = document.createElement('label');
+                label.htmlFor = 'char-subrace';
+                label.className = 'block text-sm font-medium text-gray-300 mb-1';
+                label.textContent = 'Subrace';
+                
+                // Create select
+                const subraceSelect = document.createElement('select');
+                subraceSelect.id = 'char-subrace';
+                // (styling is applied via CSS rule)
+
+                // Populate options
+                const subraceNames = Object.keys(raceData.subraces);
+                subraceNames.forEach(subraceName => {
+                    const option = document.createElement('option');
+                    option.value = subraceName;
+                    option.textContent = subraceName;
+                    subraceSelect.appendChild(option);
+                });
+
+                // Add listener to *new* select
+                subraceSelect.addEventListener('input', updateRaceInfoPanel);
+                subraceSelect.addEventListener('input', updateCharacterSheet); // Also update features
+                
+                subraceContainer.appendChild(label);
+                subraceContainer.appendChild(subraceSelect);
+                
+                // Show container
+                subraceContainer.classList.remove('hidden');
+            } else {
+                // No subraces, hide container
+                subraceContainer.classList.add('hidden');
+            }
+            
+            // ALWAYS update the info panel and features
+            updateRaceInfoPanel();
+            updateCharacterSheet();
+        }
+        
+        function updateRaceInfoPanel() {
+            const selectedRaceName = raceInput.value;
+            const raceData = RACE_DATA[selectedRaceName];
+            
+            const subraceSelect = document.getElementById('char-subrace');
+            const selectedSubraceName = subraceSelect ? subraceSelect.value : null;
+            
+            let html = '';
+
+            if (raceData) {
+                // Add base traits
+                html += raceData.base.htmlContent;
+                
+                // Add subrace traits if a subrace is selected
+                if (selectedSubraceName && raceData.subraces[selectedSubraceName]) {
+                    html += raceData.subraces[selectedSubraceName].htmlContent;
+                }
+                
+                raceInfoPanel.innerHTML = html;
+            } else {
+                // Fallback
+                raceInfoPanel.innerHTML = '<p class="text-gray-400">Select a race to see details.</p>';
+            }
+        }
+        // --- End New Race Info Function ---
+clearBtn.style.display = 'none';
+
+
+
+        function showMessage(msg, isError = false) {
+            messageBox.textContent = msg;
+            messageBox.classList.remove('hidden', isError ? 'text-green-300' : 'text-red-300');
+            messageBox.classList.add(isError ? 'text-red-300' : 'text-green-300');
+            
+            setTimeout(() => {
+                messageBox.classList.add('hidden');
+            }, 3000);
+        }
+        
+        function initPreview3D() {
+            const container = document.getElementById('preview-canvas-container');
+            const canvas = document.getElementById('preview-canvas');
+            
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x4a4a4a);
+            
+            const aspect = container.clientWidth / container.clientHeight;
+            camera = new THREE.PerspectiveCamera(75, aspect, 0.1, 1000);
+            camera.position.set(0, 1, 2.5);
+            camera.lookAt(0, 0.5, 0); 
+
+            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 0.5, 0); 
+            controls.enableDamping = true;
+            controls.enablePan = false;
+            controls.minDistance = 1.5;
+            controls.maxDistance = 5;
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(2, 5, 3);
+            scene.add(directionalLight);
+
+            const groundGeo = new THREE.PlaneGeometry(10, 10);
+            const groundMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
+            const ground = new THREE.Mesh(groundGeo, groundMat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = -0.5;
+            scene.add(ground);
+
+            modelMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
+            eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+
+            createBody();
+            animatePreview();
+        }
+        
+        function createBody() {
+            previewModel = new THREE.Group();
+            
+            const torsoGeo = new THREE.CylinderGeometry(0.3, 0.3, BASE_TORSO_HEIGHT, 32);
+            torso = new THREE.Mesh(torsoGeo, modelMaterial);
+            torso.position.y = 0; 
+            previewModel.add(torso);
+
+            const headGeo = new THREE.SphereGeometry(BASE_HEAD_RADIUS, 32, 32);
+            head = new THREE.Mesh(headGeo, modelMaterial);
+            head.position.y = (BASE_TORSO_HEIGHT / 2) + BASE_HEAD_RADIUS;
+            previewModel.add(head);
+
+            const eyeGeo = new THREE.SphereGeometry(0.05, 16, 16);
+            leftEye = new THREE.Mesh(eyeGeo, eyeMaterial);
+            leftEye.position.set(-0.15, head.position.y + 0.1, BASE_HEAD_RADIUS - 0.05);
+            previewModel.add(leftEye);
+            
+            rightEye = new THREE.Mesh(eyeGeo, eyeMaterial);
+            rightEye.position.set(0.15, head.position.y + 0.1, BASE_HEAD_RADIUS - 0.05);
+            previewModel.add(rightEye);
+            
+            const armGeo = new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16);
+            leftArm = new THREE.Mesh(armGeo, modelMaterial);
+            leftArm.position.set(-0.4, 0, 0);
+            previewModel.add(leftArm);
+            
+            rightArm = new THREE.Mesh(armGeo, modelMaterial);
+            rightArm.position.set(0.4, 0, 0);
+            previewModel.add(rightArm);
+            
+            const legGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16); // Fixed length
+            leftLeg = new THREE.Mesh(legGeo, modelMaterial);
+            leftLeg.position.set(-0.15, -0.5, 0);
+            previewModel.add(leftLeg);
+            
+            rightLeg = new THREE.Mesh(legGeo, modelMaterial);
+            rightLeg.position.set(0.15, -0.5, 0);
+            previewModel.add(rightLeg);
+
+            scene.add(previewModel);
+            previewModel.position.y = 0.5;
+        }
+
+        function updateModelAppearance() {
+            const color = colorInput.value;
+            const heightScale = parseFloat(heightSlider.value);
+            const headScale = parseFloat(headSlider.value);
+            const armScale = parseFloat(armSlider.value);
+
+            modelMaterial.color.set(color);
+
+            torso.scale.y = heightScale;
+            torso.position.y = (BASE_TORSO_HEIGHT * heightScale) / 2 - 0.5; 
+
+            head.scale.set(headScale, headScale, headScale);
+            const scaledHeadRadius = BASE_HEAD_RADIUS * headScale;
+            head.position.y = (BASE_TORSO_HEIGHT * heightScale) + scaledHeadRadius - 0.5;
+
+            leftEye.position.y = head.position.y + (0.1 * headScale);
+            rightEye.position.y = head.position.y + (0.1 * headScale);
+            leftEye.position.z = (scaledHeadRadius - 0.05);
+            rightEye.position.z = (scaledHeadRadius - 0.05);
+            
+            leftArm.scale.y = armScale;
+            rightArm.scale.y = armScale;
+            leftArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
+            rightArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
+            
+            leftLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
+            rightLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
+        }
+
+        function animatePreview() {
+            requestAnimationFrame(animatePreview);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        
+        function onPreviewResize() {
+            const container = document.getElementById('preview-canvas-container');
+            if (!container) return;
+            
+            const width = container.clientWidth;
+            const height = 300; // Fixed height
+            
+            camera.aspect = width / height;
+            camera.updateProjectionMatrix();
+            renderer.setSize(width, height);
+        }
+
+        // --- Event Listeners ---
+        window.addEventListener('resize', onPreviewResize);
+        
+        // --- Modified Listener for Race Info ---
+        raceInput.addEventListener('input', updateRaceSelection);
+        // --- End Modified ---
+
+        colorInput.addEventListener('input', updateModelAppearance);
+        heightSlider.addEventListener('input', updateModelAppearance);
+        headSlider.addEventListener('input', updateModelAppearance);
+        armSlider.addEventListener('input', updateModelAppearance);
+        
+        statsContainer.addEventListener('click', (e) => {
+            if (e.target.classList.contains('stat-btn')) {
+                const { stat, op } = e.target.dataset;
+                handleStatChange(stat, op);
+            }
+        });
+        
+        // Listener for adding classes
+        btnAddMulticlass.addEventListener('click', () => createClassEntry(false));
+
+
+
+// Save character - FINAL VERSION
+// Save character - FINAL VERSION
+form.addEventListener('submit', (e) => {
+  e.preventDefault();
+  console.log('SUBMIT handler fired');
+
+  if (!window.socket || !window.currentUsername) {
+    showMessage('Not connected to server. Login first.', true);
+    return;
+  }
+
+  const charName = nameInput.value.trim();
+  if (!charName) {
+    showMessage('Please enter a character name.', true);
+    return;
+  }
+
+  if (classCount === 0) {
+    showMessage('Please add at least one class.', true);
+    return;
+  }
+
+  // Build classes array from actual UI rows
+  const classEntries = document.querySelectorAll('#class-container .class-entry');
+  const classes = Array.from(classEntries).map(entry => {
+    const nameEl  = entry.querySelector('.class-name-select');
+    const levelEl = entry.querySelector('.class-level-input');
+
+    const name  = nameEl  ? nameEl.value : 'Unknown';
+    const level = levelEl ? (parseInt(levelEl.value, 10) || 1) : 1;
+
+    return { name, level };
+  });
+
+  const subraceSelect   = document.getElementById('char-subrace');
+  const selectedSubrace = subraceSelect ? subraceSelect.value : null;
+
+  const newChar = {
+    id: crypto.randomUUID(),
+    name: charName,
+    classes: classes,
+    race: raceInput.value,
+    subrace: selectedSubrace,
+    color: colorInput.value,
+    stats: { ...stats },
+    appearance: {
+      height: parseFloat(heightSlider.value),
+      headSize: parseFloat(headSlider.value),
+      armLength: parseFloat(armSlider.value)
+    },
+    owner: window.currentUsername
+  };
+
+  console.log('EMITTING save-character', newChar);
+
+  window.socket.emit('save-character', {
+    charData: newChar,
+    username: window.currentUsername
+  });
+});
+
+
+        // Delete character
+        charListDiv.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') {
+                const index = e.target.dataset.index;
+                deleteCharacter(index);
+            }
+        });
+
+        // Clear all characters
+ clearBtn.style.display = 'none';
+
+
+        // --- Init ---
+        try {
+            initPreview3D();
+
+            updateModelAppearance(); 
+            updatePointsUI(); 
+            onPreviewResize(); 
+            
+            createClassEntry(true); 
+            // --- Modified Init Call ---
+            updateRaceSelection(); // This now calls updateCharacterSheet and updateRaceInfoPanel internally
+            // --- End Modified ---
+            
+        } catch (e) {
+            console.error('Fatal Error on Init:', e);
+            messageBox.textContent = 'A fatal error occurred. Please refresh.';
+            messageBox.classList.remove('hidden');
+            messageBox.classList.add('text-red-300');
+        }
+
+    </script>
+    <!-- Socket.IO Client -->
+<script src="/socket.io/socket.io.js"></script>
+
+<script>
+  // Socket.IO Connection
+    // Fallback showMessage so socket code never crashes
+  function showMessage(msg, isError = false) {
+    const box = document.getElementById('message-box');
+    if (!box) {
+      console.log(isError ? '[ERROR]' : '[INFO]', msg);
+      return;
+    }
+    box.textContent = msg;
+    box.classList.remove('hidden');
+    box.classList.toggle('text-red-300', !!isError);
+    box.classList.toggle('text-green-300', !isError);
+    setTimeout(() => box.classList.add('hidden'), 3000);
+  }
+
+  // Socket.IO Connection
+  window.socket = null;
+  window.currentUsername = null;
+
+
+  // Session management
+  function getStoredUsername() {
+    return sessionStorage.getItem('vtt_username');
+  }
+
+  function setStoredUsername(username) {
+    sessionStorage.setItem('vtt_username', username);
+  }
+
+  function clearStoredUsername() {
+    sessionStorage.removeItem('vtt_username');
+  }
+
+  // Login handling
+  const loginOverlay = document.getElementById('login-overlay');
+  const usernameInput = document.getElementById('username-input');
+  const loginBtn = document.getElementById('login-btn');
+  const loginError = document.getElementById('login-error');
+
+  function showLoginError(message) {
+    loginError.textContent = message;
+    loginError.classList.remove('hidden');
+    setTimeout(() => {
+      loginError.classList.add('hidden');
+    }, 3000);
+  }
+
+  function handleLogin() {
+    const username = usernameInput.value.trim();
+    
+    if (!username || username.length < 2) {
+      showLoginError('Username must be at least 2 characters');
+      return;
+    }
+
+    loginBtn.disabled = true;
+    loginBtn.textContent = 'Connecting...';
+
+    // Connect to socket.io
+     window.socket = io();
+
+  window.socket.on('connect', () => {
+    console.log('Connected to server');
+    window.socket.emit('login', username);
+  });
+
+  window.socket.on('login-success', (userData) => {
+    console.log('Login successful:', userData);
+    window.currentUsername = userData.username;
+    setStoredUsername(window.currentUsername);
+
+    loginOverlay.classList.add('hidden');
+    showMessage(`Welcome, ${window.currentUsername}!`, false);
+  });
+
+  window.socket.on('load-user-characters', (characters) => {
+    console.log('Received characters:', characters);
+    displayCharacters(characters);
+  });
+
+  window.socket.on('character-saved-success', (charData) => {
+    console.log('Character saved:', charData);
+    showMessage('Character saved successfully!', false);
+  });
+
+  window.socket.on('character-deleted', (charId) => {
+    console.log('Character deleted:', charId);
+    window.socket.emit('get-characters');
+  });
+
+  window.socket.on('error', (message) => {
+    console.error('Server error:', message);
+    showLoginError(message);
+    loginBtn.disabled = false;
+    loginBtn.textContent = 'Login';
+  });
+
+  window.socket.on('disconnect', () => {
+    console.log('Disconnected from server');
+    showMessage('Disconnected from server', true);
+    });
+  }
+
+  // Event listeners
+  loginBtn.addEventListener('click', handleLogin);
+  usernameInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') handleLogin();
+  });
+
+  // Auto-login if session exists
+  window.addEventListener('DOMContentLoaded', () => {
+    const storedUsername = getStoredUsername();
+    if (storedUsername) {
+      usernameInput.value = storedUsername;
+      handleLogin();
+    }
+  });
+
+
+
+  // Display characters function
+  function displayCharacters(characters) {
+    const charListDiv = document.getElementById('character-list');
+    if (!charListDiv) return;
+
+    charListDiv.innerHTML = '';
+
+    if (characters.length === 0) {
+      charListDiv.innerHTML = '<p class="text-gray-400">No characters saved yet.</p>';
+      return;
+    }
+
+    characters.forEach((char, index) => {
+      const charEl = document.createElement('div');
+      charEl.className = 'p-2 border-b border-gray-600 flex justify-between items-center';
+
+      let totalLevel = 0;
+      let classDisplay = 'N/A';
+      if (Array.isArray(char.classes) && char.classes.length > 0) {
+        classDisplay = char.classes.map(c => {
+          totalLevel += c.level;
+          return `${c.name} ${c.level}`;
+        }).join(' / ');
+      }
+
+      const raceDisplay = char.subrace ? `${char.subrace}` : char.race;
+const ownerBadge = char.owner === window.currentUsername ? 
+  '' : 
+  `<span class="text-xs text-yellow-400 ml-2">(${char.owner})</span>`;
+
+
+      charEl.innerHTML = `
+        <div>
+          <span class="font-semibold" style="color: ${char.color}">${char.name}</span>${ownerBadge}
+          <span class="text-sm text-gray-400"> - Lvl ${totalLevel} ${raceDisplay} - ${classDisplay}</span>
+        </div>
+        <button data-char-id="${char.id}" class="delete-char-btn text-red-400 hover:text-red-300 text-xs font-medium">X</button>
+      `;
+
+      charListDiv.appendChild(charEl);
+    });
+
+    // Add delete event listeners
+    document.querySelectorAll('.delete-char-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const charId = e.target.dataset.charId;
+        if (confirm('Delete this character?')) {
+          window.socket.emit('delete-character', charId);
+        }
+      });
+    });
+  }
+</script>
+
+
+</body>
+</html>
