@@ -231,7 +231,40 @@
             transform: translate(10px, -35px); /* Position above and to the right of cursor */
             white-space: nowrap;
         }
-        
+
+        /* --- Layer navigation breadcrumb (top-center) --- */
+        #layer-nav {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 8px 14px;
+            border-radius: 10px;
+            border: 1px solid #444;
+            z-index: 10;
+            color: #f0f0f0;
+            font-size: 14px;
+            max-width: 70vw;
+        }
+        #btn-up {
+            background-color: #555;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            padding: 6px 12px;
+            font-weight: bold;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: background-color 0.2s;
+        }
+        #btn-up:hover { background-color: #777; }
+        #btn-up:disabled { opacity: 0.4; cursor: not-allowed; }
+        #breadcrumb { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
     </style>
 
     <!-- Import Map for Three.js -->
@@ -313,6 +346,12 @@
         <button id="btn-tool-3" class="tool-button" title="Tool 3">T3</button>
     </div>
     <!-- --- End Tool Menu --- -->
+
+    <!-- --- Layer navigation (breadcrumb, top-center) --- -->
+    <div id="layer-nav">
+        <button id="btn-up" title="Up a level">▲ Up</button>
+        <span id="breadcrumb">World</span>
+    </div>
 
     <!-- --- Object Menu HTML (Right) --- -->
     <div id="object-menu">
@@ -403,6 +442,165 @@
         });
         const characterBaseMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
         const characterEyeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
+
+        // ===== Three-layer map (World -> Region -> Tactical) =====
+        // A map is identified by a path key:
+        //   "world"            depth 0  -> hex grid, 90 km per hex
+        //   "world/q,r"        depth 1  -> hex grid, 9 km per hex
+        //   "world/q,r/q,r"    depth 2  -> square grid, 5 ft per cell (tactical)
+        let currentMapKey = 'world';
+        let hexGridGroup = null;
+
+        const SQRT3 = Math.sqrt(3);
+        const HEX_SIZE = 2;            // world units (circumradius) used to draw hexes
+        const HEX_MAP_RADIUS = 6;      // hex field radius, in hexes
+        const KM_PER_HEX = { 0: 90, 1: 9 }; // depth -> km label per hex
+
+        const hexLineMaterial = new THREE.LineBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.5 });
+
+        function mapDepth(key) { return key.split('/').length - 1; }      // 0 world, 1 region, 2 tactical
+        function isHexLayer(depth = mapDepth(currentMapKey)) { return depth < 2; }
+
+        // --- Pointy-top axial hex math on the XZ ground plane ---
+        function hexToWorld(q, r) {
+            return { x: HEX_SIZE * SQRT3 * (q + r / 2), z: HEX_SIZE * 1.5 * r };
+        }
+        function roundHex(qf, rf) { // cube rounding
+            let xf = qf, zf = rf, yf = -qf - rf;
+            let rx = Math.round(xf), ry = Math.round(yf), rz = Math.round(zf);
+            const dx = Math.abs(rx - xf), dy = Math.abs(ry - yf), dz = Math.abs(rz - zf);
+            if (dx > dy && dx > dz) rx = -ry - rz;
+            else if (dy > dz) ry = -rx - rz;
+            else rz = -rx - ry;
+            return { q: rx, r: rz };
+        }
+        function worldToHex(x, z) {
+            return roundHex((SQRT3 / 3 * x - 1 / 3 * z) / HEX_SIZE, (2 / 3 * z) / HEX_SIZE);
+        }
+        function hexDistance(a, b) {
+            return (Math.abs(a.q - b.q) + Math.abs(a.q + a.r - b.q - b.r) + Math.abs(a.r - b.r)) / 2;
+        }
+        function hexInField(q, r) {
+            return Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) <= HEX_MAP_RADIUS;
+        }
+        function hexCorner(cx, cz, i) {
+            const ang = Math.PI / 180 * (60 * i - 30); // pointy-top corners
+            return new THREE.Vector3(cx + HEX_SIZE * Math.cos(ang), 0.02, cz + HEX_SIZE * Math.sin(ang));
+        }
+        function buildHexGrid() {
+            const positions = [];
+            for (let q = -HEX_MAP_RADIUS; q <= HEX_MAP_RADIUS; q++) {
+                for (let r = -HEX_MAP_RADIUS; r <= HEX_MAP_RADIUS; r++) {
+                    if (!hexInField(q, r)) continue;
+                    const { x, z } = hexToWorld(q, r);
+                    const c = [];
+                    for (let i = 0; i < 6; i++) c.push(hexCorner(x, z, i));
+                    for (let i = 0; i < 6; i++) {
+                        const a = c[i], b = c[(i + 1) % 6];
+                        positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
+                    }
+                }
+            }
+            const geom = new THREE.BufferGeometry();
+            geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            const group = new THREE.Group();
+            group.add(new THREE.LineSegments(geom, hexLineMaterial));
+            return group;
+        }
+        function showLayerGrid(depth) {
+            if (grid) grid.visible = (depth === 2);     // square grid only on tactical
+            if (hexGridGroup) {
+                scene.remove(hexGridGroup);
+                hexGridGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+                hexGridGroup = null;
+            }
+            if (depth < 2) {
+                hexGridGroup = buildHexGrid();
+                scene.add(hexGridGroup);
+            }
+        }
+
+        // --- Layer-aware snapping & measurement ---
+        function snapToCurrentGrid(point) {
+            if (isHexLayer()) {
+                const h = worldToHex(point.x, point.z);
+                const c = hexToWorld(h.q, h.r);
+                return new THREE.Vector3(c.x, point.y, c.z);
+            }
+            return snapToGrid(point);
+        }
+        function getCurrentRulerSnap(point) {
+            if (isHexLayer()) {
+                const h = worldToHex(point.x, point.z);
+                const c = hexToWorld(h.q, h.r);
+                return new THREE.Vector3(c.x, 0.02, c.z);
+            }
+            return getRulerSnapPosition(point);
+        }
+        function measurePath(points) {
+            // hex layers: sum of hex steps * km per hex
+            const km = KM_PER_HEX[mapDepth(currentMapKey)] || 0;
+            let steps = 0;
+            for (let i = 0; i < points.length - 1; i++) {
+                steps += hexDistance(worldToHex(points[i].x, points[i].z), worldToHex(points[i + 1].x, points[i + 1].z));
+            }
+            return { value: steps * km, unit: 'km' };
+        }
+
+        // --- Drill-down navigation ---
+        function enterMap(key) {
+            currentMapKey = key;
+            if (selectedObject) deselectObject();
+            clearInProgressRuler();
+            // reset tool state locally (no server side effects)
+            selectedObjectType = null;
+            selectedObjectData = null;
+            currentTool = null;
+            for (const k in toolMenuButtons) toolMenuButtons[k].classList.remove('active');
+            document.querySelectorAll('#object-menu .menu-button').forEach(b => b.classList.remove('active'));
+            if (rulerTooltip) rulerTooltip.style.display = 'none';
+            // clear local scene; server repopulates via 'map-state' after join-map
+            objects.forEach(o => scene.remove(o));
+            objects = [];
+            rulerSegments.forEach(s => { scene.remove(s); if (s.geometry) s.geometry.dispose(); });
+            rulerSegments = [];
+            showLayerGrid(mapDepth(key));
+            updateBreadcrumb();
+            if (socket) socket.emit('join-map', { key });
+        }
+        function goUp() {
+            if (mapDepth(currentMapKey) <= 0) return;
+            enterMap(currentMapKey.split('/').slice(0, -1).join('/'));
+        }
+        function descendInto(q, r) {
+            if (mapDepth(currentMapKey) >= 2) return; // tactical is the leaf
+            if (!hexInField(q, r)) return;
+            enterMap(`${currentMapKey}/${q},${r}`);
+        }
+        function updateBreadcrumb() {
+            const bc = document.getElementById('breadcrumb');
+            const up = document.getElementById('btn-up');
+            if (!bc) return;
+            const segs = currentMapKey.split('/');
+            const labels = ['World'];
+            for (let i = 1; i < segs.length; i++) labels.push((i === 1 ? 'Region' : 'Tactical') + ' (' + segs[i] + ')');
+            const depth = mapDepth(currentMapKey);
+            const scale = depth === 0 ? 'each hex = 90 km' : depth === 1 ? 'each hex = 9 km' : 'each square = 5 ft';
+            bc.textContent = labels.join('  ›  ') + '   —   ' + scale;
+            if (up) up.disabled = (depth === 0);
+        }
+        function onDoubleClick(event) {
+            if (mapDepth(currentMapKey) >= 2) return;
+            if (currentTool === 'add' || currentTool === 'move' || currentTool === 'ruler') return;
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const hit = raycaster.intersectObject(plane)[0];
+            if (!hit) return;
+            const h = worldToHex(hit.point.x, hit.point.z);
+            descendInto(h.q, h.r);
+        }
 
         // --- NEW: Socket.io Init Function ---
         function initSocket() {
@@ -549,8 +747,11 @@
             grid = new THREE.GridHelper(gridSize, gridDivisions, 0x888888, 0x888888);
             grid.material.opacity = 0.5;
             grid.material.transparent = true;
-            grid.position.y = 0.01; 
+            grid.position.y = 0.01;
             scene.add(grid);
+            // Show the correct grid (hex vs square) for the current layer
+            showLayerGrid(mapDepth(currentMapKey));
+            updateBreadcrumb();
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
             rulerTooltip = document.getElementById('ruler-tooltip');
@@ -559,6 +760,7 @@
             renderer.domElement.addEventListener('pointermove', onPointerMove);
             renderer.domElement.addEventListener('contextmenu', onContextMenu);
             window.addEventListener('keydown', onKeyDown); // Modificado para incluir 'delete'
+            renderer.domElement.addEventListener('dblclick', onDoubleClick); // double-click a hex to descend
 
             // --- Menu Button Listeners (Right) ---
             menuButtons.token = document.getElementById('btn-token');
@@ -609,6 +811,9 @@
             });
 
             toolMenuButtons.tool3.addEventListener('click', () => setTool('tool3'));
+
+            const upBtn = document.getElementById('btn-up');
+            if (upBtn) upBtn.addEventListener('click', goUp);
 
             window.addEventListener('pointerdown', (event) => {
                 if (moveSubMenu.style.display === 'block' && 
@@ -680,7 +885,7 @@
                     }
                 } else if (firstIntersect.object.name === "tabletop") {
                     const intersectPoint = firstIntersect.point;
-                    const snappedPosition = snapToGrid(intersectPoint);
+                    const snappedPosition = snapToCurrentGrid(intersectPoint);
 
                     switch (currentTool) {
                         case 'move':
@@ -688,7 +893,7 @@
                                 // --- MODIFIED: Emitir evento de movimento ---
                                 const docId = selectedObject.userData.syncId;
                                 if (docId) {
-                                    const finalPosition = snapToGrid(selectedObject.position);
+                                    const finalPosition = snapToCurrentGrid(selectedObject.position);
                                     socket.emit('move-object', {
                                         id: docId,
                                         position: {
@@ -713,7 +918,7 @@
                             }
                             break;
                         case 'ruler':
-                            const rulerSnappedPosition = getRulerSnapPosition(intersectPoint);
+                            const rulerSnappedPosition = getCurrentRulerSnap(intersectPoint);
                             if (rulerPoints.length === 0) {
                                 rulerTooltip.style.display = 'none';
                             }
@@ -761,13 +966,13 @@
                 const intersectPoint = intersects[0].point;
 
                 if (currentTool === 'move' && selectedObject) {
-                    const snappedPosition = snapToGrid(intersectPoint); 
+                    const snappedPosition = snapToCurrentGrid(intersectPoint);
                     // Mover localmente (sem salvar ainda)
                     moveObject(selectedObject, snappedPosition);
                 }
 
                 if (currentTool === 'ruler' && rulerPoints.length > 0) {
-                    const rulerSnapPos = getRulerSnapPosition(intersectPoint);
+                    const rulerSnapPos = getCurrentRulerSnap(intersectPoint);
                     const previewPoints = [...rulerPoints, rulerSnapPos];
                     updateRuler(previewPoints); 
                     updateRulerTooltip(previewPoints, false);
@@ -793,7 +998,7 @@
 
             if (intersects.length > 0) {
                 const intersectPoint = intersects[0].point;
-                const snappedPosition = getRulerSnapPosition(intersectPoint); 
+                const snappedPosition = getCurrentRulerSnap(intersectPoint);
 
                if (rulerPoints.length > 0) {
                    finalizeRulerLine(false); // Finalizar mas não limpar (false)
@@ -1240,10 +1445,12 @@
         }
         function updateRulerTooltip(points, isFinal = false, showAtZero = false) {
             if (!rulerTooltip) return;
-            
+            const hexLayer = isHexLayer();
+            const unit = hexLayer ? 'km' : 'ft';
+
             if (showAtZero && points.length === 0) {
                 rulerTooltip.style.display = 'block';
-                rulerTooltip.textContent = '0 ft';
+                rulerTooltip.textContent = '0 ' + unit;
                 rulerTooltip.style.left = `${lastMouseX}px`;
                 rulerTooltip.style.top = `${lastMouseY}px`;
                 return;
@@ -1252,22 +1459,25 @@
                 rulerTooltip.style.display = 'none';
                 return;
             }
-            let totalLength = 0;
-            if (currentRulerMode === 'curved' && points.length > 1) {
-                const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal', 0.5);
-                totalLength = curve.getLength();
+
+            let value;
+            if (hexLayer) {
+                value = measurePath(points).value; // hex steps * km per hex
             } else {
-                totalLength = calculateLineLength(points);
+                let totalLength = 0;
+                if (currentRulerMode === 'curved' && points.length > 1) {
+                    const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal', 0.5);
+                    totalLength = curve.getLength();
+                } else {
+                    totalLength = calculateLineLength(points);
+                }
+                value = (totalLength / gridCellSize) * FEET_PER_GRID_CELL;
             }
-            const lengthInFeet = (totalLength / gridCellSize) * FEET_PER_GRID_CELL;
+
             rulerTooltip.style.display = 'block';
             rulerTooltip.style.left = `${lastMouseX}px`;
             rulerTooltip.style.top = `${lastMouseY}px`;
-            if (isFinal) {
-                rulerTooltip.textContent = `Total: ${lengthInFeet.toFixed(1)} ft`;
-            } else {
-                rulerTooltip.textContent = `${lengthInFeet.toFixed(1)} ft`;
-            }
+            rulerTooltip.textContent = (isFinal ? 'Total: ' : '') + value.toFixed(1) + ' ' + unit;
         }
         function updateRuler(previewPoints) {
            if (currentRulerLine) {
