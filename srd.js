@@ -10,6 +10,17 @@ export const STANDARD_ARRAY = [15, 14, 13, 12, 10, 8];
 export const POINT_BUY_COST = { 8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9 };
 export const POINT_BUY_BUDGET = 27;
 
+const FULL_CASTERS = ['bard', 'cleric', 'druid', 'sorcerer', 'wizard'];
+const HALF_CASTERS = ['paladin', 'ranger'];
+// PHB multiclass spellcaster slots: combined caster level -> [L1..L9]
+const MULTI_SLOTS = {
+  1:[2,0,0,0,0,0,0,0,0], 2:[3,0,0,0,0,0,0,0,0], 3:[4,2,0,0,0,0,0,0,0], 4:[4,3,0,0,0,0,0,0,0],
+  5:[4,3,2,0,0,0,0,0,0], 6:[4,3,3,0,0,0,0,0,0], 7:[4,3,3,1,0,0,0,0,0], 8:[4,3,3,2,0,0,0,0,0],
+  9:[4,3,3,3,1,0,0,0,0], 10:[4,3,3,3,2,0,0,0,0], 11:[4,3,3,3,2,1,0,0,0], 12:[4,3,3,3,2,1,0,0,0],
+  13:[4,3,3,3,2,1,1,0,0], 14:[4,3,3,3,2,1,1,0,0], 15:[4,3,3,3,2,1,1,1,0], 16:[4,3,3,3,2,1,1,1,0],
+  17:[4,3,3,3,2,1,1,1,1], 18:[4,3,3,3,3,1,1,1,1], 19:[4,3,3,3,3,2,1,1,1], 20:[4,3,3,3,3,2,2,1,1]
+};
+
 export const abilityMod = (score) => Math.floor((score - 10) / 2);
 export const fmtMod = (n) => (n >= 0 ? '+' + n : '' + n);
 export const proficiencyBonus = (totalLevel) => 2 + Math.floor((Math.max(1, totalLevel) - 1) / 4);
@@ -21,7 +32,7 @@ const FILES = {
   classes: 'classes', subclasses: 'subclasses', races: 'races', subraces: 'subraces',
   backgrounds: 'backgrounds', levels: 'levels', features: 'features', skills: 'skills',
   abilityScores: 'ability-scores', alignments: 'alignments', languages: 'languages',
-  proficiencies: 'proficiencies'
+  proficiencies: 'proficiencies', equipment: 'equipment', spells: 'spells'
 };
 
 let _cache = null;
@@ -160,6 +171,104 @@ class SRD {
   }
 
   speed(raceIdx) { return this.get('races', raceIdx)?.speed || 30; }
+
+  // --- Equipment ---
+  equipmentByCategory(cat) { return this.equipment.filter(e => e.equipment_category && e.equipment_category.index === cat); }
+  armorList() { return this.equipmentByCategory('armor').filter(a => a.armor_category !== 'Shield'); }
+  weaponList() { return this.equipmentByCategory('weapon'); }
+  gearList() { return this.equipmentByCategory('adventuring-gear'); }
+
+  armorClass({ armorIdx, shield, dexMod, classes, conMod, wisMod }) {
+    let ac, source;
+    const armor = armorIdx && this.get('equipment', armorIdx);
+    if (armor && armor.armor_class) {
+      const acd = armor.armor_class;
+      let dex = acd.dex_bonus ? dexMod : 0;
+      if (acd.dex_bonus && acd.max_bonus != null) dex = Math.min(dex, acd.max_bonus);
+      ac = acd.base + dex; source = armor.name;
+    } else if ((classes || []).some(c => c.class === 'barbarian')) {
+      ac = 10 + dexMod + conMod; source = 'Unarmored Defense (Barbarian)';
+    } else if ((classes || []).some(c => c.class === 'monk')) {
+      ac = 10 + dexMod + wisMod; source = 'Unarmored Defense (Monk)';
+    } else {
+      ac = 10 + dexMod; source = 'Unarmored';
+    }
+    if (shield) { ac += 2; source += ' + shield'; }
+    return { ac, source };
+  }
+
+  weaponProficient(classes, weapon) {
+    for (const c of classes || []) {
+      const cl = this.get('classes', c.class);
+      const profs = ((cl && cl.proficiencies) || []).map(p => p.index);
+      if (weapon.weapon_category === 'Simple' && profs.includes('simple-weapons')) return true;
+      if (weapon.weapon_category === 'Martial' && profs.includes('martial-weapons')) return true;
+      if (profs.includes(weapon.index)) return true;
+    }
+    return false;
+  }
+  weaponAttack(weapon, mods, classes, profBonus) {
+    const props = (weapon.properties || []).map(p => p.index);
+    const ranged = weapon.weapon_range === 'Ranged';
+    let abil = ranged ? 'dex' : 'str';
+    if (props.includes('finesse')) abil = (mods.dex >= mods.str) ? 'dex' : 'str';
+    const m = mods[abil] || 0;
+    const modStr = m ? (m > 0 ? '+' + m : '' + m) : '';
+    const prof = this.weaponProficient(classes, weapon) ? profBonus : 0;
+    const dd = weapon.damage ? weapon.damage.damage_dice : '—';
+    const dt = weapon.damage && weapon.damage.damage_type ? weapon.damage.damage_type.name : '';
+    const versatile = (props.includes('versatile') && weapon.two_handed_damage) ? weapon.two_handed_damage.damage_dice + modStr : null;
+    const range = weapon.range ? ((ranged && weapon.range.long) ? `${weapon.range.normal}/${weapon.range.long} ft` : `${weapon.range.normal} ft`) : '';
+    return { attack: m + prof, damage: dd + modStr, damageType: dt, ranged, versatile, range };
+  }
+
+  // --- Spellcasting ---
+  isCaster(classIdx) { const c = this.get('classes', classIdx); return !!(c && c.spellcasting); }
+  spellcastingAbility(classIdx) { const c = this.get('classes', classIdx); return c && c.spellcasting ? c.spellcasting.spellcasting_ability.index : null; }
+  spellsForClass(classIdx) {
+    return this.spells.filter(s => (s.classes || []).some(c => c.index === classIdx))
+      .sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+  }
+  classLevelData(classIdx, level) {
+    return this.levels.find(l => l.class && l.class.index === classIdx && l.level === level && !l.subclass);
+  }
+  spellSlots(classes) {
+    const casters = (classes || []).filter(c => this.isCaster(c.class));
+    const slots = {}; for (let i = 1; i <= 9; i++) slots[i] = 0;
+    let pact = null;
+    const warlock = (classes || []).find(c => c.class === 'warlock');
+    if (warlock) {
+      const ld = this.classLevelData('warlock', warlock.level);
+      if (ld && ld.spellcasting) {
+        let lvl = 0, count = 0;
+        for (let i = 1; i <= 9; i++) { const n = ld.spellcasting['spell_slots_level_' + i] || 0; if (n) { lvl = i; count = n; } }
+        if (count) pact = { level: lvl, count };
+      }
+    }
+    const nonWarlock = casters.filter(c => c.class !== 'warlock');
+    if (nonWarlock.length === 1) {
+      const c = nonWarlock[0]; const ld = this.classLevelData(c.class, c.level);
+      if (ld && ld.spellcasting) for (let i = 1; i <= 9; i++) slots[i] = ld.spellcasting['spell_slots_level_' + i] || 0;
+    } else if (nonWarlock.length > 1) {
+      let cl = 0;
+      for (const c of nonWarlock) { if (FULL_CASTERS.includes(c.class)) cl += c.level; else if (HALF_CASTERS.includes(c.class)) cl += Math.floor(c.level / 2); }
+      if (cl >= 1) { const row = MULTI_SLOTS[Math.min(cl, 20)] || []; for (let i = 1; i <= 9; i++) slots[i] = row[i - 1] || 0; }
+    }
+    return { slots, pact, casters: casters.map(c => ({ class: c.class, ability: this.spellcastingAbility(c.class) })) };
+  }
+
+  // Cantrips known + spells known/prepared cap for one caster class at a level.
+  // Known casters (bard/ranger/sorcerer/warlock) use spells_known from the SRD;
+  // prepared casters compute their cap from ability mod + level (paladin: +half level).
+  spellLimits(classIdx, level, abilityMod) {
+    const sc = this.classLevelData(classIdx, level)?.spellcasting;
+    const cantrips = sc && sc.cantrips_known != null ? sc.cantrips_known : 0;
+    let known = null, prepared = false;
+    if (sc && sc.spells_known != null) known = sc.spells_known;
+    else if (classIdx === 'wizard' || classIdx === 'cleric' || classIdx === 'druid') { known = Math.max(1, (abilityMod || 0) + level); prepared = true; }
+    else if (classIdx === 'paladin') { known = Math.max(1, (abilityMod || 0) + Math.floor(level / 2)); prepared = true; }
+    return { cantrips, known, prepared };
+  }
 
   // Features gained, grouped, across the build: [{class, level, name, desc}]
   classFeatures(classes) {
