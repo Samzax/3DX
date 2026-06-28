@@ -46,10 +46,20 @@ function saveJSON(filename, data) {
   }
 }
 
-// Load state
-let mapState = loadJSON('map_state.json', { objects: {}, rulers: {} });
-if (!mapState.objects) mapState.objects = {};
-if (!mapState.rulers) mapState.rulers = {};
+// Load state (per-map: { maps: { [key]: { objects, rulers } } })
+let mapData = loadJSON('map_state.json', { maps: {} });
+if (!mapData || !mapData.maps) mapData = { maps: {} };
+const maps = mapData.maps;
+
+// Get (or lazily create) a single map's state by its path key (e.g. "world", "world/2,-1")
+function getMap(key) {
+  if (!maps[key]) maps[key] = { objects: {}, rulers: {} };
+  return maps[key];
+}
+
+function saveMaps() {
+  saveJSON('map_state.json', { maps });
+}
 
 let charactersDB = loadJSON('characters.json', {});
 
@@ -191,46 +201,82 @@ io.on('connection', (socket) => {
     io.emit('character-deleted', charId);
   });
 
-  // Map synchronization events (existing functionality)
-  socket.emit('map-state', {
-    objects: Object.values(mapState.objects),
-    rulers: Object.values(mapState.rulers)
+  // --- Map synchronization (per-map, scoped by Socket.IO rooms) ---
+  const DEFAULT_MAP_KEY = 'world';
+
+  function sendMapState(key) {
+    const m = getMap(key);
+    socket.emit('map-state', {
+      key,
+      objects: Object.values(m.objects),
+      rulers: Object.values(m.rulers)
+    });
+  }
+
+  // Auto-join the world map on connect (also keeps older clients working)
+  socket.currentMapKey = DEFAULT_MAP_KEY;
+  socket.join(DEFAULT_MAP_KEY);
+  sendMapState(DEFAULT_MAP_KEY);
+
+  // Switch this socket to a different map (drill-down navigation)
+  socket.on('join-map', (payload) => {
+    const key = (payload && payload.key) ? String(payload.key) : DEFAULT_MAP_KEY;
+    if (socket.currentMapKey && socket.currentMapKey !== key) {
+      socket.leave(socket.currentMapKey);
+    }
+    socket.currentMapKey = key;
+    socket.join(key);
+    getMap(key);
+    console.log(`[MAP] ${socket.username || socket.id} -> ${key}`);
+    sendMapState(key);
   });
 
   socket.on('add-object', (data) => {
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
     const id = data.id || crypto.randomUUID();
     const newObject = { ...data, id: id };
-    mapState.objects[id] = newObject;
-    saveJSON('map_state.json', mapState);
-    io.emit('object-added', newObject);
+    map.objects[id] = newObject;
+    saveMaps();
+    io.to(key).emit('object-added', newObject);
   });
 
   socket.on('move-object', (data) => {
-    if (mapState.objects[data.id]) {
-      mapState.objects[data.id].position = data.position;
-      saveJSON('map_state.json', mapState);
-      socket.broadcast.emit('object-moved', data);
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
+    if (map.objects[data.id]) {
+      map.objects[data.id].position = data.position;
+      saveMaps();
+      socket.to(key).emit('object-moved', data);
     }
   });
 
   socket.on('delete-object', (data) => {
-    if (mapState.objects[data.id]) {
-      delete mapState.objects[data.id];
-      saveJSON('map_state.json', mapState);
-      io.emit('object-deleted', data);
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
+    if (map.objects[data.id]) {
+      delete map.objects[data.id];
+      saveMaps();
+      io.to(key).emit('object-deleted', data);
     }
   });
 
   socket.on('add-ruler', (data) => {
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
     const id = crypto.randomUUID();
     const newRuler = { ...data, id: id };
-    mapState.rulers[id] = newRuler;
-    io.emit('ruler-added', newRuler);
+    map.rulers[id] = newRuler;
+    saveMaps();
+    io.to(key).emit('ruler-added', newRuler);
   });
 
   socket.on('clear-rulers', () => {
-    mapState.rulers = {};
-    io.emit('rulers-cleared');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
+    map.rulers = {};
+    saveMaps();
+    io.to(key).emit('rulers-cleared');
   });
 
   socket.on('disconnect', () => {

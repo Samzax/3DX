@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# Runtime server state (per-session map data)
+data/map_state.json
