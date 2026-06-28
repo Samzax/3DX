@@ -1259,86 +1259,76 @@
             });
         }
         
-        // --- Character Model Functions (Copied from Creator) ---
+        // --- Character Model Functions (per-part colors + proportions) ---
         const BASE_TORSO_HEIGHT = 1;
         const BASE_HEAD_RADIUS = 0.4;
         const BASE_ARM_LENGTH = 0.8;
-        
+
+        function charColors(charData) {
+            const c = (charData.appearance && charData.appearance.colors) || {};
+            const legacy = charData.color || '#dd4444';
+            return {
+                skin: c.skin || '#c68642',
+                hair: c.hair || '#3b2716',
+                torso: c.torso || legacy,
+                legs: c.legs || '#3a3f4a',
+                eyes: c.eyes || '#111111'
+            };
+        }
+
         function createCharacterModel(charData) {
             const modelGroup = new THREE.Group();
-            const modelMaterial = characterBaseMaterial.clone();
-            modelMaterial.color.set(charData.color);
+            const col = charColors(charData);
+            const skinMat = new THREE.MeshLambertMaterial({ color: col.skin });
+            const torsoMat = new THREE.MeshLambertMaterial({ color: col.torso });
+            const legsMat = new THREE.MeshLambertMaterial({ color: col.legs });
+            const hairMat = new THREE.MeshLambertMaterial({ color: col.hair });
+            const eyeMat = new THREE.MeshBasicMaterial({ color: col.eyes });
 
-            const torsoGeo = new THREE.CylinderGeometry(0.3, 0.3, BASE_TORSO_HEIGHT, 32);
-            const torso = new THREE.Mesh(torsoGeo, modelMaterial);
-            torso.name = 'torso';
-            modelGroup.add(torso);
-            const headGeo = new THREE.SphereGeometry(BASE_HEAD_RADIUS, 32, 32);
-            const head = new THREE.Mesh(headGeo, modelMaterial);
-            head.name = 'head';
-            modelGroup.add(head);
-            const eyeGeo = new THREE.SphereGeometry(0.05, 16, 16);
-            const leftEye = new THREE.Mesh(eyeGeo, characterEyeMaterial);
-            leftEye.name = 'leftEye';
-            modelGroup.add(leftEye);
-            const rightEye = new THREE.Mesh(eyeGeo, characterEyeMaterial);
-            rightEye.name = 'rightEye';
-            modelGroup.add(rightEye);
-            const armGeo = new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16);
-            const leftArm = new THREE.Mesh(armGeo, modelMaterial);
-            leftArm.name = 'leftArm';
-            modelGroup.add(leftArm);
-            const rightArm = new THREE.Mesh(armGeo, modelMaterial);
-            rightArm.name = 'rightArm';
-            modelGroup.add(rightArm);
-            const legGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16); 
-            const leftLeg = new THREE.Mesh(legGeo, modelMaterial);
-            leftLeg.name = 'leftLeg';
-            modelGroup.add(leftLeg);
-            const rightLeg = new THREE.Mesh(legGeo, modelMaterial);
-            rightLeg.name = 'rightLeg';
-            modelGroup.add(rightLeg);
+            const add = (geo, mat, name) => { const m = new THREE.Mesh(geo, mat); m.name = name; modelGroup.add(m); return m; };
+            add(new THREE.CylinderGeometry(0.3, 0.3, BASE_TORSO_HEIGHT, 32), torsoMat, 'torso');
+            add(new THREE.SphereGeometry(BASE_HEAD_RADIUS, 32, 32), skinMat, 'head');
+            add(new THREE.SphereGeometry(BASE_HEAD_RADIUS * 1.02, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), hairMat, 'hair');
+            add(new THREE.SphereGeometry(0.05, 16, 16), eyeMat, 'leftEye');
+            add(new THREE.SphereGeometry(0.05, 16, 16), eyeMat, 'rightEye');
+            add(new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16), skinMat, 'leftArm');
+            add(new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16), skinMat, 'rightArm');
+            add(new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16), legsMat, 'leftLeg');
+            add(new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16), legsMat, 'rightLeg');
 
-            updateCharacterAppearance(modelGroup, charData.appearance);
-            modelGroup.scale.set(0.4, 0.4, 0.4); 
+            updateCharacterAppearance(modelGroup, charData.appearance || {});
+            modelGroup.scale.set(0.4, 0.4, 0.4);
             return modelGroup;
         }
 
         function updateCharacterAppearance(modelGroup, appearance) {
-            const heightScale = appearance.height || 1;
-            const headScale = appearance.headSize || 1;
-            const armScale = appearance.armLength || 1;
-            
-            const torso = modelGroup.getObjectByName('torso');
-            const head = modelGroup.getObjectByName('head');
-            const leftEye = modelGroup.getObjectByName('leftEye');
-            const rightEye = modelGroup.getObjectByName('rightEye');
-            const leftArm = modelGroup.getObjectByName('leftArm');
-            const rightArm = modelGroup.getObjectByName('rightArm');
-            const leftLeg = modelGroup.getObjectByName('leftLeg');
-            const rightLeg = modelGroup.getObjectByName('rightLeg');
+            const H = appearance.height || 1;
+            const B = appearance.build || 1;
+            const HS = appearance.headSize || 1;
+            const AL = appearance.armLength || 1;
+            const LL = appearance.legLength || 1;
+            const g = (n) => modelGroup.getObjectByName(n);
+            const torso = g('torso'), head = g('head'), hair = g('hair'),
+                  leftEye = g('leftEye'), rightEye = g('rightEye'),
+                  leftArm = g('leftArm'), rightArm = g('rightArm'),
+                  leftLeg = g('leftLeg'), rightLeg = g('rightLeg');
 
-            torso.scale.y = heightScale;
-            torso.position.y = (BASE_TORSO_HEIGHT * heightScale) / 2 - 0.5; 
-            head.scale.set(headScale, headScale, headScale);
-            const scaledHeadRadius = BASE_HEAD_RADIUS * headScale;
-            head.position.y = (BASE_TORSO_HEIGHT * heightScale) + scaledHeadRadius - 0.5;
-            leftEye.position.y = head.position.y + (0.1 * headScale);
-            rightEye.position.y = head.position.y + (0.1 * headScale);
-            leftEye.position.z = (scaledHeadRadius - 0.05);
-            rightEye.position.z = (scaledHeadRadius - 0.05);
-            leftArm.scale.y = armScale;
-            rightArm.scale.y = armScale;
-            leftArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
-            rightArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
-            leftArm.position.x = -0.4;
-            rightArm.position.x = 0.4;
-            leftLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
-            rightLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
-            leftLeg.position.x = -0.15;
-            rightLeg.position.x = 0.15;
+            torso.scale.set(B, H, B);
+            torso.position.y = (BASE_TORSO_HEIGHT * H) / 2 - 0.5;
+            head.scale.set(HS, HS, HS);
+            const hr = BASE_HEAD_RADIUS * HS;
+            head.position.y = (BASE_TORSO_HEIGHT * H) + hr - 0.5;
+            if (hair) { hair.scale.set(HS, HS, HS); hair.position.y = head.position.y; }
+            leftEye.position.set(-0.13 * HS, head.position.y + 0.1 * HS, hr - 0.05);
+            rightEye.position.set(0.13 * HS, head.position.y + 0.1 * HS, hr - 0.05);
+            leftArm.scale.set(B, AL, B); rightArm.scale.set(B, AL, B);
+            const ay = torso.position.y + (BASE_TORSO_HEIGHT * H / 2) - (BASE_ARM_LENGTH * AL / 2);
+            leftArm.position.set(-0.4 * B, ay, 0); rightArm.position.set(0.4 * B, ay, 0);
+            leftLeg.scale.set(B, LL, B); rightLeg.scale.set(B, LL, B);
+            const ly = torso.position.y - (BASE_TORSO_HEIGHT * H / 2);
+            leftLeg.position.set(-0.15 * B, ly, 0); rightLeg.position.set(0.15 * B, ly, 0);
         }
-        // --- End New Character Model Functions ---
+        // --- End Character Model Functions ---
 
         // --- UI Management (Left Menu) ---
         function setTool(toolName) {

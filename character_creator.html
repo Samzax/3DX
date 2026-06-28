@@ -1,1302 +1,653 @@
 <!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Character Creator — 3DX</title>
+  <style>
+    :root { --bg:#1a1a1a; --panel:#26262b; --panel2:#2f2f36; --line:#3a3a42; --accent:#60A5FA; --accent2:#3b82f6; --txt:#f0f0f0; --muted:#9aa0ac; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--txt); font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
+    h1,h2,h3,h4 { margin:0; font-weight:600; }
+    .hidden { display:none !important; }
+    button { font-family:inherit; }
 
-<html lang="en"><head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Character Creator</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-          #login-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100vw;
-    height: 100vh;
-    background-color: rgba(0, 0, 0, 0.9);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10000;
-  }
+    /* Login */
+    #login-overlay { position:fixed; inset:0; background:rgba(0,0,0,.9); display:flex; align-items:center; justify-content:center; z-index:10000; }
+    #login-modal { background:#2d2d2d; border:2px solid #555; border-radius:12px; padding:40px; width:90%; max-width:400px; box-shadow:0 10px 40px rgba(0,0,0,.8); }
+    #login-modal h2 { color:var(--accent); text-align:center; margin-bottom:24px; }
+    #login-modal input { width:100%; padding:12px; margin-bottom:16px; background:#1a1a1a; border:1px solid #444; border-radius:6px; color:var(--txt); font-size:16px; }
+    #login-modal button { width:100%; padding:12px; background:var(--accent); color:#1a1a1a; border:none; border-radius:6px; font-size:16px; font-weight:bold; cursor:pointer; }
+    #login-error { color:#ff5555; text-align:center; margin-top:8px; font-size:14px; }
 
-  #login-modal {
-    background-color: #2d2d2d;
-    border: 2px solid #555;
-    border-radius: 12px;
-    padding: 40px;
-    width: 90%;
-    max-width: 400px;
-    color: #f0f0f0;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.8);
-  }
+    .wrap { max-width:1200px; margin:0 auto; padding:20px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:8px; }
+    .topbar .title { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:700; }
+    .badge { font-size:12px; padding:3px 10px; border-radius:999px; background:rgba(96,165,250,.15); color:var(--accent); }
+    .who { font-size:13px; color:var(--muted); }
 
-  #login-modal h2 {
-    margin-top: 0;
-    color: #60A5FA;
-    text-align: center;
-    margin-bottom: 30px;
-  }
+    /* Tabs */
+    .tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; }
+    .tab { display:flex; align-items:center; gap:6px; padding:8px 14px; border-radius:999px; font-size:14px; border:1px solid var(--line); color:var(--muted); background:var(--panel); cursor:pointer; }
+    .tab.active { border:2px solid var(--accent); background:rgba(96,165,250,.15); color:var(--accent); font-weight:600; }
+    .tab .num { font-size:11px; opacity:.8; }
 
-  #login-modal input {
-    width: 100%;
-    padding: 12px;
-    margin-bottom: 20px;
-    background-color: #1a1a1a;
-    border: 1px solid #444;
-    border-radius: 6px;
-    color: #f0f0f0;
-    font-size: 16px;
-  }
+    .layout { display:grid; grid-template-columns: 1fr 340px; gap:18px; align-items:start; }
+    @media (max-width: 900px){ .layout{ grid-template-columns:1fr; } }
 
-  #login-modal input:focus {
-    outline: none;
-    border-color: #60A5FA;
-  }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; }
+    .panel h2 { font-size:18px; margin-bottom:14px; }
+    .rail { position:sticky; top:16px; display:flex; flex-direction:column; gap:14px; }
 
-  #login-modal button {
-    width: 100%;
-    padding: 12px;
-    background-color: #60A5FA;
-    color: #1a1a1a;
-    border: none;
-    border-radius: 6px;
-    font-size: 16px;
-    font-weight: bold;
-    cursor: pointer;
-    transition: background-color 0.2s;
-  }
+    label.fld { display:block; font-size:13px; color:var(--muted); margin:0 0 6px; }
+    .row { margin-bottom:14px; }
+    select, input[type=text], input[type=number] { width:100%; background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--txt); font-size:14px; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 
-  #login-modal button:hover {
-    background-color: #3b82f6;
-  }
+    .class-row { display:grid; grid-template-columns: 1fr 70px 1fr 38px; gap:8px; align-items:center; margin-bottom:8px; }
+    .btn { background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:9px 12px; cursor:pointer; font-size:14px; }
+    .btn:hover { background:#3a3a44; }
+    .btn-accent { background:var(--accent); color:#10243f; border:none; font-weight:600; }
+    .btn-accent:hover { background:var(--accent2); color:#fff; }
+    .btn-danger { background:#dc2626; color:#fff; border:none; }
+    .btn-ghost { background:transparent; }
+    .btn-sm { padding:6px 10px; font-size:13px; }
+    .btn[disabled]{ opacity:.4; cursor:not-allowed; }
 
-  #login-modal button:disabled {
-    background-color: #555;
-    cursor: not-allowed;
-  }
+    .info { background:var(--panel2); border-radius:10px; padding:12px; font-size:13px; color:#cfd3da; line-height:1.5; }
+    .info strong { color:#e7ebf2; }
+    .feat { display:flex; gap:8px; align-items:flex-start; background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:6px; font-size:13px; }
+    .lvl { font-size:11px; color:var(--accent); background:rgba(96,165,250,.15); border-radius:999px; padding:2px 7px; min-width:30px; text-align:center; flex:none; }
 
-  #login-error {
-    color: #ff4444;
-    margin-top: 10px;
-    text-align: center;
-    font-size: 14px;
-  }
+    /* Abilities */
+    .ability-row { display:grid; grid-template-columns: 1fr auto 56px auto 64px; align-items:center; gap:8px; margin-bottom:8px; }
+    .stepper { width:30px; height:30px; border-radius:50%; border:none; background:#4b5563; color:#fff; font-weight:bold; cursor:pointer; }
+    .stepper:disabled{ background:#374151; color:#6b7280; cursor:not-allowed; }
+    .score { text-align:center; font-size:18px; font-weight:700; }
+    .final { text-align:center; font-size:13px; color:var(--muted); }
+    .final b { color:var(--accent); font-size:15px; }
+    .seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-bottom:14px; }
+    .seg button { background:var(--panel2); color:var(--muted); border:none; padding:7px 12px; cursor:pointer; font-size:13px; }
+    .seg button.on { background:var(--accent); color:#10243f; font-weight:600; }
+    .pool { font-size:14px; color:var(--muted); margin-bottom:12px; }
+    .pool b { color:var(--accent); font-size:18px; }
 
-  .hidden {
-    display: none !important;
-  }
-        body {
-            background-color: #1a1a1a; /* Dark background */
-            color: #f0f0f0;
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-        }
-        #preview-canvas {
-            width: 100%;
-            height: 300px;
-            border-radius: 0.5rem;
-            background-color: #4a4a4a;
-        }
-        /* --- New Stat & Class Styles --- */
-        .stat-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr 1fr;
-            align-items: center;
-            margin-bottom: 8px;
-            text-align: center;
-        }
-        .stat-row label {
-            text-align: left;
-            font-weight: 500;
-        }
-        .stat-btn {
-            background-color: #4B5563; /* gray-600 */
-            border: none;
-            color: white;
-            border-radius: 9999px; /* rounded-full */
-            width: 28px;
-            height: 28px;
-            font-weight: bold;
-            cursor: pointer;
-            margin: 0 auto;
-        }
-        .stat-btn:hover {
-            background-color: #6B7280; /* gray-500 */
-        }
-        .stat-btn:disabled {
-            background-color: #374151; /* gray-700 */
-            color: #9CA3AF; /* gray-400 */
-            cursor: not-allowed;
-        }
-        #points-pool {
-            text-align: center;
-            font-size: 1.25rem; /* text-xl */
-            font-weight: 600; /* font-semibold */
-            margin-bottom: 1rem;
-        }
-        #points-pool span {
-            color: #60A5FA; /* blue-400 */
-            font-size: 1.5rem; /* text-2xl */
-        }
-        /* --- Modified Class Entry Style --- */
-        .class-entry {
-            display: grid; /* Changed to grid */
-            grid-template-columns: 3fr 1fr 40px; /* Layout for Select, Input, Button */
-            gap: 8px;
-            margin-bottom: 8px;
-            align-items: center;
-        }
-        .class-entry select, .class-entry input,
-        /* --- New Subrace Selector Style --- */
-        #subrace-selector-container select {
-            flex-grow: 1;
-            /* Common styles for select and input */
-            width: 100%;
-            background-color: #374151; /* gray-700 */
-            border: 1px solid #4B5563; /* gray-600 */
-            border-radius: 0.375rem; /* rounded-md */
-            padding: 0.5rem; /* p-2 */
-            color: white;
-            font-size: 14px;
-        }
-        .class-entry input {
-            /* Specific to level input */
-            text-align: center;
-            -moz-appearance: textfield; /* Remove arrows in Firefox */
-        }
-        /* Remove arrows in Chrome/Safari */
-        .class-entry input::-webkit-outer-spin-button,
-        .class-entry input::-webkit-inner-spin-button {
-            -webkit-appearance: none;
-            margin: 0;
-        }
+    /* Skills */
+    .skill-item { display:flex; align-items:center; gap:8px; padding:7px 8px; border-bottom:1px solid var(--line); font-size:14px; }
+    .skill-item .sk-ability { font-size:11px; color:var(--muted); text-transform:uppercase; margin-left:auto; }
+    .skill-item.locked { opacity:.7; }
+    .pill { font-size:11px; padding:1px 6px; border-radius:999px; background:#3a3a44; color:var(--muted); }
 
-        .btn-remove-class {
-            background-color: #DC2626; /* red-600 */
-            color: white;
-            border: none;
-            border-radius: 0.375rem; /* rounded-md */
-            padding: 0 0.75rem;
-            height: 38px; /* Match input height */
-            font-weight: bold;
-            cursor: pointer;
-        }
-        /* --- New Race Info Panel Style --- */
-        #race-info-panel {
-            background-color: #374151; /* gray-700 */
-            border-radius: 0.375rem; /* rounded-md */
-            padding: 1rem; /* p-4 */
-            /* margin-top: 2rem; -- REMOVED */
-            max-height: 80vh; /* CHANGED from 400px */
-            overflow-y: auto; /* Add scrollbar if needed */
-        }
-        #race-info-panel h3 {
-            font-size: 1.25rem; /* text-xl */
-            font-weight: 600; /* font-semibold */
-            margin-bottom: 0.5rem; /* mb-2 */
-            color: #60A5FA; /* blue-400 */
-        }
-        #race-info-panel h4 {
-            font-size: 1.125rem; /* text-lg */
-            font-weight: 600; /* font-semibold */
-            margin-top: 0.75rem; /* mt-3 */
-            margin-bottom: 0.25rem; /* mb-1 */
-            color: #9CA3AF; /* gray-400 */
-        }
-        #race-info-panel p {
-            margin-bottom: 0.5rem; /* mb-2 */
-            font-size: 0.875rem; /* text-sm */
-            line-height: 1.4;
-        }
-        #race-info-panel p strong {
-            font-weight: 600;
-            color: #D1D5DB; /* gray-300 */
-        }
-        /* --- End New Styles --- */
-    </style>
-    <!-- Import Map for Three.js -->
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.skypack.dev/three@0.132.2/build/three.module.js",
-            "three/addons/": "https://cdn.skypack.dev/three@0.132.2/examples/jsm/"
-        }
-    }
-    </script>
-<style>*, ::before, ::after{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgb(59 130 246 / 0.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }::backdrop{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgb(59 130 246 / 0.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }/* ! tailwindcss v3.4.17 | MIT License | https://tailwindcss.com */*,::after,::before{box-sizing:border-box;border-width:0;border-style:solid;border-color:#e5e7eb}::after,::before{--tw-content:''}:host,html{line-height:1.5;-webkit-text-size-adjust:100%;-moz-tab-size:4;tab-size:4;font-family:ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";font-feature-settings:normal;font-variation-settings:normal;-webkit-tap-highlight-color:transparent}body{margin:0;line-height:inherit}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,pre,samp{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-feature-settings:normal;font-variation-settings:normal;font-size:1em}small{font-size:80%}sub,sup{font-size:75%;line-height:0;position:relative;vertical-align:baseline}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}button,input,optgroup,select,textarea{font-family:inherit;font-feature-settings:inherit;font-variation-settings:inherit;font-size:100%;font-weight:inherit;line-height:inherit;letter-spacing:inherit;color:inherit;margin:0;padding:0}button,select{text-transform:none}button,input:where([type=button]),input:where([type=reset]),input:where([type=submit]){-webkit-appearance:button;background-color:transparent;background-image:none}:-moz-focusring{outline:auto}:-moz-ui-invalid{box-shadow:none}progress{vertical-align:baseline}::-webkit-inner-spin-button,::-webkit-outer-spin-button{height:auto}[type=search]{-webkit-appearance:textfield;outline-offset:-2px}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-file-upload-button{-webkit-appearance:button;font:inherit}summary{display:list-item}blockquote,dd,dl,figure,h1,h2,h3,h4,h5,h6,hr,p,pre{margin:0}fieldset{margin:0;padding:0}legend{padding:0}menu,ol,ul{list-style:none;margin:0;padding:0}dialog{padding:0}textarea{resize:vertical}input::placeholder,textarea::placeholder{opacity:1;color:#9ca3af}[role=button],button{cursor:pointer}:disabled{cursor:default}audio,canvas,embed,iframe,img,object,svg,video{display:block;vertical-align:middle}img,video{max-width:100%;height:auto}[hidden]:where(:not([hidden=until-found])){display:none}.container{width:100%}@media (min-width: 640px){.container{max-width:640px}}@media (min-width: 768px){.container{max-width:768px}}@media (min-width: 1024px){.container{max-width:1024px}}@media (min-width: 1280px){.container{max-width:1280px}}@media (min-width: 1536px){.container{max-width:1536px}}.mx-auto{margin-left:auto;margin-right:auto}.mb-1{margin-bottom:0.25rem}.mb-4{margin-bottom:1rem}.mb-8{margin-bottom:2rem}.mt-2{margin-top:0.5rem}.mt-6{margin-top:1.5rem}.mb-3{margin-bottom:0.75rem}.mt-4{margin-top:1rem}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.h-10{height:2.5rem}.h-48{height:12rem}.w-full{width:100%}.max-w-7xl{max-width:80rem}.grid-cols-1{grid-template-columns:repeat(1, minmax(0, 1fr))}.items-center{align-items:center}.justify-between{justify-content:space-between}.gap-8{gap:2rem}.space-y-2 > :not([hidden]) ~ :not([hidden]){--tw-space-y-reverse:0;margin-top:calc(0.5rem * calc(1 - var(--tw-space-y-reverse)));margin-bottom:calc(0.5rem * var(--tw-space-y-reverse))}.overflow-y-auto{overflow-y:auto}.rounded-lg{border-radius:0.5rem}.rounded-md{border-radius:0.375rem}.border{border-width:1px}.border-gray-600{--tw-border-opacity:1;border-color:rgb(75 85 99 / var(--tw-border-opacity, 1))}.bg-gray-600{--tw-bg-opacity:1;background-color:rgb(75 85 99 / var(--tw-bg-opacity, 1))}.bg-gray-700{--tw-bg-opacity:1;background-color:rgb(55 65 81 / var(--tw-bg-opacity, 1))}.bg-gray-800{--tw-bg-opacity:1;background-color:rgb(31 41 55 / var(--tw-bg-opacity, 1))}.bg-blue-600{--tw-bg-opacity:1;background-color:rgb(37 99 235 / var(--tw-bg-opacity, 1))}.bg-red-600{--tw-bg-opacity:1;background-color:rgb(220 38 38 / var(--tw-bg-opacity, 1))}.p-8{padding:2rem}.p-2{padding:0.5rem}.p-6{padding:1.5rem}.p-1{padding:0.25rem}.p-3{padding:0.75rem}.p-4{padding:1rem}.px-4{padding-left:1rem;padding-right:1rem}.py-2{padding-top:0.5rem;padding-bottom:0.5rem}.py-3{padding-top:0.75rem;padding-bottom:0.75rem}.text-center{text-align:center}.text-2xl{font-size:1.5rem;line-height:2rem}.text-4xl{font-size:2.25rem;line-height:2.5rem}.text-lg{font-size:1.125rem;line-height:1.75rem}.text-sm{font-size:0.875rem;line-height:1.25rem}.text-xl{font-size:1.25rem;line-height:1.75rem}.font-bold{font-weight:700}.font-medium{font-weight:500}.font-semibold{font-weight:600}.text-blue-400{--tw-text-opacity:1;color:rgb(96 165 250 / var(--tw-text-opacity, 1))}.text-gray-300{--tw-text-opacity:1;color:rgb(209 213 219 / var(--tw-text-opacity, 1))}.text-white{--tw-text-opacity:1;color:rgb(255 255 255 / var(--tw-text-opacity, 1))}.text-gray-400{--tw-text-opacity:1;color:rgb(156 163 175 / var(--tw-text-opacity, 1))}.text-yellow-300{--tw-text-opacity:1;color:rgb(253 224 71 / var(--tw-text-opacity, 1))}.shadow-lg{--tw-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);--tw-shadow-colored:0 10px 15px -3px var(--tw-shadow-color), 0 4px 6px -4px var(--tw-shadow-color);box-shadow:var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow)}.transition{transition-property:color, background-color, border-color, fill, stroke, opacity, box-shadow, transform, filter, -webkit-text-decoration-color, -webkit-backdrop-filter;transition-property:color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter;transition-property:color, background-color, border-color, text-decoration-color, fill, stroke, opacity, box-shadow, transform, filter, backdrop-filter, -webkit-text-decoration-color, -webkit-backdrop-filter;transition-timing-function:cubic-bezier(0.4, 0, 0.2, 1);transition-duration:150ms}.duration-200{transition-duration:200ms}.hover\:bg-gray-700:hover{--tw-bg-opacity:1;background-color:rgb(55 65 81 / var(--tw-bg-opacity, 1))}.hover\:bg-blue-700:hover{--tw-bg-opacity:1;background-color:rgb(29 78 216 / var(--tw-bg-opacity, 1))}.hover\:bg-red-700:hover{--tw-bg-opacity:1;background-color:rgb(185 28 28 / var(--tw-bg-opacity, 1))}.focus\:border-blue-500:focus{--tw-border-opacity:1;border-color:rgb(59 130 246 / var(--tw-border-opacity, 1))}.focus\:ring-blue-500:focus{--tw-ring-opacity:1;--tw-ring-color:rgb(59 130 246 / var(--tw-ring-opacity, 1))}@media (min-width: 768px){.md\:grid-cols-3{grid-template-columns:repeat(3, minmax(0, 1fr))}}</style><style>
-:root {
-  --scale-value: 1;
-  --transition-duration: 250ms;
-  --transition-delay: 0ms;
-}
-.ztf-parent {
-  overflow: hidden !important;
-}
-.ztf-video {
-  transition-property: transform !important;
-  transform: scale(var(--scale-value)) !important;
-  transition-timing-function: ease-in-out !important;
-  transition-delay: var(--transition-delay) !important;
-  transition-duration: var(--transition-duration) !important;
-}
-</style></head>
-<body class="p-8">
-    <!-- Login Modal -->
-<div id="login-overlay">
-  <div id="login-modal">
-    <h2>🎲 VTT Login</h2>
-    <input type="text" id="username-input" placeholder="Enter your username" autocomplete="username" maxlength="20">
-    <button id="login-btn">Login</button>
-    <div id="login-error" class="hidden">Username must be at least 2 characters</div>
-  </div>
-</div>
+    /* Appearance */
+    .slider-row { display:grid; grid-template-columns: 90px 1fr 40px; align-items:center; gap:10px; margin-bottom:10px; font-size:13px; color:var(--muted); }
+    .slider-row input[type=range]{ width:100%; }
+    .color-row { display:grid; grid-template-columns: repeat(auto-fit,minmax(96px,1fr)); gap:10px; }
+    .color-row label { font-size:12px; color:var(--muted); display:flex; flex-direction:column; gap:4px; align-items:center; }
+    input[type=color]{ width:100%; height:34px; border:1px solid var(--line); border-radius:8px; background:var(--panel2); padding:2px; }
 
-    
-    <div class="container mx-auto max-w-7xl"> <!-- CHANGED from 6xl -->
-        <h1 class="text-4xl font-bold text-center mb-8">Character Creator</h1>
-        
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-8"> <!-- CHANGED from 2 to 3 -->
-            
-            <!-- Left Side: Form (Column 1) -->
-            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
-                <h2 class="text-2xl font-semibold mb-4">Character Details</h2>
-                
-                <form id="creator-form">
-                    <!-- Name -->
-                    <div class="mb-4">
-                        <label for="char-name" class="block text-sm font-medium text-gray-300 mb-1">Character Name</label>
-                        <input type="text" id="char-name" class="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-white focus:ring-blue-500 focus:border-blue-500" required="">
-                    </div>
+    /* Rail */
+    #preview-canvas { width:100%; height:300px; border-radius:10px; background:#2b2b2b; display:block; }
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+    .metric { background:var(--panel2); border-radius:8px; padding:8px 4px; text-align:center; }
+    .metric .l { font-size:11px; color:var(--muted); }
+    .metric .v { font-size:18px; font-weight:600; }
+    .mods { display:grid; grid-template-columns:repeat(6,1fr); gap:4px; }
+    .mods .m { background:var(--panel2); border-radius:8px; padding:6px 2px; text-align:center; font-size:11px; color:var(--muted); }
+    .mods .m b { display:block; font-size:14px; color:var(--txt); }
+    .saved { max-height:150px; overflow-y:auto; }
+    .saved .c { display:flex; align-items:center; justify-content:space-between; padding:7px 4px; border-bottom:1px solid var(--line); font-size:13px; cursor:pointer; }
+    .saved .c:hover { background:var(--panel2); }
+    .saved .del { color:#f87171; background:none; border:none; cursor:pointer; font-size:13px; }
+    .msg { margin-top:10px; text-align:center; font-size:14px; min-height:18px; }
+    .credit { font-size:11px; color:#6b7280; margin-top:16px; text-align:center; }
+    .stepnav { display:flex; justify-content:space-between; margin-top:16px; }
+  </style>
 
-                    <!-- Class Section (Modified) -->
-                    <div class="mb-4">
-                        <div class="flex justify-between items-center mb-1">
-                            <label class="block text-sm font-medium text-gray-300">Class(es)</label>
-                            <span class="text-lg font-semibold">Total Level: <span id="total-level" class="text-blue-400">1</span></span>
-                        </div>
-                        
-                        <div id="class-container">
-                            <!-- First class entry is now dynamic -->
-                       </div>
-                        <button type="button" id="btn-add-multiclass" class="w-full mt-2 bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 text-sm">
-                            Add Class
-                        </button>
-                    </div>
-
-                    <!-- Race -->
-                    <div class="mb-4">
-                        <label for="char-race" class="block text-sm font-medium text-gray-300 mb-1">Race</label>
-                        <select id="char-race" class="w-full bg-gray-700 border border-gray-600 rounded-md p-2 text-white focus:ring-blue-500 focus:border-blue-500">
-                            <option>Human</option>
-                            <option>Elf</option>
-                            <option>Dwarf</option>
-                            <option>Halfling</option>
-                        </select>
-                    </div>
-
-                    <!-- --- New Subrace Container --- -->
-                    <div id="subrace-selector-container" class="mb-4 hidden"></div>
-                    <!-- --- End New Subrace Container --- -->
-
-
-                    <!-- Stat Point-Buy Section -->
-                    <h2 class="text-2xl font-semibold mb-4 mt-6">Base Stats (Point Buy)</h2>
-                    <div id="points-pool">Points Left: <span id="points-left">27</span></div>
-                    <div id="stats-container" class="space-y-2">
-                        <!-- STR -->
-                        <div class="stat-row">
-                            <label for="stat-str">Strength</label>
-                            <button type="button" class="stat-btn" data-stat="str" data-op="-" disabled="">-</button>
-                            <span id="stat-str" class="text-xl font-bold">8</span>
-                            <button type="button" class="stat-btn" data-stat="str" data-op="+">+</button>
-                        </div>
-                        <!-- DEX -->
-                        <div class="stat-row">
-                            <label for="stat-dex">Dexterity</label>
-                            <button type="button" class="stat-btn" data-stat="dex" data-op="-" disabled="">-</button>
-                            <span id="stat-dex" class="text-xl font-bold">8</span>
-                            <button type="button" class="stat-btn" data-stat="dex" data-op="+">+</button>
-                        </div>
-                        <!-- CON -->
-                        <div class="stat-row">
-                            <label for="stat-con">Constitution</label>
-                            <button type="button" class="stat-btn" data-stat="con" data-op="-" disabled="">-</button>
-                            <span id="stat-con" class="text-xl font-bold">8</span>
-                            <button type="button" class="stat-btn" data-stat="con" data-op="+">+</button>
-                        </div>
-                        <!-- INT -->
-                        <div class="stat-row">
-                            <label for="stat-int">Intelligence</label>
-                            <button type="button" class="stat-btn" data-stat="int" data-op="-" disabled="">-</button>
-                            <span id="stat-int" class="text-xl font-bold">8</span>
-                            <button type="button" class="stat-btn" data-stat="int" data-op="+">+</button>
-                        </div>
-                        <!-- WIS -->
-                        <div class="stat-row">
-                            <label for="stat-wis">Wisdom</label>
-                            <button type="button" class="stat-btn" data-stat="wis" data-op="-" disabled="">-</button>
-                            <span id="stat-wis" class="text-xl font-bold">8</span>
-                            <button type="button" class="stat-btn" data-stat="wis" data-op="+">+</button>
-                        </div>
-                        <!-- CHA -->
-                        <div class="stat-row">
-                            <label for="stat-cha">Charisma</label>
-                            <button type="button" class="stat-btn" data-stat="cha" data-op="-" disabled="">-</button>
-                            <span id="stat-cha" class="text-xl font-bold">8</span>
-                            <button type="button" class="stat-btn" data-stat="cha" data-op="+">+</button>
-                        </div>
-                    </div>
-                    <!-- End Stat Section -->
-
-                    <!-- New Features Section -->
-                    <h2 class="text-2xl font-semibold mb-4 mt-6">Features &amp; Bonuses</h2>
-                    <div id="features-container" class="bg-gray-700 rounded-md p-4 space-y-2"><div class="text-yellow-300 font-medium">Race ASI: +1 to all stats</div></div>
-                    <!-- End New Features Section -->
-
-
-                    <!-- Appearance (Color) -->
-                    <h2 class="text-2xl font-semibold mb-4 mt-6">Appearance</h2>
-                    <div class="mb-4">
-                        <label for="char-color" class="block text-sm font-medium text-gray-300 mb-1">Token Color</label>
-                        <input type="color" id="char-color" class="w-full h-10 bg-gray-700 border border-gray-600 rounded-md p-1" value="#dd4444">
-                    </div>
-
-                    <!-- Appearance Sliders -->
-                    <div class="mb-4">
-                        <label for="char-height" class="block text-sm font-medium text-gray-300 mb-1">Height (Torso)</label>
-                        <input type="range" id="char-height" min="0.5" max="1.5" value="1" step="0.1" class="w-full">
-                    </div>
-                    <div class="mb-4">
-                        <label for="char-head-size" class="block text-sm font-medium text-gray-300 mb-1">Head Size</label>
-                        <input type="range" id="char-head-size" min="0.5" max="1.5" value="1" step="0.1" class="w-full">
-                    </div>
-                    <div class="mb-4">
-                        <label for="char-arm-length" class="block text-sm font-medium text-gray-300 mb-1">Arm Length</label>
-                        <input type="range" id="char-arm-length" min="0.5" max="1.5" value="1" step="0.1" class="w-full">
-                    </div>
-                    <!-- End Sliders -->
-
-
-                    <!-- Save Button -->
-                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-md transition duration-200 mt-6">
-                        Save Character
-                    </button>
-                </form>
-                
-                <div id="message-box" class="mt-4 text-center p-3 rounded-md hidden"></div>
-
-            </div>
-
-            <!-- Middle Side: Preview (Column 2) -->
-            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
-                <h2 class="text-2xl font-semibold mb-4">Preview</h2>
-                <div id="preview-canvas-container">
-                    <canvas id="preview-canvas" width="335" height="300" style="width: 335px; height: 300px; touch-action: none;"></canvas>
-                </div>
-                
-                <!-- Race Info Panel REMOVED From Here -->
-
-                <h3 class="text-xl font-semibold mt-6 mb-3">Saved Characters</h3>
-                <div id="character-list" class="bg-gray-700 rounded-md p-4 h-48 overflow-y-auto">
-                    <!-- Character list will be populated by JS -->
-                    <p class="text-gray-400">No characters saved yet.</p>
-                </div>
-                <button id="clear-chars-btn" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-md transition duration-200 mt-4" style="display: none;">
-                    Clear All Characters
-                </button>
-            </div>
-
-            <!-- Right Side: Race Info (Column 3) -->
-            <div class="bg-gray-800 p-6 rounded-lg shadow-lg">
-                <h2 class="text-2xl font-semibold mb-4">Race Information</h2>
-                <!-- --- New Race Info Panel (Moved Here) --- -->
-                <div id="race-info-panel">
-                        <h3>Human Traits</h3>
-                        <p>Humans are the most adaptable and ambitious people among the common races. Whatever drives them, humans are the innovators, the achievers, and the pioneers of the worlds.</p>
-                        <p><strong>Ability Score Increase:</strong> Your ability scores each increase by 1.</p>
-                        <p><strong>Age:</strong> Humans reach adulthood in their late teens and live less than a century.</p>
-                        <p><strong>Size:</strong> Humans vary widely in height and build, from barely 5 feet to well over 6 feet tall. Your size is Medium.</p>
-                        <p><strong>Speed:</strong> Your base walking speed is 30 feet.</p>
-                        <p><strong>Languages:</strong> You can speak, read, and write Common and one extra language of your choice.</p></div>
-                <!-- --- End New Race Info Panel --- -->
-            </div>
-
-        </div>
+  <script type="importmap">
+  { "imports": {
+      "three": "https://cdn.skypack.dev/three@0.132.2/build/three.module.js",
+      "three/addons/": "https://cdn.skypack.dev/three@0.132.2/examples/jsm/"
+  } }
+  </script>
+</head>
+<body>
+  <div id="login-overlay">
+    <div id="login-modal">
+      <h2>🎲 VTT Login</h2>
+      <input type="text" id="username-input" placeholder="Enter your username" autocomplete="username" maxlength="20" />
+      <button id="login-btn">Login</button>
+      <div id="login-error" class="hidden"></div>
     </div>
-    
-  <!-- Load class definitions (exposes window.CLASSES) -->
-  <script src="./classes.js"></script>
+  </div>
 
-  <script type="module">
-        import * as THREE from 'three';
-        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-  // `classes.js` exposes `CLASSES` as a global on the window when loaded
-  // (the file also uses module.exports for Node). We include it as a
-  // regular script tag (see above) and read from window.CLASSES here.
+  <div id="boot" class="wrap" style="text-align:center; color:var(--muted);">Loading SRD data…</div>
 
-  const CLASSDATA = window.CLASSES || {};      // fallback to empty object
-  const CLASS_OPTIONS = Object.keys(CLASSDATA)
-  .map(name => `<option value="${name}">${name}</option>`)
-  .join('');
-        let scene, camera, renderer, controls;
-        let previewModel; // Group to hold all body parts
-        let modelMaterial;
-        let eyeMaterial;
+  <div id="app" class="wrap hidden">
+    <div class="topbar">
+      <div class="title"><span>Character creator</span><span class="badge">SRD 5.1</span></div>
+      <div class="who" id="who"></div>
+    </div>
 
-        // Body parts
-        let torso, head, leftEye, rightEye, leftArm, rightArm, leftLeg, rightLeg;
-        
-        // Base dimensions for scaling
-        const BASE_TORSO_HEIGHT = 1;
-        const BASE_HEAD_RADIUS = 0.4;
-        const BASE_ARM_LENGTH = 0.8;
+    <div class="tabs" id="tabs"></div>
 
-        const form = document.getElementById('creator-form');
-        const colorInput = document.getElementById('char-color');
-        const nameInput = document.getElementById('char-name');
-        // --- Modified Class/Race Elements ---
-        const raceInput = document.getElementById('char-race');
-        const classContainer = document.getElementById('class-container');
-        const btnAddMulticlass = document.getElementById('btn-add-multiclass');
-        // --- New Subrace Element ---
-        const subraceContainer = document.getElementById('subrace-selector-container');
-        // --- End Modified ---
-        const charListDiv = document.getElementById('character-list');
-        const clearBtn = document.getElementById('clear-chars-btn');
-        const messageBox = document.getElementById('message-box');
-        const raceInfoPanel = document.getElementById('race-info-panel');
+    <div class="layout">
+      <div class="panel" id="tab-body"></div>
 
-        // Slider inputs
-        const heightSlider = document.getElementById('char-height');
-        const headSlider = document.getElementById('char-head-size');
-        const armSlider = document.getElementById('char-arm-length');
-
-        // --- Stat Point-Buy Logic ---
-        const totalLevelEl = document.getElementById('total-level');
-        const pointsLeftEl = document.getElementById('points-left');
-        const statsContainer = document.getElementById('stats-container');
-        
-        let stats = { str: 8, dex: 8, con: 8, int: 8, wis: 8, cha: 8 };
-        let pointsLeft = 27;
-        
-        const POINT_BUY_COST = {
-            8: 0, 9: 1, 10: 2, 11: 3, 12: 4, 13: 5, 14: 7, 15: 9
-        };
-
-        function calculateTotalPoints() {
-            return 27; // Always 27 for Point Buy
-        }
-
-        function calculateUsedPoints() {
-            let used = 0;
-            for (const stat in stats) {
-                used += POINT_BUY_COST[stats[stat]];
-            }
-            return used;
-        }
-
-        function updatePointsUI() {
-            const totalPoints = calculateTotalPoints();
-            const usedPoints = calculateUsedPoints();
-            pointsLeft = totalPoints - usedPoints;
-            pointsLeftEl.textContent = pointsLeft;
-
-            document.querySelectorAll('.stat-btn').forEach(btn => {
-                const op = btn.dataset.op;
-                const stat = btn.dataset.stat;
-                const currentVal = stats[stat];
-
-                if (op === '+') {
-                    if (currentVal >= 15) {
-                        btn.disabled = true; // Max
-                    } else {
-                        const nextVal = currentVal + 1;
-                        const cost = POINT_BUY_COST[nextVal] - POINT_BUY_COST[currentVal];
-                        btn.disabled = cost > pointsLeft;
-                    }
-                } else if (op === '-') {
-                    btn.disabled = currentVal <= 8; // Min
-                }
-            });
-        }
-
-        function handleStatChange(stat, op) {
-            const currentVal = stats[stat];
-            if (op === '+' && currentVal < 15) {
-                stats[stat]++;
-            } else if (op === '-' && currentVal > 8) {
-                stats[stat]--;
-            }
-            document.getElementById(`stat-${stat}`).textContent = stats[stat];
-            updatePointsUI();
-        }
-        // --- End Stat Logic ---
-
-
-        
-        // --- New Refactored Race Info Data ---
-        const RACE_DATA = {
-            'Human': {
-                base: {
-                    asi: ["+1 to all stats"],
-                    htmlContent: `
-                        <h3>Human Traits</h3>
-                        <p>Humans are the most adaptable and ambitious people among the common races. Whatever drives them, humans are the innovators, the achievers, and the pioneers of the worlds.</p>
-                        <p><strong>Ability Score Increase:</strong> Your ability scores each increase by 1.</p>
-                        <p><strong>Age:</strong> Humans reach adulthood in their late teens and live less than a century.</p>
-                        <p><strong>Size:</strong> Humans vary widely in height and build, from barely 5 feet to well over 6 feet tall. Your size is Medium.</p>
-                        <p><strong>Speed:</strong> Your base walking speed is 30 feet.</p>
-                        <p><strong>Languages:</strong> You can speak, read, and write Common and one extra language of your choice.</p>`
-                }
-            },
-            'Elf': {
-                base: {
-                    asi: ["DEX +2"],
-                    htmlContent: `
-                        <h3>Elf Traits</h3>
-                        <p>Elves are a magical people of otherworldly grace, living in the world but not entirely part of it.</p>
-                        <p><strong>Ability Score Increase:</strong> Your Dexterity score increases by 2.</p>
-                        <p><strong>Age:</strong> Although elves reach physical maturity at about the same age as humans, the elven understanding of adulthood goes beyond physical growth to encompass worldly experience. An elf typically claims adulthood and an adult name around the age of 100 and can live to be 750 years old.</p>
-                        <p><strong>Size:</strong> Elves range from under 5 to over 6 feet tall and have slender builds. Your size is Medium.</p>
-                        <p><strong>Speed:</strong> Your base walking speed is 30 feet.</p>
-                        <p><strong>Darkvision:</strong> You have superior vision in dark and dim conditions. You can see in dim light within 60 feet of you as if it were bright light, and in darkness as if it were dim light.</p>
-                        <p><strong>Keen Senses:</strong> You have proficiency in the Perception skill.</p>
-                        <p><strong>Fey Ancestry:</strong> You have advantage on saving throws against being charmed, and magic can’t put you to sleep.</p>
-                        <p><strong>Trance:</strong> Elves don’t need to sleep. Instead, they meditate deeply, remaining semiconscious, for 4 hours a day.</p>`
-                },
-                subraces: {
-                    'High Elf': {
-                        asi: ["INT +1"],
-                        htmlContent: `
-                            <h4>Subrace: High Elf</h4>
-                            <p><strong>Ability Score Increase:</strong> Your Intelligence score increases by 1.</p>
-                            <p><strong>Elf Weapon Training:</strong> You have proficiency with the longsword, shortsword, shortbow, and longbow.</p>
-                            <p><strong>Cantrip:</strong> You know one cantrip of your choice from the wizard spell list. Intelligence is your spellcasting ability for it.</p>`
-                    },
-                    'Wood Elf': {
-                        asi: ["WIS +1"],
-                        htmlContent: `
-                            <h4>Subrace: Wood Elf</h4>
-                            <p><strong>Ability Score Increase:</strong> Your Wisdom score increases by 1.</p>
-                            <p><strong>Elf Weapon Training:</strong> You have proficiency with the longsword, shortsword, shortbow, and longbow.</p>
-                            <p><strong>Fleet of Foot:</strong> Your base walking speed increases to 35 feet.</p>
-                            <p><strong>Mask of the Wild:</strong> You can attempt to hide even when you are only lightly obscured by foliage, heavy rain, falling snow, mist, and other natural phenomena.</p>`
-                    }
-                }
-            },
-            'Dwarf': {
-                base: {
-                    asi: ["CON +2"],
-                    htmlContent: `
-                        <h3>Dwarf Traits</h3>
-                        <p>Bold and hardy, dwarves are known as skilled warriors, miners, and workers of stone and metal.</p>
-                        <p><strong>Ability Score Increase:</strong> Your Constitution score increases by 2.</p>
-                        <p><strong>Age:</strong> Dwarves mature at the same rate as humans, but they’re considered young until they reach the age of 50. On average, they live about 350 years.</p>
-                        <p><strong>Size:</strong> Dwarves stand between 4 and 5 feet tall and average about 150 pounds. Your size is Medium.</p>
-                        <p><strong>Speed:</strong> Your base walking speed is 25 feet. Your speed is not reduced by wearing heavy armor.</p>
-                        <p><strong>Darkvision:</strong> Accustomed to life underground, you have superior vision in dark and dim conditions. You can see in dim light within 60 feet of you as if it were bright light, and in darkness as if it were dim light.</p>
-                        <p><strong>Dwarven Resilience:</strong> You have advantage on saving throws against poison, and you have resistance against poison damage.</p>
-                        <p><strong>Dwarven Combat Training:</strong> You have proficiency with the battleaxe, handaxe, light hammer, and warhammer.</p>`
-                },
-                subraces: {
-                    'Hill Dwarf': {
-                        asi: ["WIS +1"],
-                        htmlContent: `
-                            <h4>Subrace: Hill Dwarf</h4>
-                            <p><strong>Ability Score Increase:</strong> Your Wisdom score increases by 1.</p>
-                            <p><strong>Dwarven Toughness:</strong> Your hit point maximum increases by 1, and it increases by 1 every time you gain a level.</p>`
-                    },
-                    'Mountain Dwarf': {
-                        asi: ["STR +2"],
-                        htmlContent: `
-                            <h4>Subrace: Mountain Dwarf</h4>
-                            <p><strong>Ability Score Increase:</strong> Your Strength score increases by 2.</p>
-                            <p><strong>Dwarven Armor Training:</strong> You have proficiency with light and medium armor.</p>`
-                    }
-                }
-            },
-            'Halfling': {
-                base: {
-                    asi: ["DEX +2"],
-                    htmlContent: `
-                        <h3>Halfling Traits</h3>
-                        <p>Your halfling character has a number of traits in common with all other halflings.</p>
-                        <p><strong>Ability Score Increase:</strong> Your Dexterity score increases by 2.</p>
-                        <p><strong>Age:</strong> A halfling reaches adulthood at the age of 20 and generally lives into the middle of his or her second century.</p>
-                        <p><strong>Size:</strong> Halflings average about 3 feet tall and weigh about 40 pounds. Your size is Small.</p>
-                        <p><strong>Speed:</strong> Your base walking speed is 25 feet.</p>
-                        <p><strong>Lucky:</strong> When you roll a 1 on the d20 for an attack roll, ability check, or saving throw, you can reroll the die and must use the new roll.</p>
-                        <p><strong>Brave:</strong> You have advantage on saving throws against being frightened.</p>
-                        <p><strong>Halfling Nimbleness:</strong> You can move through the space of any creature that is of a size larger than yours.</p>`
-                },
-                subraces: {
-                    'Lightfoot': {
-                        asi: ["CHA +1"],
-                        htmlContent: `
-                            <h4>Subrace: Lightfoot</h4>
-                            <p><strong>Ability Score Increase:</strong> Your Charisma score increases by 1.</p>
-                            <p><strong>Naturally Stealthy:</strong> You can attempt to hide even when you are obscured only by a creature that is at least one size larger than you.</p>`
-                    },
-                    'Stout': {
-                        asi: ["CON +1"],
-                        htmlContent: `
-                            <h4>Subrace: Stout</h4>
-                            <p><strong>Ability Score Increase:</strong> Your Constitution score increases by 1.</p>
-                            <p><strong>Stout Resilience:</strong> You have advantage on saving throws against poison, and you have resistance against poison damage.</p>`
-                    }
-                }
-            }
-        };
-        // --- End New Race Info Data ---
-
-
-        // --- Modified Multiclass Logic ---
-        let classCount = 0; // Start at 0
-        const MAX_CLASSES = 3;
-
-        function createClassEntry(isFirst = false) {
-            if (classCount >= MAX_CLASSES) return;
-
-            classCount++;
-            const entryDiv = document.createElement('div');
-            entryDiv.className = 'class-entry';
-
-            const newSelect = document.createElement('select');
-            newSelect.className = 'class-name-select';
-            newSelect.innerHTML = CLASS_OPTIONS;
-
-            const newLevelInput = document.createElement('input');
-            newLevelInput.type = 'number';
-            newLevelInput.className = 'class-level-input';
-            newLevelInput.value = 1;
-            newLevelInput.min = 1;
-            newLevelInput.max = 20;
-
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'btn-remove-class';
-            removeBtn.textContent = 'X';
-            removeBtn.onclick = () => {
-                classContainer.removeChild(entryDiv);
-                classCount--;
-                btnAddMulticlass.style.display = 'block';
-                updateCharacterSheet(); // Recalculate everything
-            };
-            
-            // First class cannot be removed
-            if (isFirst) {
-                removeBtn.style.display = 'none';
-            }
-
-            entryDiv.appendChild(newSelect);
-            entryDiv.appendChild(newLevelInput);
-            entryDiv.appendChild(removeBtn);
-            classContainer.appendChild(entryDiv);
-
-            if (classCount >= MAX_CLASSES) {
-                btnAddMulticlass.style.display = 'none';
-            }
-            
-            // Add listeners to new elements
-            newSelect.addEventListener('input', updateCharacterSheet);
-            newLevelInput.addEventListener('input', updateCharacterSheet);
-        }
-
-        // --- New Character Sheet Update Functions ---
-        function updateCharacterSheet() {
-            calculateTotalLevel();
-            calculateFeatures(); // This will now also update racial features
-        }
-
-        function calculateTotalLevel() {
-            let totalLevel = 0;
-            document.querySelectorAll('.class-level-input').forEach(input => {
-                totalLevel += parseInt(input.value) || 0;
-            });
-            totalLevelEl.textContent = totalLevel;
-            return totalLevel;
-        }
-
-function calculateFeatures() {
-  const featuresContainer = document.getElementById('features-container');
-  featuresContainer.innerHTML = '';
-
-  let totalASIs = 0;
-  const classEntries = document.querySelectorAll('.class-entry');
-
-  // racial ASI code stays here…
-
-  if (classEntries.length === 0) {
-    featuresContainer.innerHTML =
-      '<p class="text-gray-400">Add a class to see features.</p>';
-    return;
-  }
-
-  classEntries.forEach(entry => {
-    const className = entry.querySelector('.class-name-select').value;
-    const classLevel = parseInt(
-      entry.querySelector('.class-level-input').value,
-      10
-    ) || 1;
-
-    const classCfg = CLASSDATA[className];   // from classes.js
-    const classRef = classCfg;  // class config holds levels/featureDetails directly
-
-    if (!classRef || !classRef.levels) return;
-
-    // 2.1. Level‑based features from CLASSES
-    for (let lvl = 1; lvl <= classLevel; lvl++) {
-      const lvlInfo = classRef.levels[lvl];
-      if (!lvlInfo || !Array.isArray(lvlInfo.features)) continue;
-
-      lvlInfo.features.forEach(featName => {
-        const featEl = document.createElement('div');
-        featEl.className = 'text-blue-300 text-sm';
-
-        const detail =
-          classRef.featureDetails && classRef.featureDetails[featName]
-            ? classRef.featureDetails[featName]
-            : '';
-
-        featEl.textContent = `${className} ${lvl}: ${featName}${detail ? ' – ' + detail : ''}`;
-        featuresContainer.appendChild(featEl);
-      });
-    }
-
-    // 2.2. ASI unlocks from CLASSES
-    if (Array.isArray(classCfg?.asiLevels)) {
-      const gained = classCfg.asiLevels.filter(l => l <= classLevel).length;
-      totalASIs += gained;
-    }
-  });
-
-  if (totalASIs > 0) {
-    const asiEl = document.createElement('div');
-    asiEl.className = 'text-green-300 font-medium';
-    asiEl.textContent = `Class ASI Unlocks: ${totalASIs}`;
-    featuresContainer.appendChild(asiEl);
-  }
-}
-
-
-        // --- End Character Sheet Update Functions ---
-
-        // --- Modified Race Info Update Function ---
-        function updateRaceSelection() {
-            const selectedRaceName = raceInput.value;
-            const raceData = RACE_DATA[selectedRaceName];
-            
-            subraceContainer.innerHTML = ''; // Clear old subrace selector
-
-            if (raceData && raceData.subraces) {
-                // Create label
-                const label = document.createElement('label');
-                label.htmlFor = 'char-subrace';
-                label.className = 'block text-sm font-medium text-gray-300 mb-1';
-                label.textContent = 'Subrace';
-                
-                // Create select
-                const subraceSelect = document.createElement('select');
-                subraceSelect.id = 'char-subrace';
-                // (styling is applied via CSS rule)
-
-                // Populate options
-                const subraceNames = Object.keys(raceData.subraces);
-                subraceNames.forEach(subraceName => {
-                    const option = document.createElement('option');
-                    option.value = subraceName;
-                    option.textContent = subraceName;
-                    subraceSelect.appendChild(option);
-                });
-
-                // Add listener to *new* select
-                subraceSelect.addEventListener('input', updateRaceInfoPanel);
-                subraceSelect.addEventListener('input', updateCharacterSheet); // Also update features
-                
-                subraceContainer.appendChild(label);
-                subraceContainer.appendChild(subraceSelect);
-                
-                // Show container
-                subraceContainer.classList.remove('hidden');
-            } else {
-                // No subraces, hide container
-                subraceContainer.classList.add('hidden');
-            }
-            
-            // ALWAYS update the info panel and features
-            updateRaceInfoPanel();
-            updateCharacterSheet();
-        }
-        
-        function updateRaceInfoPanel() {
-            const selectedRaceName = raceInput.value;
-            const raceData = RACE_DATA[selectedRaceName];
-            
-            const subraceSelect = document.getElementById('char-subrace');
-            const selectedSubraceName = subraceSelect ? subraceSelect.value : null;
-            
-            let html = '';
-
-            if (raceData) {
-                // Add base traits
-                html += raceData.base.htmlContent;
-                
-                // Add subrace traits if a subrace is selected
-                if (selectedSubraceName && raceData.subraces[selectedSubraceName]) {
-                    html += raceData.subraces[selectedSubraceName].htmlContent;
-                }
-                
-                raceInfoPanel.innerHTML = html;
-            } else {
-                // Fallback
-                raceInfoPanel.innerHTML = '<p class="text-gray-400">Select a race to see details.</p>';
-            }
-        }
-        // --- End New Race Info Function ---
-clearBtn.style.display = 'none';
-
-
-
-        function showMessage(msg, isError = false) {
-            messageBox.textContent = msg;
-            messageBox.classList.remove('hidden', isError ? 'text-green-300' : 'text-red-300');
-            messageBox.classList.add(isError ? 'text-red-300' : 'text-green-300');
-            
-            setTimeout(() => {
-                messageBox.classList.add('hidden');
-            }, 3000);
-        }
-        
-        function initPreview3D() {
-            const container = document.getElementById('preview-canvas-container');
-            const canvas = document.getElementById('preview-canvas');
-            
-            scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x4a4a4a);
-            
-            const aspect = container.clientWidth / container.clientHeight;
-            camera = new THREE.PerspectiveCamera(75, aspect, 0.1, 1000);
-            camera.position.set(0, 1, 2.5);
-            camera.lookAt(0, 0.5, 0); 
-
-            renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true });
-            renderer.setSize(container.clientWidth, container.clientHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
-            
-            controls = new OrbitControls(camera, renderer.domElement);
-            controls.target.set(0, 0.5, 0); 
-            controls.enableDamping = true;
-            controls.enablePan = false;
-            controls.minDistance = 1.5;
-            controls.maxDistance = 5;
-
-            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
-            scene.add(ambientLight);
-            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
-            directionalLight.position.set(2, 5, 3);
-            scene.add(directionalLight);
-
-            const groundGeo = new THREE.PlaneGeometry(10, 10);
-            const groundMat = new THREE.MeshStandardMaterial({ color: 0x333333 });
-            const ground = new THREE.Mesh(groundGeo, groundMat);
-            ground.rotation.x = -Math.PI / 2;
-            ground.position.y = -0.5;
-            scene.add(ground);
-
-            modelMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
-            eyeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
-
-            createBody();
-            animatePreview();
-        }
-        
-        function createBody() {
-            previewModel = new THREE.Group();
-            
-            const torsoGeo = new THREE.CylinderGeometry(0.3, 0.3, BASE_TORSO_HEIGHT, 32);
-            torso = new THREE.Mesh(torsoGeo, modelMaterial);
-            torso.position.y = 0; 
-            previewModel.add(torso);
-
-            const headGeo = new THREE.SphereGeometry(BASE_HEAD_RADIUS, 32, 32);
-            head = new THREE.Mesh(headGeo, modelMaterial);
-            head.position.y = (BASE_TORSO_HEIGHT / 2) + BASE_HEAD_RADIUS;
-            previewModel.add(head);
-
-            const eyeGeo = new THREE.SphereGeometry(0.05, 16, 16);
-            leftEye = new THREE.Mesh(eyeGeo, eyeMaterial);
-            leftEye.position.set(-0.15, head.position.y + 0.1, BASE_HEAD_RADIUS - 0.05);
-            previewModel.add(leftEye);
-            
-            rightEye = new THREE.Mesh(eyeGeo, eyeMaterial);
-            rightEye.position.set(0.15, head.position.y + 0.1, BASE_HEAD_RADIUS - 0.05);
-            previewModel.add(rightEye);
-            
-            const armGeo = new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16);
-            leftArm = new THREE.Mesh(armGeo, modelMaterial);
-            leftArm.position.set(-0.4, 0, 0);
-            previewModel.add(leftArm);
-            
-            rightArm = new THREE.Mesh(armGeo, modelMaterial);
-            rightArm.position.set(0.4, 0, 0);
-            previewModel.add(rightArm);
-            
-            const legGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16); // Fixed length
-            leftLeg = new THREE.Mesh(legGeo, modelMaterial);
-            leftLeg.position.set(-0.15, -0.5, 0);
-            previewModel.add(leftLeg);
-            
-            rightLeg = new THREE.Mesh(legGeo, modelMaterial);
-            rightLeg.position.set(0.15, -0.5, 0);
-            previewModel.add(rightLeg);
-
-            scene.add(previewModel);
-            previewModel.position.y = 0.5;
-        }
-
-        function updateModelAppearance() {
-            const color = colorInput.value;
-            const heightScale = parseFloat(heightSlider.value);
-            const headScale = parseFloat(headSlider.value);
-            const armScale = parseFloat(armSlider.value);
-
-            modelMaterial.color.set(color);
-
-            torso.scale.y = heightScale;
-            torso.position.y = (BASE_TORSO_HEIGHT * heightScale) / 2 - 0.5; 
-
-            head.scale.set(headScale, headScale, headScale);
-            const scaledHeadRadius = BASE_HEAD_RADIUS * headScale;
-            head.position.y = (BASE_TORSO_HEIGHT * heightScale) + scaledHeadRadius - 0.5;
-
-            leftEye.position.y = head.position.y + (0.1 * headScale);
-            rightEye.position.y = head.position.y + (0.1 * headScale);
-            leftEye.position.z = (scaledHeadRadius - 0.05);
-            rightEye.position.z = (scaledHeadRadius - 0.05);
-            
-            leftArm.scale.y = armScale;
-            rightArm.scale.y = armScale;
-            leftArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
-            rightArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
-            
-            leftLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
-            rightLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
-        }
-
-        function animatePreview() {
-            requestAnimationFrame(animatePreview);
-            controls.update();
-            renderer.render(scene, camera);
-        }
-        
-        function onPreviewResize() {
-            const container = document.getElementById('preview-canvas-container');
-            if (!container) return;
-            
-            const width = container.clientWidth;
-            const height = 300; // Fixed height
-            
-            camera.aspect = width / height;
-            camera.updateProjectionMatrix();
-            renderer.setSize(width, height);
-        }
-
-        // --- Event Listeners ---
-        window.addEventListener('resize', onPreviewResize);
-        
-        // --- Modified Listener for Race Info ---
-        raceInput.addEventListener('input', updateRaceSelection);
-        // --- End Modified ---
-
-        colorInput.addEventListener('input', updateModelAppearance);
-        heightSlider.addEventListener('input', updateModelAppearance);
-        headSlider.addEventListener('input', updateModelAppearance);
-        armSlider.addEventListener('input', updateModelAppearance);
-        
-        statsContainer.addEventListener('click', (e) => {
-            if (e.target.classList.contains('stat-btn')) {
-                const { stat, op } = e.target.dataset;
-                handleStatChange(stat, op);
-            }
-        });
-        
-        // Listener for adding classes
-        btnAddMulticlass.addEventListener('click', () => createClassEntry(false));
-
-
-
-// Save character - FINAL VERSION
-// Save character - FINAL VERSION
-form.addEventListener('submit', (e) => {
-  e.preventDefault();
-  console.log('SUBMIT handler fired');
-
-  if (!window.socket || !window.currentUsername) {
-    showMessage('Not connected to server. Login first.', true);
-    return;
-  }
-
-  const charName = nameInput.value.trim();
-  if (!charName) {
-    showMessage('Please enter a character name.', true);
-    return;
-  }
-
-  if (classCount === 0) {
-    showMessage('Please add at least one class.', true);
-    return;
-  }
-
-  // Build classes array from actual UI rows
-  const classEntries = document.querySelectorAll('#class-container .class-entry');
-  const classes = Array.from(classEntries).map(entry => {
-    const nameEl  = entry.querySelector('.class-name-select');
-    const levelEl = entry.querySelector('.class-level-input');
-
-    const name  = nameEl  ? nameEl.value : 'Unknown';
-    const level = levelEl ? (parseInt(levelEl.value, 10) || 1) : 1;
-
-    return { name, level };
-  });
-
-  const subraceSelect   = document.getElementById('char-subrace');
-  const selectedSubrace = subraceSelect ? subraceSelect.value : null;
-
-  const newChar = {
-    id: crypto.randomUUID(),
-    name: charName,
-    classes: classes,
-    race: raceInput.value,
-    subrace: selectedSubrace,
-    color: colorInput.value,
-    stats: { ...stats },
-    appearance: {
-      height: parseFloat(heightSlider.value),
-      headSize: parseFloat(headSlider.value),
-      armLength: parseFloat(armSlider.value)
-    },
-    owner: window.currentUsername
-  };
-
-  console.log('EMITTING save-character', newChar);
-
-  window.socket.emit('save-character', {
-    charData: newChar,
-    username: window.currentUsername
-  });
-});
-
-
-        // Delete character
-        charListDiv.addEventListener('click', (e) => {
-            if (e.target.tagName === 'BUTTON') {
-                const index = e.target.dataset.index;
-                deleteCharacter(index);
-            }
-        });
-
-        // Clear all characters
- clearBtn.style.display = 'none';
-
-
-        // --- Init ---
-        try {
-            initPreview3D();
-
-            updateModelAppearance(); 
-            updatePointsUI(); 
-            onPreviewResize(); 
-            
-            createClassEntry(true); 
-            // --- Modified Init Call ---
-            updateRaceSelection(); // This now calls updateCharacterSheet and updateRaceInfoPanel internally
-            // --- End Modified ---
-            
-        } catch (e) {
-            console.error('Fatal Error on Init:', e);
-            messageBox.textContent = 'A fatal error occurred. Please refresh.';
-            messageBox.classList.remove('hidden');
-            messageBox.classList.add('text-red-300');
-        }
-
-    </script>
-    <!-- Socket.IO Client -->
-<script src="/socket.io/socket.io.js"></script>
-
-<script>
-  // Socket.IO Connection
-    // Fallback showMessage so socket code never crashes
-  function showMessage(msg, isError = false) {
-    const box = document.getElementById('message-box');
-    if (!box) {
-      console.log(isError ? '[ERROR]' : '[INFO]', msg);
-      return;
-    }
-    box.textContent = msg;
-    box.classList.remove('hidden');
-    box.classList.toggle('text-red-300', !!isError);
-    box.classList.toggle('text-green-300', !isError);
-    setTimeout(() => box.classList.add('hidden'), 3000);
-  }
-
-  // Socket.IO Connection
-  window.socket = null;
-  window.currentUsername = null;
-
-
-  // Session management
-  function getStoredUsername() {
-    return sessionStorage.getItem('vtt_username');
-  }
-
-  function setStoredUsername(username) {
-    sessionStorage.setItem('vtt_username', username);
-  }
-
-  function clearStoredUsername() {
-    sessionStorage.removeItem('vtt_username');
-  }
-
-  // Login handling
-  const loginOverlay = document.getElementById('login-overlay');
-  const usernameInput = document.getElementById('username-input');
-  const loginBtn = document.getElementById('login-btn');
-  const loginError = document.getElementById('login-error');
-
-  function showLoginError(message) {
-    loginError.textContent = message;
-    loginError.classList.remove('hidden');
-    setTimeout(() => {
-      loginError.classList.add('hidden');
-    }, 3000);
-  }
-
-  function handleLogin() {
-    const username = usernameInput.value.trim();
-    
-    if (!username || username.length < 2) {
-      showLoginError('Username must be at least 2 characters');
-      return;
-    }
-
-    loginBtn.disabled = true;
-    loginBtn.textContent = 'Connecting...';
-
-    // Connect to socket.io
-     window.socket = io();
-
-  window.socket.on('connect', () => {
-    console.log('Connected to server');
-    window.socket.emit('login', username);
-  });
-
-  window.socket.on('login-success', (userData) => {
-    console.log('Login successful:', userData);
-    window.currentUsername = userData.username;
-    setStoredUsername(window.currentUsername);
-
-    loginOverlay.classList.add('hidden');
-    showMessage(`Welcome, ${window.currentUsername}!`, false);
-  });
-
-  window.socket.on('load-user-characters', (characters) => {
-    console.log('Received characters:', characters);
-    displayCharacters(characters);
-  });
-
-  window.socket.on('character-saved-success', (charData) => {
-    console.log('Character saved:', charData);
-    showMessage('Character saved successfully!', false);
-  });
-
-  window.socket.on('character-deleted', (charId) => {
-    console.log('Character deleted:', charId);
-    window.socket.emit('get-characters');
-  });
-
-  window.socket.on('error', (message) => {
-    console.error('Server error:', message);
-    showLoginError(message);
-    loginBtn.disabled = false;
-    loginBtn.textContent = 'Login';
-  });
-
-  window.socket.on('disconnect', () => {
-    console.log('Disconnected from server');
-    showMessage('Disconnected from server', true);
-    });
-  }
-
-  // Event listeners
-  loginBtn.addEventListener('click', handleLogin);
-  usernameInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') handleLogin();
-  });
-
-  // Auto-login if session exists
-  window.addEventListener('DOMContentLoaded', () => {
-    const storedUsername = getStoredUsername();
-    if (storedUsername) {
-      usernameInput.value = storedUsername;
-      handleLogin();
-    }
-  });
-
-
-
-  // Display characters function
-  function displayCharacters(characters) {
-    const charListDiv = document.getElementById('character-list');
-    if (!charListDiv) return;
-
-    charListDiv.innerHTML = '';
-
-    if (characters.length === 0) {
-      charListDiv.innerHTML = '<p class="text-gray-400">No characters saved yet.</p>';
-      return;
-    }
-
-    characters.forEach((char, index) => {
-      const charEl = document.createElement('div');
-      charEl.className = 'p-2 border-b border-gray-600 flex justify-between items-center';
-
-      let totalLevel = 0;
-      let classDisplay = 'N/A';
-      if (Array.isArray(char.classes) && char.classes.length > 0) {
-        classDisplay = char.classes.map(c => {
-          totalLevel += c.level;
-          return `${c.name} ${c.level}`;
-        }).join(' / ');
-      }
-
-      const raceDisplay = char.subrace ? `${char.subrace}` : char.race;
-const ownerBadge = char.owner === window.currentUsername ? 
-  '' : 
-  `<span class="text-xs text-yellow-400 ml-2">(${char.owner})</span>`;
-
-
-      charEl.innerHTML = `
-        <div>
-          <span class="font-semibold" style="color: ${char.color}">${char.name}</span>${ownerBadge}
-          <span class="text-sm text-gray-400"> - Lvl ${totalLevel} ${raceDisplay} - ${classDisplay}</span>
+      <div class="rail">
+        <div class="panel" style="padding:12px;">
+          <canvas id="preview-canvas"></canvas>
         </div>
-        <button data-char-id="${char.id}" class="delete-char-btn text-red-400 hover:text-red-300 text-xs font-medium">X</button>
-      `;
+        <div class="panel" style="padding:12px;">
+          <div class="metrics" id="metrics"></div>
+          <div class="mods" id="mods" style="margin-top:6px;"></div>
+          <button class="btn btn-accent" id="save-btn" style="width:100%; margin-top:12px;">Save character</button>
+          <button class="btn btn-ghost btn-sm" id="new-btn" style="width:100%; margin-top:6px;">New / clear</button>
+          <div class="msg" id="msg"></div>
+        </div>
+        <div class="panel" style="padding:12px;">
+          <h3 style="font-size:14px; margin-bottom:8px;">Saved characters</h3>
+          <div class="saved" id="saved"><p style="color:var(--muted); font-size:13px;">None yet.</p></div>
+        </div>
+      </div>
+    </div>
+    <div class="credit">Game content uses the SRD 5.1 under CC BY 4.0. See data/srd/ATTRIBUTION.md.</div>
+  </div>
 
-      charListDiv.appendChild(charEl);
-    });
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import {
+      loadSRD, ABILITIES, ABILITY_NAMES, STANDARD_ARRAY, POINT_BUY_COST, POINT_BUY_BUDGET,
+      abilityMod, fmtMod, proficiencyBonus
+    } from './srd.js';
 
-    // Add delete event listeners
-    document.querySelectorAll('.delete-char-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        const charId = e.target.dataset.charId;
-        if (confirm('Delete this character?')) {
-          window.socket.emit('delete-character', charId);
-        }
+    let SRD = null;
+    let socket = null;
+    let username = null;
+    let activeTab = 'identity';
+    const TABS = [
+      ['identity','Identity'], ['class','Class'], ['abilities','Abilities'],
+      ['skills','Skills'], ['appearance','Appearance'], ['review','Review']
+    ];
+
+    const DEFAULT_COLORS = { skin:'#c68642', hair:'#3b2716', torso:'#2f6e56', legs:'#3a3f4a', eyes:'#1a1a1a' };
+    const RACE_PRESETS = {
+      dwarf:{ height:0.85, build:1.2, colors:{ skin:'#caa472', hair:'#6b4423' } },
+      'mountain-dwarf':{ height:0.85, build:1.25 },
+      halfling:{ height:0.7, build:0.9, headSize:1.1 },
+      gnome:{ height:0.7, build:0.95, headSize:1.15, colors:{ hair:'#b34d3a' } },
+      elf:{ height:1.05, build:0.85, colors:{ hair:'#d9c39a' } },
+      'half-elf':{ height:1.0, build:0.95 },
+      'half-orc':{ height:1.08, build:1.2, colors:{ skin:'#7faa6f' } },
+      dragonborn:{ height:1.1, build:1.2, colors:{ skin:'#9a5b3b' } },
+      tiefling:{ height:1.0, build:1.0, colors:{ skin:'#b0563f', hair:'#1a1a22' } },
+      human:{ height:1.0, build:1.0 }
+    };
+
+    function defaultChar() {
+      return {
+        id:null, name:'',
+        race:'human', subrace:null, background:'acolyte', alignment:null,
+        classes:[{ class:'fighter', subclass:null, level:1 }],
+        abilityMethod:'point-buy',
+        baseAbilities:{ str:8, dex:8, con:8, int:8, wis:8, cha:8 },
+        racialChoice:[],
+        skills:[],
+        appearance:{ height:1, build:1, headSize:1, armLength:1, legLength:1, colors:{ ...DEFAULT_COLORS } }
+      };
+    }
+    let char = defaultChar();
+
+    /* ---------- Derived stats ---------- */
+    function derive() {
+      const finals = SRD.finalAbilities(char.baseAbilities, char.race, char.subrace, char.racialChoice);
+      const mods = {}; for (const a of ABILITIES) mods[a] = abilityMod(finals[a]);
+      const total = SRD.totalLevel(char.classes);
+      const prof = proficiencyBonus(total);
+      const saves = SRD.saveProficiencies(char.classes);
+      const granted = grantedSkills();
+      const proficient = new Set([...granted, ...char.skills]);
+      const hp = SRD.maxHP(char.classes, mods.con);
+      const ac = SRD.baseAC(mods.dex);
+      const perceptionBonus = mods.wis + (proficient.has('perception') ? prof : 0);
+      return { finals, mods, total, prof, saves, proficient, hp, ac,
+        speed: SRD.speed(char.race), init: mods.dex, pp: 10 + perceptionBonus };
+    }
+    function grantedSkills() {
+      const r = SRD.raceSkillGrants(char.race);
+      const bg = SRD.backgroundSkillGrants(char.background);
+      return new Set([...r.fixed, ...bg]);
+    }
+
+    /* ---------- Rendering ---------- */
+    const $ = (id) => document.getElementById(id);
+
+    function renderTabs() {
+      $('tabs').innerHTML = TABS.map((t,i) =>
+        `<div class="tab ${t[0]===activeTab?'active':''}" data-tab="${t[0]}"><span class="num">${i+1}</span>${t[1]}</div>`
+      ).join('');
+      $('tabs').querySelectorAll('.tab').forEach(el =>
+        el.onclick = () => { activeTab = el.dataset.tab; renderTabs(); renderTab(); });
+    }
+
+    function opt(list, sel) {
+      return list.map(o => `<option value="${o.index}" ${o.index===sel?'selected':''}>${o.name}</option>`).join('');
+    }
+
+    function renderTab() {
+      const b = $('tab-body');
+      if (activeTab === 'identity') b.innerHTML = tabIdentity();
+      else if (activeTab === 'class') b.innerHTML = tabClass();
+      else if (activeTab === 'abilities') b.innerHTML = tabAbilities();
+      else if (activeTab === 'skills') b.innerHTML = tabSkills();
+      else if (activeTab === 'appearance') b.innerHTML = tabAppearance();
+      else if (activeTab === 'review') b.innerHTML = tabReview();
+      wireTab();
+    }
+
+    function tabIdentity() {
+      const race = SRD.get('races', char.race);
+      const subraces = SRD.subracesForRace(char.race);
+      const rb = SRD.racialAbilityBonuses(char.race, char.subrace);
+      const bonusText = Object.entries(rb.fixed).map(([a,v]) => `${a.toUpperCase()} ${fmtMod(v)}`).join(', ') || '—';
+      let racialChoiceUI = '';
+      if (rb.options) {
+        racialChoiceUI = `<div class="row"><label class="fld">Racial ability boost — choose ${rb.options.choose} (${'+1'} each)</label>
+          <div style="display:flex; flex-wrap:wrap; gap:8px;">${rb.options.from.map(a =>
+            `<label class="pill" style="cursor:pointer; padding:6px 10px;"><input type="checkbox" class="rc" value="${a}" ${char.racialChoice.includes(a)?'checked':''}/> ${a.toUpperCase()}</label>`).join('')}</div></div>`;
+      }
+      return `<h2>Identity</h2>
+        <div class="row"><label class="fld">Character name</label><input type="text" id="f-name" value="${char.name||''}" placeholder="e.g. Thorin"/></div>
+        <div class="grid2">
+          <div class="row"><label class="fld">Race</label><select id="f-race">${opt(SRD.races, char.race)}</select></div>
+          <div class="row"><label class="fld">Subrace</label><select id="f-subrace" ${subraces.length?'':'disabled'}>
+            <option value="">${subraces.length?'— none —':'(no subraces)'}</option>${opt(subraces, char.subrace)}</select></div>
+        </div>
+        <div class="grid2">
+          <div class="row"><label class="fld">Background</label><select id="f-bg">${opt(SRD.backgrounds, char.background)}</select></div>
+          <div class="row"><label class="fld">Alignment</label><select id="f-align"><option value="">— none —</option>${opt(SRD.alignments, char.alignment)}</select></div>
+        </div>
+        ${racialChoiceUI}
+        <div class="info"><strong>${race?race.name:''}</strong> — speed ${race?race.speed:'?'} ft, size ${race?race.size:''}. Ability bonuses: ${bonusText}.
+          <div style="margin-top:6px;">${race && race.traits ? race.traits.map(t=>t.name).join(' · ') : ''}</div></div>
+        ${stepNav()}`;
+    }
+
+    function tabClass() {
+      const total = SRD.totalLevel(char.classes);
+      const rows = char.classes.map((c,i) => {
+        const subs = SRD.subclassesForClass(c.class);
+        const choiceLvl = SRD.subclassChoiceLevel(c.class);
+        const canSub = c.level >= choiceLvl && subs.length;
+        return `<div class="class-row" data-i="${i}">
+          <select class="c-class">${opt(SRD.classes, c.class)}</select>
+          <input type="number" class="c-level" value="${c.level}" min="1" max="20"/>
+          <select class="c-sub" ${canSub?'':'disabled'}>
+            <option value="">${canSub?'— subclass —':`subclass @ ${choiceLvl}`}</option>${opt(subs, c.subclass)}</select>
+          <button class="btn btn-danger c-del" ${char.classes.length>1?'':'disabled'}>✕</button>
+        </div>`;
+      }).join('');
+      const feats = SRD.classFeatures(char.classes);
+      const featHTML = feats.length ? feats.map(f =>
+        `<div class="feat"><span class="lvl">L${f.level}</span><div><b>${f.name}</b><div style="color:var(--muted); margin-top:2px;">${(f.desc||'').slice(0,160)}${(f.desc||'').length>160?'…':''}</div></div></div>`
+      ).join('') : '<p style="color:var(--muted);">Pick a class to see features.</p>';
+      return `<h2>Class <span style="float:right; font-size:13px; color:var(--muted); font-weight:400;">Total level ${total} · proficiency ${fmtMod(proficiencyBonus(total))}</span></h2>
+        <div id="class-list">${rows}</div>
+        <button class="btn btn-sm" id="add-class" ${char.classes.length<3?'':'disabled'} style="margin:6px 0 16px;">+ Add class (multiclass)</button>
+        <h3 style="font-size:14px; color:var(--muted); margin-bottom:8px;">Features gained</h3>
+        ${featHTML}
+        ${stepNav()}`;
+    }
+
+    function tabAbilities() {
+      const finals = SRD.finalAbilities(char.baseAbilities, char.race, char.subrace, char.racialChoice);
+      const method = char.abilityMethod;
+      let body = '';
+      if (method === 'point-buy') {
+        const used = ABILITIES.reduce((s,a)=> s + (POINT_BUY_COST[char.baseAbilities[a]] ?? 0), 0);
+        body = `<div class="pool">Points remaining: <b>${POINT_BUY_BUDGET - used}</b> / ${POINT_BUY_BUDGET}</div>` +
+          ABILITIES.map(a => abilityRow(a, finals[a], true)).join('');
+      } else if (method === 'standard-array') {
+        body = `<div class="pool">Assign ${STANDARD_ARRAY.join(', ')} — each once</div>` +
+          ABILITIES.map(a => {
+            const used = ABILITIES.filter(x=>x!==a).map(x=>char.baseAbilities[x]);
+            const opts = STANDARD_ARRAY.map(v => `<option value="${v}" ${char.baseAbilities[a]===v?'selected':''} ${used.includes(v)&&char.baseAbilities[a]!==v?'disabled':''}>${v}</option>`).join('');
+            return `<div class="ability-row"><label>${ABILITY_NAMES[a]}</label><span></span>
+              <select class="sa" data-a="${a}" style="width:64px;">${opts}</select><span></span>
+              <div class="final"><b>${finals[a]}</b> (${fmtMod(abilityMod(finals[a]))})</div></div>`;
+          }).join('');
+      } else {
+        body = ABILITIES.map(a =>
+          `<div class="ability-row"><label>${ABILITY_NAMES[a]}</label><span></span>
+            <input type="number" class="man" data-a="${a}" min="1" max="30" value="${char.baseAbilities[a]}" style="width:64px; text-align:center;"/><span></span>
+            <div class="final"><b>${finals[a]}</b> (${fmtMod(abilityMod(finals[a]))})</div></div>`).join('');
+      }
+      return `<h2>Abilities</h2>
+        <div class="seg">
+          <button data-m="point-buy" class="${method==='point-buy'?'on':''}">Point buy</button>
+          <button data-m="standard-array" class="${method==='standard-array'?'on':''}">Standard array</button>
+          <button data-m="manual" class="${method==='manual'?'on':''}">Manual</button>
+        </div>
+        ${body}
+        <div class="info" style="margin-top:12px;">Final scores include racial bonuses. Base values shown are pre-racial.</div>
+        ${stepNav()}`;
+    }
+    function abilityRow(a, finalVal, buy) {
+      const base = char.baseAbilities[a];
+      return `<div class="ability-row" data-a="${a}">
+        <label>${ABILITY_NAMES[a]}</label>
+        <button class="stepper dec" ${base<=8?'disabled':''}>−</button>
+        <div class="score">${base}</div>
+        <button class="stepper inc" ${base>=15?'disabled':''}>+</button>
+        <div class="final"><b>${finalVal}</b> (${fmtMod(abilityMod(finalVal))})</div></div>`;
+    }
+
+    function tabSkills() {
+      const granted = grantedSkills();
+      const classChoice = SRD.classSkillChoice(char.classes[0] && char.classes[0].class);
+      const allowed = classChoice ? new Set(classChoice.options) : new Set();
+      const chosenInPool = char.skills.filter(s => allowed.has(s)).length;
+      const remaining = classChoice ? classChoice.choose - chosenInPool : 0;
+      const items = SRD.skills.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(sk => {
+        const ab = sk.ability_score.index;
+        const isGranted = granted.has(sk.index);
+        const inPool = allowed.has(sk.index);
+        const checked = isGranted || char.skills.includes(sk.index);
+        const disabled = isGranted || (!inPool) || (!checked && remaining<=0);
+        return `<div class="skill-item ${isGranted?'locked':''}">
+          <input type="checkbox" class="sk" value="${sk.index}" ${checked?'checked':''} ${disabled?'disabled':''}/>
+          <span>${sk.name}</span>
+          ${isGranted?'<span class="pill">granted</span>':(inPool?'':'<span class="pill">n/a</span>')}
+          <span class="sk-ability">${ab}</span></div>`;
+      }).join('');
+      return `<h2>Skills</h2>
+        <div class="pool">${classChoice ? `Choose <b>${remaining}</b> more from your class list` : 'This class grants no skill choices.'}</div>
+        <div>${items}</div>
+        <div class="info" style="margin-top:12px;">“granted” skills come from your race/background. “n/a” aren’t on your class list.</div>
+        ${stepNav()}`;
+    }
+
+    function tabAppearance() {
+      const ap = char.appearance, c = ap.colors;
+      const slider = (key,label,min,max) => `<div class="slider-row"><span>${label}</span>
+        <input type="range" class="ap-s" data-k="${key}" min="${min}" max="${max}" step="0.05" value="${ap[key]}"/>
+        <span>${Number(ap[key]).toFixed(2)}</span></div>`;
+      const color = (key,label) => `<label>${label}<input type="color" class="ap-c" data-k="${key}" value="${c[key]}"/></label>`;
+      return `<h2>Appearance</h2>
+        <button class="btn btn-sm" id="apply-preset" style="margin-bottom:14px;">Apply ${SRD.get('races',char.race)?.name||''} preset</button>
+        ${slider('height','Height',0.6,1.4)}
+        ${slider('build','Build',0.7,1.4)}
+        ${slider('headSize','Head',0.7,1.4)}
+        ${slider('armLength','Arms',0.7,1.4)}
+        ${slider('legLength','Legs',0.7,1.4)}
+        <div class="color-row" style="margin-top:12px;">
+          ${color('skin','Skin')} ${color('hair','Hair')} ${color('torso','Shirt')} ${color('legs','Legs')} ${color('eyes','Eyes')}
+        </div>
+        ${stepNav()}`;
+    }
+
+    function tabReview() {
+      const d = derive();
+      const classes = char.classes.map(c => {
+        const cl = SRD.get('classes', c.class); const sub = c.subclass && SRD.get('subclasses', c.subclass);
+        return `${cl?cl.name:c.class} ${c.level}${sub?` (${sub.name})`:''}`;
+      }).join(' / ');
+      const race = SRD.get('races', char.race); const sub = char.subrace && SRD.get('subraces', char.subrace);
+      const skills = [...d.proficient].map(s => SRD.get('skills', s)?.name).filter(Boolean).sort().join(', ') || '—';
+      return `<h2>Review</h2>
+        <div class="info" style="line-height:1.7;">
+          <div style="font-size:16px; color:#fff; margin-bottom:6px;"><strong>${char.name||'(unnamed)'}</strong></div>
+          ${sub?sub.name:(race?race.name:'')} · ${classes} · ${char.background?SRD.get('backgrounds',char.background).name:''}
+          ${char.alignment?(' · '+SRD.get('alignments',char.alignment).name):''}
+          <hr style="border-color:var(--line); margin:10px 0;"/>
+          HP <strong>${d.hp}</strong> · AC <strong>${d.ac}</strong> · Speed <strong>${d.speed}</strong> · Init <strong>${fmtMod(d.init)}</strong> · Prof <strong>${fmtMod(d.prof)}</strong> · Passive Perception <strong>${d.pp}</strong>
+          <div style="margin-top:8px;">Saves: ${ABILITIES.map(a=>`${a.toUpperCase()} ${fmtMod(d.mods[a]+(d.saves.has(a)?d.prof:0))}${d.saves.has(a)?'*':''}`).join(', ')}</div>
+          <div style="margin-top:6px;">Skills: ${skills}</div>
+        </div>
+        <p style="color:var(--muted); font-size:13px; margin-top:12px;">Use “Save character” on the right. * = proficient.</p>
+        ${stepNav()}`;
+    }
+
+    function stepNav() {
+      const i = TABS.findIndex(t=>t[0]===activeTab);
+      return `<div class="stepnav">
+        <button class="btn btn-sm nav-prev" ${i<=0?'disabled':''}>← Back</button>
+        <button class="btn btn-sm btn-accent nav-next" ${i>=TABS.length-1?'disabled':''}>Next →</button></div>`;
+    }
+
+    /* ---------- Wiring ---------- */
+    function refresh() { renderTab(); renderRail(); updateModel(); }
+
+    function wireTab() {
+      const b = $('tab-body');
+      b.querySelectorAll('.nav-prev').forEach(e=>e.onclick=()=>{ const i=TABS.findIndex(t=>t[0]===activeTab); if(i>0){activeTab=TABS[i-1][0]; renderTabs(); renderTab();} });
+      b.querySelectorAll('.nav-next').forEach(e=>e.onclick=()=>{ const i=TABS.findIndex(t=>t[0]===activeTab); if(i<TABS.length-1){activeTab=TABS[i+1][0]; renderTabs(); renderTab();} });
+
+      if (activeTab === 'identity') {
+        $('f-name').oninput = e => { char.name = e.target.value; };
+        $('f-race').onchange = e => { char.race = e.target.value; char.subrace=null; char.racialChoice=[]; applyPreset(char.race); refresh(); };
+        $('f-subrace').onchange = e => { char.subrace = e.target.value || null; refresh(); };
+        $('f-bg').onchange = e => { char.background = e.target.value; refresh(); };
+        $('f-align').onchange = e => { char.alignment = e.target.value || null; };
+        b.querySelectorAll('.rc').forEach(cb => cb.onchange = () => {
+          const rb = SRD.racialAbilityBonuses(char.race, char.subrace);
+          const picked = [...b.querySelectorAll('.rc:checked')].map(x=>x.value);
+          if (picked.length <= (rb.options?rb.options.choose:0)) char.racialChoice = picked;
+          refresh();
+        });
+      } else if (activeTab === 'class') {
+        b.querySelectorAll('.class-row').forEach(row => {
+          const i = +row.dataset.i;
+          row.querySelector('.c-class').onchange = e => { char.classes[i].class=e.target.value; char.classes[i].subclass=null; refresh(); };
+          row.querySelector('.c-level').onchange = e => { char.classes[i].level=Math.max(1,Math.min(20,+e.target.value||1)); refresh(); };
+          row.querySelector('.c-sub').onchange = e => { char.classes[i].subclass=e.target.value||null; refresh(); };
+          row.querySelector('.c-del').onclick = () => { if(char.classes.length>1){char.classes.splice(i,1); refresh();} };
+        });
+        $('add-class').onclick = () => { if(char.classes.length<3){char.classes.push({class:'wizard',subclass:null,level:1}); refresh();} };
+      } else if (activeTab === 'abilities') {
+        b.querySelectorAll('.seg button').forEach(btn => btn.onclick = () => {
+          char.abilityMethod = btn.dataset.m;
+          if (char.abilityMethod==='standard-array') assignStandardArray();
+          refresh();
+        });
+        b.querySelectorAll('.ability-row[data-a]').forEach(row => {
+          const a = row.dataset.a;
+          const inc = row.querySelector('.inc'), dec = row.querySelector('.dec');
+          if (inc) inc.onclick = () => { if(canBuy(a,1)){ char.baseAbilities[a]++; refresh(); } };
+          if (dec) dec.onclick = () => { if(char.baseAbilities[a]>8){ char.baseAbilities[a]--; refresh(); } };
+        });
+        b.querySelectorAll('.sa').forEach(s => s.onchange = e => { char.baseAbilities[e.target.dataset.a]=+e.target.value; refresh(); });
+        b.querySelectorAll('.man').forEach(s => s.onchange = e => { char.baseAbilities[e.target.dataset.a]=Math.max(1,Math.min(30,+e.target.value||1)); refresh(); });
+      } else if (activeTab === 'skills') {
+        b.querySelectorAll('.sk').forEach(cb => cb.onchange = () => {
+          char.skills = [...b.querySelectorAll('.sk:checked')].map(x=>x.value).filter(v => !grantedSkills().has(v));
+          refresh();
+        });
+      } else if (activeTab === 'appearance') {
+        $('apply-preset').onclick = () => { applyPreset(char.race, true); refresh(); };
+        b.querySelectorAll('.ap-s').forEach(s => s.oninput = e => { char.appearance[e.target.dataset.k]=+e.target.value; e.target.nextElementSibling.textContent=(+e.target.value).toFixed(2); updateModel(); });
+        b.querySelectorAll('.ap-c').forEach(c => c.oninput = e => { char.appearance.colors[e.target.dataset.k]=e.target.value; updateModel(); });
+      }
+    }
+
+    function canBuy(a, delta) {
+      const next = char.baseAbilities[a] + delta;
+      if (next < 8 || next > 15) return false;
+      const used = ABILITIES.reduce((s,x)=> s + (POINT_BUY_COST[char.baseAbilities[x]] ?? 0), 0);
+      const cost = (POINT_BUY_COST[next] ?? 99) - (POINT_BUY_COST[char.baseAbilities[a]] ?? 0);
+      return used + cost <= POINT_BUY_BUDGET;
+    }
+    function assignStandardArray() {
+      ABILITIES.forEach((a,i)=> char.baseAbilities[a] = STANDARD_ARRAY[i] ?? 8);
+    }
+    function applyPreset(raceIdx, includeColors=true) {
+      const p = RACE_PRESETS[raceIdx]; if (!p) return;
+      for (const k of ['height','build','headSize','armLength','legLength']) if (p[k]!=null) char.appearance[k]=p[k];
+      if (includeColors && p.colors) Object.assign(char.appearance.colors, p.colors);
+    }
+
+    function renderRail() {
+      const d = derive();
+      $('metrics').innerHTML = [
+        ['HP',d.hp],['AC',d.ac],['Speed',d.speed],['Init',fmtMod(d.init)],['Prof',fmtMod(d.prof)],['PP',d.pp]
+      ].map(([l,v])=>`<div class="metric"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
+      $('mods').innerHTML = ABILITIES.map(a=>`<div class="m">${a.toUpperCase()}<b>${fmtMod(d.mods[a])}</b></div>`).join('');
+    }
+
+    /* ---------- 3D preview ---------- */
+    let scene, camera, renderer, controls, model, mats;
+    function initPreview() {
+      const canvas = $('preview-canvas');
+      const w = canvas.clientWidth || 300, h = 300;
+      scene = new THREE.Scene(); scene.background = new THREE.Color(0x2b2b2b);
+      camera = new THREE.PerspectiveCamera(75, w/h, 0.1, 1000); camera.position.set(0,1,2.6); camera.lookAt(0,0.5,0);
+      renderer = new THREE.WebGLRenderer({ canvas, antialias:true }); renderer.setSize(w,h); renderer.setPixelRatio(window.devicePixelRatio);
+      controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0,0.5,0); controls.enableDamping=true; controls.enablePan=false; controls.minDistance=1.6; controls.maxDistance=5;
+      scene.add(new THREE.AmbientLight(0xffffff,0.8));
+      const dl = new THREE.DirectionalLight(0xffffff,1); dl.position.set(2,5,3); scene.add(dl);
+      const ground = new THREE.Mesh(new THREE.PlaneGeometry(10,10), new THREE.MeshStandardMaterial({color:0x333333}));
+      ground.rotation.x=-Math.PI/2; ground.position.y=-0.5; scene.add(ground);
+      buildModel();
+      (function loop(){ requestAnimationFrame(loop); controls.update(); renderer.render(scene,camera); })();
+      window.addEventListener('resize', () => { const ww=canvas.clientWidth||300; renderer.setSize(ww,300); camera.aspect=ww/300; camera.updateProjectionMatrix(); });
+    }
+    function buildModel() {
+      if (model) scene.remove(model);
+      model = new THREE.Group();
+      mats = {
+        skin:new THREE.MeshLambertMaterial(), torso:new THREE.MeshLambertMaterial(),
+        legs:new THREE.MeshLambertMaterial(), hair:new THREE.MeshLambertMaterial(),
+        eye:new THREE.MeshBasicMaterial({color:0x111111})
+      };
+      const mk = (geo,mat,name)=>{ const m=new THREE.Mesh(geo,mat); m.name=name; model.add(m); return m; };
+      mk(new THREE.CylinderGeometry(0.3,0.3,1,24), mats.torso, 'torso');
+      mk(new THREE.SphereGeometry(0.4,24,24), mats.skin, 'head');
+      mk(new THREE.SphereGeometry(0.41,20,16,0,Math.PI*2,0,Math.PI*0.55), mats.hair, 'hair');
+      mk(new THREE.SphereGeometry(0.05,12,12), mats.eye, 'eyeL');
+      mk(new THREE.SphereGeometry(0.05,12,12), mats.eye, 'eyeR');
+      mk(new THREE.CylinderGeometry(0.08,0.08,0.8,12), mats.skin, 'armL');
+      mk(new THREE.CylinderGeometry(0.08,0.08,0.8,12), mats.skin, 'armR');
+      mk(new THREE.CylinderGeometry(0.1,0.1,0.9,12), mats.legs, 'legL');
+      mk(new THREE.CylinderGeometry(0.1,0.1,0.9,12), mats.legs, 'legR');
+      scene.add(model); model.position.y = 0.5;
+      updateModel();
+    }
+    function updateModel() {
+      if (!model) return;
+      const ap = char.appearance, c = ap.colors;
+      mats.skin.color.set(c.skin); mats.torso.color.set(c.torso); mats.legs.color.set(c.legs);
+      mats.hair.color.set(c.hair); mats.eye.color.set(c.eyes);
+      const g = n => model.getObjectByName(n);
+      const H=ap.height, B=ap.build, HS=ap.headSize, AL=ap.armLength, LL=ap.legLength;
+      const torso=g('torso'); torso.scale.set(B,H,B); torso.position.y = H/2 - 0.5;
+      const head=g('head'); head.scale.set(HS,HS,HS); const hr=0.4*HS; head.position.y = H + hr - 0.5;
+      const hair=g('hair'); hair.scale.set(HS,HS,HS); hair.position.y = head.position.y;
+      const eL=g('eyeL'), eR=g('eyeR'); const ey=head.position.y+0.08*HS, ez=hr-0.04;
+      eL.position.set(-0.13*HS,ey,ez); eR.position.set(0.13*HS,ey,ez);
+      const aL=g('armL'), aR=g('armR'); aL.scale.set(B,AL,B); aR.scale.set(B,AL,B);
+      const ay = torso.position.y + (H/2) - (0.8*AL/2);
+      aL.position.set(-0.4*B,ay,0); aR.position.set(0.4*B,ay,0);
+      const lL=g('legL'), lR=g('legR'); lL.scale.set(B,LL,B); lR.scale.set(B,LL,B);
+      const ly = torso.position.y - (H/2) - (0.9*LL/2) + 0.45;
+      lL.position.set(-0.15*B,ly,0); lR.position.set(0.15*B,ly,0);
+    }
+
+    /* ---------- Save / load ---------- */
+    function buildSaveObject() {
+      const ap = char.appearance;
+      return {
+        id: char.id || undefined,
+        name: char.name || 'Unnamed',
+        schemaVersion: 2,
+        race: char.race, subrace: char.subrace, background: char.background, alignment: char.alignment,
+        classes: char.classes.map(c => ({ ...c })),
+        abilityMethod: char.abilityMethod,
+        abilities: { ...char.baseAbilities }, racialChoice: [...char.racialChoice],
+        skills: [...char.skills],
+        appearance: { height:ap.height, build:ap.build, headSize:ap.headSize, armLength:ap.armLength, legLength:ap.legLength, colors:{...ap.colors} },
+        // back-compat for existing token renderers
+        color: ap.colors.torso,
+        stats: { ...char.baseAbilities },
+        owner: username
+      };
+    }
+    function loadIntoBuilder(c) {
+      char = defaultChar();
+      char.id = c.id || null; char.name = c.name || '';
+      char.race = c.race || 'human'; char.subrace = c.subrace || null;
+      char.background = c.background || 'acolyte'; char.alignment = c.alignment || null;
+      char.classes = Array.isArray(c.classes) && c.classes.length ? c.classes.map(x => ({ class: x.class || x.name?.toLowerCase?.() || 'fighter', subclass: x.subclass||null, level: x.level||1 })) : [{class:'fighter',subclass:null,level:1}];
+      char.abilityMethod = c.abilityMethod || 'manual';
+      char.baseAbilities = { ...char.baseAbilities, ...(c.abilities || c.stats || {}) };
+      char.racialChoice = c.racialChoice || [];
+      char.skills = c.skills || [];
+      if (c.appearance) char.appearance = {
+        height: c.appearance.height ?? 1, build: c.appearance.build ?? 1, headSize: c.appearance.headSize ?? 1,
+        armLength: c.appearance.armLength ?? 1, legLength: c.appearance.legLength ?? 1,
+        colors: { ...DEFAULT_COLORS, ...(c.appearance.colors || (c.color?{torso:c.color}:{})) }
+      };
+      activeTab = 'identity'; renderTabs(); buildModel(); refresh();
+      msg('Loaded ' + (c.name||'character'));
+    }
+    function renderSaved(list) {
+      const el = $('saved');
+      if (!list || !list.length) { el.innerHTML = '<p style="color:var(--muted); font-size:13px;">None yet.</p>'; return; }
+      el.innerHTML = list.map(c => {
+        const lvl = (c.classes||[]).reduce((s,x)=>s+(x.level||0),0);
+        const owner = c.owner && c.owner!==username ? ` <span class="pill">${c.owner}</span>` : '';
+        return `<div class="c" data-id="${c.id}"><span><b style="color:${c.color||'#dd4444'}">${c.name}</b>${owner} <span style="color:var(--muted)">· L${lvl}</span></span><button class="del" data-id="${c.id}">✕</button></div>`;
+      }).join('');
+      window._chars = list;
+      el.querySelectorAll('.c').forEach(row => row.onclick = e => {
+        if (e.target.classList.contains('del')) return;
+        const c = list.find(x=>x.id===row.dataset.id); if (c) loadIntoBuilder(c);
       });
-    });
-  }
-</script>
+      el.querySelectorAll('.del').forEach(btn => btn.onclick = e => {
+        e.stopPropagation();
+        if (confirm('Delete this character?')) socket.emit('delete-character', btn.dataset.id);
+      });
+    }
+    function msg(t, err=false) { const m=$('msg'); m.textContent=t; m.style.color = err?'#f87171':'#34d399'; setTimeout(()=>{ if(m.textContent===t) m.textContent=''; }, 3000); }
 
+    /* ---------- Boot ---------- */
+    async function startApp() {
+      try { SRD = await loadSRD(); }
+      catch (e) { $('boot').textContent = 'Failed to load SRD data: ' + e.message; return; }
+      $('boot').classList.add('hidden'); $('app').classList.remove('hidden');
+      $('who').textContent = 'Logged in as ' + username;
+      applyPreset(char.race);
+      renderTabs(); renderTab(); renderRail(); initPreview();
+      $('save-btn').onclick = () => {
+        if (!socket || !username) return msg('Not connected', true);
+        if (!char.name.trim()) { activeTab='identity'; renderTabs(); renderTab(); return msg('Enter a name', true); }
+        socket.emit('save-character', { charData: buildSaveObject(), username });
+      };
+      $('new-btn').onclick = () => { char = defaultChar(); applyPreset(char.race); activeTab='identity'; renderTabs(); buildModel(); refresh(); msg('New character'); };
+    }
 
+    /* ---------- Login + socket ---------- */
+    const loginOverlay = $('login-overlay'), userInput = $('username-input'), loginBtn = $('login-btn'), loginError = $('login-error');
+    function showLoginError(t){ loginError.textContent=t; loginError.classList.remove('hidden'); setTimeout(()=>loginError.classList.add('hidden'),3000); }
+    function doLogin() {
+      const u = userInput.value.trim();
+      if (!u || u.length<2) return showLoginError('Username must be at least 2 characters');
+      loginBtn.disabled=true; loginBtn.textContent='Connecting…';
+      socket = io();
+      socket.on('connect', () => socket.emit('login', u));
+      socket.on('login-success', (data) => {
+        username = data.username; sessionStorage.setItem('vtt_username', username);
+        loginOverlay.classList.add('hidden'); startApp();
+      });
+      socket.on('load-user-characters', renderSaved);
+      socket.on('character-saved-success', (c) => { char.id = c.id; msg('Saved “'+c.name+'”'); });
+      socket.on('character-deleted', () => socket.emit('get-characters'));
+      socket.on('error', (m) => { showLoginError(m); loginBtn.disabled=false; loginBtn.textContent='Login'; });
+    }
+    loginBtn.onclick = doLogin;
+    userInput.onkeypress = e => { if (e.key==='Enter') doLogin(); };
+    const stored = sessionStorage.getItem('vtt_username');
+    if (stored) { userInput.value = stored; doLogin(); }
+  </script>
 </body>
 </html>
