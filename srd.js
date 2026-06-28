@@ -188,7 +188,8 @@ class SRD {
       ac = acd.base + dex; source = armor.name;
     } else if ((classes || []).some(c => c.class === 'barbarian')) {
       ac = 10 + dexMod + conMod; source = 'Unarmored Defense (Barbarian)';
-    } else if ((classes || []).some(c => c.class === 'monk')) {
+    } else if ((classes || []).some(c => c.class === 'monk') && !shield) {
+      // Monk Unarmored Defense requires no shield (unlike Barbarian's).
       ac = 10 + dexMod + wisMod; source = 'Unarmored Defense (Monk)';
     } else {
       ac = 10 + dexMod; source = 'Unarmored';
@@ -203,7 +204,9 @@ class SRD {
       const profs = ((cl && cl.proficiencies) || []).map(p => p.index);
       if (weapon.weapon_category === 'Simple' && profs.includes('simple-weapons')) return true;
       if (weapon.weapon_category === 'Martial' && profs.includes('martial-weapons')) return true;
-      if (profs.includes(weapon.index)) return true;
+      // Specific-weapon grants: class profs are plural ("daggers"); resolve to the
+      // singular equipment index via the proficiency's reference (proficiencies.json).
+      if (profs.some(p => p === weapon.index || this.get('proficiencies', p)?.reference?.index === weapon.index)) return true;
     }
     return false;
   }
@@ -266,7 +269,7 @@ class SRD {
     let known = null, prepared = false;
     if (sc && sc.spells_known != null) known = sc.spells_known;
     else if (classIdx === 'wizard' || classIdx === 'cleric' || classIdx === 'druid') { known = Math.max(1, (abilityMod || 0) + level); prepared = true; }
-    else if (classIdx === 'paladin') { known = Math.max(1, (abilityMod || 0) + Math.floor(level / 2)); prepared = true; }
+    else if (classIdx === 'paladin') { known = Math.floor(level / 2) >= 1 ? Math.max(1, (abilityMod || 0) + Math.floor(level / 2)) : 0; prepared = true; }
     return { cantrips, known, prepared };
   }
 
