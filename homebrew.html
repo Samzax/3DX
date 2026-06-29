@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Homebrew Builder — 3DX</title>
+  <style>
+    :root { --bg:#1a1a1a; --panel:#26262b; --panel2:#2f2f36; --line:#3a3a42; --accent:#60A5FA; --accent2:#3b82f6; --txt:#f0f0f0; --muted:#9aa0ac; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--txt); font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; }
+    h1,h2,h3 { margin:0; font-weight:600; }
+    .hidden { display:none !important; }
+    a { color:var(--accent); }
+
+    #login-overlay { position:fixed; inset:0; background:rgba(0,0,0,.9); display:flex; align-items:center; justify-content:center; z-index:10000; }
+    #login-modal { background:#2d2d2d; border:2px solid #555; border-radius:12px; padding:40px; width:90%; max-width:400px; }
+    #login-modal h2 { color:var(--accent); text-align:center; margin-bottom:24px; }
+    #login-modal input { width:100%; padding:12px; margin-bottom:16px; background:#1a1a1a; border:1px solid #444; border-radius:6px; color:var(--txt); font-size:16px; }
+    #login-modal button { width:100%; padding:12px; background:var(--accent); color:#10243f; border:none; border-radius:6px; font-size:16px; font-weight:bold; cursor:pointer; }
+    #login-error { color:#ff5555; text-align:center; margin-top:8px; font-size:14px; }
+
+    .wrap { max-width:1100px; margin:0 auto; padding:20px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:8px; }
+    .title { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:700; }
+    .badge { font-size:12px; padding:3px 10px; border-radius:999px; background:rgba(96,165,250,.15); color:var(--accent); }
+    .layout { display:grid; grid-template-columns:1fr 320px; gap:18px; align-items:start; }
+    @media (max-width:900px){ .layout{ grid-template-columns:1fr; } }
+
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:18px; }
+    .panel h2 { font-size:18px; margin-bottom:14px; }
+    label.fld { display:block; font-size:13px; color:var(--muted); margin:0 0 6px; }
+    .row { margin-bottom:14px; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
+    select, input[type=text], input[type=number], textarea { width:100%; background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--txt); font-size:14px; font-family:inherit; }
+    textarea { min-height:64px; resize:vertical; }
+    .checks { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:4px; }
+    .checks label { font-size:13px; display:flex; align-items:center; gap:6px; padding:3px 4px; }
+    .ability-grid { display:grid; grid-template-columns:repeat(6,1fr); gap:8px; text-align:center; }
+    .ability-grid label { font-size:12px; color:var(--muted); display:block; }
+    .ability-grid input { text-align:center; padding:6px; }
+    .btn { background:var(--panel2); color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:9px 12px; cursor:pointer; font-size:14px; }
+    .btn:hover { background:#3a3a44; }
+    .btn-accent { background:var(--accent); color:#10243f; border:none; font-weight:600; }
+    .btn-accent:hover { background:var(--accent2); color:#fff; }
+    .btn-danger { background:#dc2626; color:#fff; border:none; }
+    .btn-sm { padding:6px 10px; font-size:13px; }
+    .feat-row { display:grid; grid-template-columns:60px 1fr 2fr 34px; gap:8px; align-items:start; margin-bottom:8px; }
+    .hb-item { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px; border-bottom:1px solid var(--line); font-size:13px; }
+    .hb-item .del { color:#f87171; background:none; border:none; cursor:pointer; }
+    .hb-item .edit { color:var(--accent); background:none; border:none; cursor:pointer; font-size:13px; }
+    .pill { font-size:11px; padding:1px 6px; border-radius:999px; background:#3a3a44; color:var(--muted); }
+    .msg { margin-top:10px; min-height:18px; font-size:14px; }
+    .caster-fields { margin-top:8px; }
+  </style>
+  <script type="importmap">
+  { "imports": {
+      "srdmod": "./srd.js"
+  } }
+  </script>
+</head>
+<body>
+  <div id="login-overlay">
+    <div id="login-modal">
+      <h2>🎲 Homebrew Login</h2>
+      <input type="text" id="username-input" placeholder="Enter your username" maxlength="20" />
+      <button id="login-btn">Login</button>
+      <div id="login-error" class="hidden"></div>
+    </div>
+  </div>
+
+  <div id="boot" class="wrap" style="text-align:center; color:var(--muted);">Loading…</div>
+
+  <div id="app" class="wrap hidden">
+    <div class="topbar">
+      <div class="title"><span>Homebrew builder</span><span class="badge">custom races &amp; classes</span></div>
+      <div><a href="/">← Character creator</a></div>
+    </div>
+
+    <div class="layout">
+      <div>
+        <!-- Custom Race -->
+        <div class="panel">
+          <h2>Custom race</h2>
+          <div class="row"><label class="fld">Name</label><input type="text" id="r-name" placeholder="e.g. Stoneborn"/></div>
+          <div class="grid2">
+            <div class="row"><label class="fld">Size</label><select id="r-size"><option>Small</option><option selected>Medium</option></select></div>
+            <div class="row"><label class="fld">Speed (ft)</label><input type="number" id="r-speed" value="30" min="0" max="120"/></div>
+          </div>
+          <div class="row"><label class="fld">Ability score bonuses</label>
+            <div class="ability-grid" id="r-abilities"></div>
+          </div>
+          <div class="row"><label class="fld">Traits (one per line)</label><textarea id="r-traits" placeholder="Darkvision&#10;Stone Resilience: advantage on saves vs. poison"></textarea></div>
+          <button class="btn btn-accent" id="save-race">Save race</button>
+          <div class="msg" id="race-msg"></div>
+        </div>
+
+        <!-- Custom Class -->
+        <div class="panel">
+          <h2>Custom class</h2>
+          <div class="grid2">
+            <div class="row"><label class="fld">Name</label><input type="text" id="c-name" placeholder="e.g. Warden"/></div>
+            <div class="row"><label class="fld">Hit die</label><select id="c-hd"><option value="6">d6</option><option value="8" selected>d8</option><option value="10">d10</option><option value="12">d12</option></select></div>
+          </div>
+          <div class="row"><label class="fld">Saving throw proficiencies (pick 2)</label><div class="checks" id="c-saves"></div></div>
+          <div class="row"><label class="fld">Other proficiencies</label><div class="checks" id="c-profs"></div></div>
+          <div class="grid2">
+            <div class="row"><label class="fld">Skill choices — choose</label><input type="number" id="c-skill-choose" value="2" min="0" max="6"/></div>
+          </div>
+          <div class="row"><label class="fld">Skill list (the pool to choose from)</label><div class="checks" id="c-skills"></div></div>
+
+          <div class="row"><label class="fld">Spellcasting</label>
+            <select id="c-caster"><option value="none" selected>Non-caster</option><option value="half">Half caster (like Paladin/Ranger)</option><option value="full">Full caster (like Wizard)</option></select>
+            <div class="caster-fields hidden" id="c-caster-fields">
+              <div class="grid2" style="margin-top:8px;">
+                <div><label class="fld">Spellcasting ability</label><select id="c-cast-ability"></select></div>
+                <div><label class="fld">Spell list (borrowed)</label><select id="c-spell-list"></select></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row"><label class="fld">Features by level</label>
+            <div id="c-features"></div>
+            <button class="btn btn-sm" id="add-feature" style="margin-top:6px;">+ Add feature</button>
+          </div>
+          <button class="btn btn-accent" id="save-class">Save class</button>
+          <div class="msg" id="class-msg"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 style="font-size:15px; margin-bottom:10px;">Existing homebrew</h3>
+        <div id="hb-list"><p style="color:var(--muted); font-size:13px;">None yet.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module">
+    import { loadSRD, ABILITIES, ABILITY_NAMES } from 'srdmod';
+
+    let SRD = null, socket = null, username = null, homebrew = { races: [], classes: [] };
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+    let editingRaceIndex = null, editingClassIndex = null;
+    function resetRaceForm() {
+      editingRaceIndex = null;
+      $('r-name').value = ''; $('r-speed').value = '30'; $('r-size').value = 'Medium'; $('r-traits').value = '';
+      document.querySelectorAll('.r-ab').forEach(i => i.value = '0');
+    }
+    function resetClassForm() {
+      editingClassIndex = null;
+      $('c-name').value = ''; $('c-hd').value = '8'; $('c-skill-choose').value = '2';
+      document.querySelectorAll('.c-save,.c-prof,.c-skill').forEach(cb => cb.checked = false);
+      $('c-caster').value = 'none'; $('c-caster-fields').classList.add('hidden');
+      $('c-features').innerHTML = ''; addFeatureRow(1);
+    }
+    function loadRaceIntoForm(r) {
+      editingRaceIndex = r.index;
+      $('r-name').value = r.name || ''; $('r-size').value = r.size || 'Medium'; $('r-speed').value = r.speed || 30;
+      document.querySelectorAll('.r-ab').forEach(i => { const b = (r.ability_bonuses || []).find(x => x.ability_score.index === i.dataset.a); i.value = b ? b.bonus : 0; });
+      $('r-traits').value = (r.traits || []).map(t => t.name).join('\n');
+      window.scrollTo(0, 0);
+    }
+    function loadClassIntoForm(c) {
+      editingClassIndex = c.index;
+      $('c-name').value = c.name || ''; $('c-hd').value = String(c.hit_die || 8);
+      const saveSet = new Set((c.saving_throws || []).map(s => s.index));
+      document.querySelectorAll('.c-save').forEach(cb => cb.checked = saveSet.has(cb.value));
+      const profSet = new Set((c.proficiencies || []).map(p => p.index));
+      document.querySelectorAll('.c-prof').forEach(cb => cb.checked = profSet.has(cb.value));
+      const grp = (c.proficiency_choices || [])[0];
+      const skillSet = new Set((((grp && grp.from && grp.from.options) || [])).map(o => o.item.index.replace('skill-', '')));
+      document.querySelectorAll('.c-skill').forEach(cb => cb.checked = skillSet.has(cb.value));
+      $('c-skill-choose').value = grp ? grp.choose : 2;
+      $('c-caster').value = c.caster || 'none';
+      $('c-caster-fields').classList.toggle('hidden', (c.caster || 'none') === 'none');
+      if (c.spellcasting) $('c-cast-ability').value = c.spellcasting.spellcasting_ability.index;
+      if (c.spellList) $('c-spell-list').value = c.spellList;
+      $('c-features').innerHTML = '';
+      (c.customFeatures || []).forEach(f => addFeatureRow(f.level, f.name, f.desc));
+      if (!(c.customFeatures || []).length) addFeatureRow(1);
+      window.scrollTo(0, 0);
+    }
+    const CASTER_CLASSES = ['bard','cleric','druid','paladin','ranger','sorcerer','warlock','wizard'];
+    const OTHER_PROFS = [['simple-weapons','Simple weapons'],['martial-weapons','Martial weapons'],['light-armor','Light armor'],['medium-armor','Medium armor'],['heavy-armor','Heavy armor'],['shields','Shields']];
+
+    async function startApp() {
+      try { SRD = await loadSRD(); } catch (e) { $('boot').textContent = 'Failed to load SRD: ' + e.message; return; }
+      $('boot').classList.add('hidden'); $('app').classList.remove('hidden');
+      buildForms();
+      renderList();
+    }
+
+    function buildForms() {
+      // Race ability inputs
+      $('r-abilities').innerHTML = ABILITIES.map(a => `<div><label>${a.toUpperCase()}</label><input type="number" class="r-ab" data-a="${a}" value="0" min="-2" max="5"/></div>`).join('');
+      // Class saving throws + skills + profs
+      $('c-saves').innerHTML = ABILITIES.map(a => `<label><input type="checkbox" class="c-save" value="${a}"/> ${ABILITY_NAMES[a]}</label>`).join('');
+      $('c-profs').innerHTML = OTHER_PROFS.map(([v,l]) => `<label><input type="checkbox" class="c-prof" value="${v}"/> ${l}</label>`).join('');
+      $('c-skills').innerHTML = SRD.skills.slice().sort((a,b)=>a.name.localeCompare(b.name)).map(s => `<label><input type="checkbox" class="c-skill" value="${s.index}"/> ${s.name}</label>`).join('');
+      // Caster fields
+      $('c-cast-ability').innerHTML = ABILITIES.map(a => `<option value="${a}" ${a==='int'?'selected':''}>${ABILITY_NAMES[a]}</option>`).join('');
+      $('c-spell-list').innerHTML = CASTER_CLASSES.map(c => { const cl = SRD.get('classes', c); return `<option value="${c}" ${c==='wizard'?'selected':''}>${cl?cl.name:c}</option>`; }).join('');
+      $('c-caster').onchange = e => $('c-caster-fields').classList.toggle('hidden', e.target.value === 'none');
+      $('add-feature').onclick = () => addFeatureRow();
+      addFeatureRow(1);
+    }
+
+    function addFeatureRow(level = 1, name = '', desc = '') {
+      const div = document.createElement('div');
+      div.className = 'feat-row';
+      div.innerHTML = `<input type="number" class="f-level" value="${parseInt(level,10)||1}" min="1" max="20"/>
+        <input type="text" class="f-name" placeholder="Feature"/>
+        <input type="text" class="f-desc" placeholder="Description"/>
+        <button class="btn btn-danger btn-sm f-del">✕</button>`;
+      div.querySelector('.f-name').value = name;
+      div.querySelector('.f-desc').value = desc;
+      div.querySelector('.f-del').onclick = () => div.remove();
+      $('c-features').appendChild(div);
+    }
+
+    // --- Save race ---
+    $('save-race').onclick = () => {
+      if (!socket || !socket.connected || !username) return msg('race-msg', 'Not connected', true);
+      const name = $('r-name').value.trim();
+      if (!name) return msg('race-msg', 'Enter a name', true);
+      const ability_bonuses = [...document.querySelectorAll('.r-ab')]
+        .map(i => ({ a: i.dataset.a, v: parseInt(i.value, 10) || 0 }))
+        .filter(x => x.v !== 0)
+        .map(x => ({ ability_score: { index: x.a, name: x.a.toUpperCase() }, bonus: x.v }));
+      const traits = $('r-traits').value.split('\n').map(t => t.trim()).filter(Boolean).map(t => ({ name: t }));
+      const data = { name, size: $('r-size').value, speed: parseInt($('r-speed').value, 10) || 30,
+        ability_bonuses, starting_proficiencies: [], subraces: [], traits, languages: [] };
+      if (editingRaceIndex) data.index = editingRaceIndex;
+      socket.emit('save-homebrew', { type: 'race', data });
+    };
+
+    // --- Save class ---
+    $('save-class').onclick = () => {
+      if (!socket || !socket.connected || !username) return msg('class-msg', 'Not connected', true);
+      const name = $('c-name').value.trim();
+      if (!name) return msg('class-msg', 'Enter a name', true);
+      const saving_throws = [...document.querySelectorAll('.c-save:checked')].map(c => ({ index: c.value, name: c.value.toUpperCase() }));
+      const proficiencies = [...document.querySelectorAll('.c-prof:checked')].map(c => ({ index: c.value }));
+      const skillPool = [...document.querySelectorAll('.c-skill:checked')].map(c => c.value);
+      let choose = parseInt($('c-skill-choose').value, 10) || 0;
+      if (choose > 0 && skillPool.length === 0) return msg('class-msg', 'You set a skill choice count but selected no class skills', true);
+      choose = Math.min(choose, skillPool.length);
+      const proficiency_choices = (skillPool.length && choose > 0) ? [{
+        choose, type: 'proficiencies',
+        from: { option_set_type: 'options_array', options: skillPool.map(s => ({ option_type: 'reference', item: { index: 'skill-' + s, name: 'Skill: ' + s } })) }
+      }] : [];
+      const caster = $('c-caster').value;
+      const customFeatures = [...document.querySelectorAll('#c-features .feat-row')]
+        .map(r => ({ level: parseInt(r.querySelector('.f-level').value, 10) || 1, name: r.querySelector('.f-name').value.trim(), desc: r.querySelector('.f-desc').value.trim() }))
+        .filter(f => f.name);
+      const data = {
+        name, hit_die: parseInt($('c-hd').value, 10) || 8,
+        saving_throws, proficiencies, proficiency_choices, subclasses: [],
+        spellcasting: caster !== 'none' ? { spellcasting_ability: { index: $('c-cast-ability').value, name: $('c-cast-ability').value.toUpperCase() } } : null,
+        caster, spellList: caster !== 'none' ? $('c-spell-list').value : null,
+        customFeatures
+      };
+      if (editingClassIndex) data.index = editingClassIndex;
+      socket.emit('save-homebrew', { type: 'class', data });
+    };
+
+    function renderList() {
+      const el = $('hb-list');
+      const items = [
+        ...homebrew.races.map(r => ({ ...r, type: 'race' })),
+        ...homebrew.classes.map(c => ({ ...c, type: 'class' }))
+      ];
+      if (!items.length) { el.innerHTML = '<p style="color:var(--muted); font-size:13px;">None yet.</p>'; return; }
+      el.innerHTML = items.map(it => {
+        const owned = it.owner === username || (username && username.toLowerCase() === 'gm');
+        return `<div class="hb-item"><span><b>${esc(it.name)}</b> <span class="pill">${esc(it.type)}</span>${it.owner && it.owner!==username ? ` <span class="pill">${esc(it.owner)}</span>` : ''}</span>${owned ? `<span><button class="edit" data-type="${esc(it.type)}" data-index="${esc(it.index)}">edit</button> <button class="del" data-type="${esc(it.type)}" data-index="${esc(it.index)}">delete</button></span>` : ''}</div>`;
+      }).join('');
+      el.querySelectorAll('.del').forEach(b => b.onclick = () => {
+        if (confirm('Delete this homebrew?')) socket.emit('delete-homebrew', { type: b.dataset.type, index: b.dataset.index });
+      });
+      el.querySelectorAll('.edit').forEach(b => b.onclick = () => {
+        const all = b.dataset.type === 'race' ? homebrew.races : homebrew.classes;
+        const item = all.find(x => x.index === b.dataset.index);
+        if (item) (b.dataset.type === 'race' ? loadRaceIntoForm : loadClassIntoForm)(item);
+      });
+    }
+
+    function msg(id, t, err = false) { const m = $(id); m.textContent = t; m.style.color = err ? '#f87171' : '#34d399'; setTimeout(() => { if (m.textContent === t) m.textContent = ''; }, 3000); }
+
+    // --- Login + socket ---
+    const loginOverlay = $('login-overlay'), userInput = $('username-input'), loginBtn = $('login-btn'), loginError = $('login-error');
+    function showLoginError(t) { loginError.textContent = t; loginError.classList.remove('hidden'); setTimeout(() => loginError.classList.add('hidden'), 3000); }
+    function doLogin() {
+      const u = userInput.value.trim();
+      if (!u || u.length < 2) return showLoginError('Username must be at least 2 characters');
+      loginBtn.disabled = true; loginBtn.textContent = 'Connecting…';
+      socket = io();
+      socket.on('connect', () => socket.emit('login', u));
+      socket.on('login-success', (d) => { username = d.username; sessionStorage.setItem('vtt_username', username); loginOverlay.classList.add('hidden'); startApp(); });
+      socket.on('load-homebrew', (hb) => { homebrew = { races: hb.races || [], classes: hb.classes || [] }; renderList(); });
+      socket.on('homebrew-saved-success', (p) => { msg(p.type === 'race' ? 'race-msg' : 'class-msg', `Saved "${p.data.name}"`); if (p.type === 'race') resetRaceForm(); else resetClassForm(); });
+      socket.on('error', (m) => { if (!username) { showLoginError(m); loginBtn.disabled = false; loginBtn.textContent = 'Login'; } else { msg('class-msg', m, true); } });
+    }
+    loginBtn.onclick = doLogin;
+    userInput.onkeypress = e => { if (e.key === 'Enter') doLogin(); };
+    const stored = sessionStorage.getItem('vtt_username');
+    if (stored) { userInput.value = stored; doLogin(); }
+  </script>
+</body>
+</html>

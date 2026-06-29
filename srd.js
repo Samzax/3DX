@@ -64,6 +64,16 @@ class SRD {
 
   get(coll, idx) { return this._maps[coll] ? this._maps[coll].get(idx) : undefined; }
 
+  // Merge shared homebrew (custom races/classes) into the SRD collections.
+  setHomebrew(hb) {
+    this.races = this.races.filter(r => !r.custom);
+    this.classes = this.classes.filter(c => !c.custom);
+    for (const r of (hb && hb.races) || []) { r.custom = true; this.races.push(r); }
+    for (const c of (hb && hb.classes) || []) { c.custom = true; this.classes.push(c); }
+    this._maps.races = new Map(this.races.map(x => [x.index, x]));
+    this._maps.classes = new Map(this.classes.map(x => [x.index, x]));
+  }
+
   // Level at which each class chooses its subclass (min level of any subclass feature).
   _computeSubclassLevels() {
     const out = {};
@@ -229,8 +239,19 @@ class SRD {
   isCaster(classIdx) { const c = this.get('classes', classIdx); return !!(c && c.spellcasting); }
   spellcastingAbility(classIdx) { const c = this.get('classes', classIdx); return c && c.spellcasting ? c.spellcasting.spellcasting_ability.index : null; }
   spellsForClass(classIdx) {
-    return this.spells.filter(s => (s.classes || []).some(c => c.index === classIdx))
+    // Custom caster classes borrow an existing class's spell list.
+    const cls = this.get('classes', classIdx);
+    const src = (cls && cls.custom) ? (cls.spellList || (this.casterType(classIdx) ? 'wizard' : classIdx)) : classIdx;
+    return this.spells.filter(s => (s.classes || []).some(c => c.index === src))
       .sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+  }
+  casterType(classIdx) {
+    const c = this.get('classes', classIdx);
+    if (c && c.custom) return (c.caster === 'full' || c.caster === 'half') ? c.caster : null;
+    if (FULL_CASTERS.includes(classIdx)) return 'full';
+    if (HALF_CASTERS.includes(classIdx)) return 'half';
+    if (classIdx === 'warlock') return 'pact';
+    return null;
   }
   classLevelData(classIdx, level) {
     return this.levels.find(l => l.class && l.class.index === classIdx && l.level === level && !l.subclass);
@@ -249,12 +270,15 @@ class SRD {
       }
     }
     const nonWarlock = casters.filter(c => c.class !== 'warlock');
-    if (nonWarlock.length === 1) {
+    const allStandard = nonWarlock.every(c => !this.get('classes', c.class)?.custom);
+    if (nonWarlock.length === 1 && allStandard) {
+      // Single standard caster: use the exact per-level table from the SRD.
       const c = nonWarlock[0]; const ld = this.classLevelData(c.class, c.level);
       if (ld && ld.spellcasting) for (let i = 1; i <= 9; i++) slots[i] = ld.spellcasting['spell_slots_level_' + i] || 0;
-    } else if (nonWarlock.length > 1) {
+    } else if (nonWarlock.length >= 1) {
+      // Multiclass and/or custom casters: combined caster level via the standard table.
       let cl = 0;
-      for (const c of nonWarlock) { if (FULL_CASTERS.includes(c.class)) cl += c.level; else if (HALF_CASTERS.includes(c.class)) cl += Math.floor(c.level / 2); }
+      for (const c of nonWarlock) { const t = this.casterType(c.class); if (t === 'full') cl += c.level; else if (t === 'half') cl += Math.floor(c.level / 2); }
       if (cl >= 1) { const row = MULTI_SLOTS[Math.min(cl, 20)] || []; for (let i = 1; i <= 9; i++) slots[i] = row[i - 1] || 0; }
     }
     return { slots, pact, casters: casters.map(c => ({ class: c.class, ability: this.spellcastingAbility(c.class) })) };
@@ -264,6 +288,15 @@ class SRD {
   // Known casters (bard/ranger/sorcerer/warlock) use spells_known from the SRD;
   // prepared casters compute their cap from ability mod + level (paladin: +half level).
   spellLimits(classIdx, level, abilityMod) {
+    const cls = this.get('classes', classIdx);
+    if (cls && cls.custom) {
+      const t = this.casterType(classIdx);
+      if (!t) return { cantrips: 0, known: null, prepared: false };
+      const eff = t === 'half' ? Math.floor(level / 2) : level;
+      const cantrips = eff >= 1 ? (eff < 4 ? 2 : eff < 10 ? 3 : 4) : 0;
+      const known = eff >= 1 ? Math.max(1, (abilityMod || 0) + eff) : 0;
+      return { cantrips, known, prepared: true };
+    }
     const sc = this.classLevelData(classIdx, level)?.spellcasting;
     const cantrips = sc && sc.cantrips_known != null ? sc.cantrips_known : 0;
     let known = null, prepared = false;
@@ -277,6 +310,13 @@ class SRD {
   classFeatures(classes) {
     const out = [];
     for (const c of classes || []) {
+      const cls = this.get('classes', c.class);
+      if (cls && cls.custom) {
+        for (const f of cls.customFeatures || []) {
+          if ((f.level || 1) <= (c.level || 0)) out.push({ class: c.class, level: f.level || 1, name: f.name, desc: f.desc || '' });
+        }
+        continue;
+      }
       const subIdx = c.subclass;
       for (const f of this.features) {
         if (!f.class || f.class.index !== c.class) continue;
