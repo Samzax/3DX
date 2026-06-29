@@ -1,7 +1,68 @@
 {
   "maps": {
     "world": {
-      "objects": {},
+      "objects": {
+        "4e26ac70-3634-443e-9e29-4c6da27f0087": {
+          "type": "character",
+          "characterData": {
+            "name": "Thorin",
+            "schemaVersion": 2,
+            "race": "human",
+            "subrace": null,
+            "background": "acolyte",
+            "alignment": null,
+            "classes": [
+              {
+                "class": "fighter",
+                "subclass": null,
+                "level": 1
+              }
+            ],
+            "abilityMethod": "point-buy",
+            "abilities": {
+              "str": 8,
+              "dex": 8,
+              "con": 8,
+              "int": 8,
+              "wis": 8,
+              "cha": 8
+            },
+            "racialChoice": [],
+            "skills": [],
+            "appearance": {
+              "height": 1,
+              "build": 1,
+              "headSize": 1,
+              "armLength": 1,
+              "legLength": 1,
+              "colors": {
+                "skin": "#c68642",
+                "hair": "#3b2716",
+                "torso": "#2f6e56",
+                "legs": "#3a3f4a",
+                "eyes": "#1a1a1a"
+              }
+            },
+            "color": "#2f6e56",
+            "stats": {
+              "str": 8,
+              "dex": 8,
+              "con": 8,
+              "int": 8,
+              "wis": 8,
+              "cha": 8
+            },
+            "owner": "GM",
+            "id": "44b88c13-0fc5-40bd-8a92-efc9e06c6482"
+          },
+          "position": {
+            "x": 6.928203230275509,
+            "y": 0.2,
+            "z": 0
+          },
+          "id": "4e26ac70-3634-443e-9e29-4c6da27f0087"
+        }
+      },
       "rulers": {}
     },
     "world/0,0": {
@@ -126,6 +187,75 @@
             "z": 0
           },
           "id": "7c02e148-79ef-4971-b8d6-f1f5449cb225"
+        }
+      },
+      "rulers": {}
+    },
+    "world/2,0": {
+      "objects": {},
+      "rulers": {}
+    },
+    "world/2,0/2,0": {
+      "objects": {
+        "d9503260-e379-4d48-b37e-d5b8dc5fb525": {
+          "type": "character",
+          "characterData": {
+            "name": "Thorin",
+            "schemaVersion": 2,
+            "race": "human",
+            "subrace": null,
+            "background": "acolyte",
+            "alignment": null,
+            "classes": [
+              {
+                "class": "fighter",
+                "subclass": null,
+                "level": 1
+              }
+            ],
+            "abilityMethod": "point-buy",
+            "abilities": {
+              "str": 8,
+              "dex": 8,
+              "con": 8,
+              "int": 8,
+              "wis": 8,
+              "cha": 8
+            },
+            "racialChoice": [],
+            "skills": [],
+            "appearance": {
+              "height": 1,
+              "build": 1,
+              "headSize": 1,
+              "armLength": 1,
+              "legLength": 1,
+              "colors": {
+                "skin": "#c68642",
+                "hair": "#3b2716",
+                "torso": "#2f6e56",
+                "legs": "#3a3f4a",
+                "eyes": "#1a1a1a"
+              }
+            },
+            "color": "#2f6e56",
+            "stats": {
+              "str": 8,
+              "dex": 8,
+              "con": 8,
+              "int": 8,
+              "wis": 8,
+              "cha": 8
+            },
+            "owner": "GM",
+            "id": "44b88c13-0fc5-40bd-8a92-efc9e06c6482"
+          },
+          "position": {
+            "x": 7,
+            "y": 0.2,
+            "z": 0
+          },
+          "id": "d9503260-e379-4d48-b37e-d5b8dc5fb525"
         }
       },
       "rulers": {}
