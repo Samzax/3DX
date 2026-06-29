@@ -134,7 +134,7 @@
   <div id="app" class="wrap hidden">
     <div class="topbar">
       <div class="title"><span>Character creator</span><span class="badge">SRD 5.1</span></div>
-      <div class="who" id="who"></div>
+      <div style="display:flex; align-items:center; gap:14px;"><a href="/homebrew" style="color:var(--accent); font-size:14px; text-decoration:none;">+ Homebrew</a><span class="who" id="who"></span></div>
     </div>
 
     <div class="tabs" id="tabs"></div>
@@ -172,6 +172,7 @@
     } from './srd.js';
 
     let SRD = null;
+    let pendingHomebrew = null;
     let socket = null;
     let username = null;
     let activeTab = 'identity';
@@ -239,6 +240,8 @@
 
     /* ---------- Rendering ---------- */
     const $ = (id) => document.getElementById(id);
+    // Escape user/homebrew text before it goes into innerHTML (shared homebrew = stored-XSS surface).
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 
     function renderTabs() {
       normalizeTab();
@@ -250,7 +253,7 @@
     }
 
     function opt(list, sel) {
-      return list.map(o => `<option value="${o.index}" ${o.index===sel?'selected':''}>${o.name}</option>`).join('');
+      return list.map(o => `<option value="${esc(o.index)}" ${o.index===sel?'selected':''}>${esc(o.name)}</option>`).join('');
     }
 
     function renderTab() {
@@ -290,8 +293,8 @@
           <div class="row"><label class="fld">Alignment</label><select id="f-align"><option value="">— none —</option>${opt(SRD.alignments, char.alignment)}</select></div>
         </div>
         ${racialChoiceUI}
-        <div class="info"><strong>${race?race.name:''}</strong> — speed ${race?race.speed:'?'} ft, size ${race?race.size:''}. Ability bonuses: ${bonusText}.
-          <div style="margin-top:6px;">${race && race.traits ? race.traits.map(t=>t.name).join(' · ') : ''}</div></div>
+        <div class="info"><strong>${esc(race?race.name:'')}</strong> — speed ${race?race.speed:'?'} ft, size ${esc(race?race.size:'')}. Ability bonuses: ${bonusText}.
+          <div style="margin-top:6px;">${race && race.traits ? race.traits.map(t=>esc(t.name)).join(' · ') : ''}</div></div>
         ${stepNav()}`;
     }
 
@@ -311,7 +314,7 @@
       }).join('');
       const feats = SRD.classFeatures(char.classes);
       const featHTML = feats.length ? feats.map(f =>
-        `<div class="feat"><span class="lvl">L${f.level}</span><div><b>${f.name}</b><div style="color:var(--muted); margin-top:2px;">${(f.desc||'').slice(0,160)}${(f.desc||'').length>160?'…':''}</div></div></div>`
+        `<div class="feat"><span class="lvl">L${f.level}</span><div><b>${esc(f.name)}</b><div style="color:var(--muted); margin-top:2px;">${esc((f.desc||'').slice(0,160))}${(f.desc||'').length>160?'…':''}</div></div></div>`
       ).join('') : '<p style="color:var(--muted);">Pick a class to see features.</p>';
       return `<h2>Class <span style="float:right; font-size:13px; color:var(--muted); font-weight:400;">Total level ${total} · proficiency ${fmtMod(proficiencyBonus(total))}</span></h2>
         <div id="class-list">${rows}</div>
@@ -472,7 +475,7 @@
           const items = byLevel[lv].map(s=>`<label class="spell ${char.spells.includes(s.index)?'on':''}"><input type="checkbox" class="sp" value="${s.index}" ${char.spells.includes(s.index)?'checked':''}/> ${s.name}${s.concentration?' <span class="pill">C</span>':''}${s.ritual?' <span class="pill">R</span>':''}</label>`).join('');
           return `<details ${lv<=1?'open':''}><summary>${label} <span style="color:var(--muted)">(${byLevel[lv].length})</span></summary><div class="spell-grid">${items}</div></details>`;
         }).join('') || '<p style="color:var(--muted); font-size:13px;">No spells available at this level yet.</p>';
-        return `<div class="caster-block" data-class="${c.class}" data-level="${c.level}"><h3 style="font-size:15px; margin:6px 0;">${cl.name} <span style="color:var(--muted); font-weight:400; font-size:13px;">${ci.ability?ci.ability.toUpperCase():''} · save DC ${ci.dc!=null?ci.dc:'?'} · spell atk ${ci.atk!=null?fmtMod(ci.atk):'?'}</span></h3>${guide}${sections}</div>`;
+        return `<div class="caster-block" data-class="${c.class}" data-level="${c.level}"><h3 style="font-size:15px; margin:6px 0;">${esc(cl.name)} <span style="color:var(--muted); font-weight:400; font-size:13px;">${ci.ability?ci.ability.toUpperCase():''} · save DC ${ci.dc!=null?ci.dc:'?'} · spell atk ${ci.atk!=null?fmtMod(ci.atk):'?'}</span></h3>${guide}${sections}</div>`;
       }).join('');
       return `<h2>Spells</h2>
         <div class="info" style="margin-bottom:12px;">Spell slots — ${slotLine||'—'}${pactLine?('  ·  '+pactLine):''}</div>
@@ -482,7 +485,7 @@
 
     function tabReview() {
       const d = derive();
-      const classes = char.classes.map(c => { const cl=SRD.get('classes',c.class); const sub=c.subclass&&SRD.get('subclasses',c.subclass); return `${cl?cl.name:c.class} ${c.level}${sub?` (${sub.name})`:''}`; }).join(' / ');
+      const classes = char.classes.map(c => { const cl=SRD.get('classes',c.class); const sub=c.subclass&&SRD.get('subclasses',c.subclass); return `${esc(cl?cl.name:c.class)} ${c.level}${sub?` (${esc(sub.name)})`:''}`; }).join(' / ');
       const race = SRD.get('races', char.race); const sub = char.subrace && SRD.get('subraces', char.subrace);
       const abilGrid = ABILITIES.map(a=>`<div class="metric"><div class="l">${a.toUpperCase()}</div><div class="v">${d.finals[a]}</div><div class="l">${fmtMod(d.mods[a])}${d.saves.has(a)?' · save '+fmtMod(d.mods[a]+d.prof):''}</div></div>`).join('');
       const skillList = [...d.proficient].map(s=>SRD.get('skills',s)).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name)).map(sk=>{ const ab=sk.ability_score.index; return `<div class="inv-row"><span>${sk.name} <span class="pill">${ab}</span></span><b>${fmtMod(d.mods[ab]+d.prof)}</b></div>`; }).join('') || '<span style="color:var(--muted)">—</span>';
@@ -494,8 +497,8 @@
       const gear = char.equipment.items.map(gi=>SRD.get('equipment',gi)).filter(Boolean).map(g=>g.name).join(', ') || '—';
       const armorTxt = char.equipment.armor ? SRD.get('equipment',char.equipment.armor).name : 'none';
       const feats = SRD.classFeatures(char.classes);
-      const featTxt = feats.length ? feats.map(f=>`${f.name} (L${f.level})`).join(', ') : '—';
-      return `<h2>${char.name||'(unnamed)'} <span style="float:right; font-size:13px; color:var(--muted); font-weight:400;">${sub?sub.name:(race?race.name:'')} · ${classes}</span></h2>
+      const featTxt = feats.length ? feats.map(f=>`${esc(f.name)} (L${f.level})`).join(', ') : '—';
+      return `<h2>${esc(char.name)||'(unnamed)'} <span style="float:right; font-size:13px; color:var(--muted); font-weight:400;">${esc(sub?sub.name:(race?race.name:''))} · ${classes}</span></h2>
         <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
           <div>
             <div class="metrics" style="grid-template-columns:repeat(3,1fr);">${abilGrid}</div>
@@ -524,6 +527,13 @@
     function pruneSpells() {
       const valid = new Set(char.classes.flatMap(c => SRD.spellsForClass(c.class).map(s => s.index)));
       char.spells = char.spells.filter(x => valid.has(x));
+    }
+    // Reset references to homebrew that was deleted, so the dropdowns and char state agree.
+    function reconcileChar() {
+      let changed = false;
+      if (SRD && !SRD.get('races', char.race)) { char.race = 'human'; char.subrace = null; char.racialChoice = []; changed = true; }
+      char.classes.forEach(c => { if (SRD && !SRD.get('classes', c.class)) { c.class = 'fighter'; c.subclass = null; changed = true; } });
+      return changed;
     }
     function refresh() { pruneSpells(); renderTab(); renderTabs(); renderRail(); updateModel(); }
 
@@ -708,16 +718,17 @@
         armLength: c.appearance.armLength ?? 1, legLength: c.appearance.legLength ?? 1,
         colors: { ...DEFAULT_COLORS, ...(c.appearance.colors || (c.color?{torso:c.color}:{})) }
       };
+      const reconciled = reconcileChar();
       activeTab = 'identity'; renderTabs(); buildModel(); refresh();
-      msg('Loaded ' + (c.name||'character'));
+      msg('Loaded ' + (c.name||'character') + (reconciled ? ' (deleted homebrew reset to defaults)' : ''));
     }
     function renderSaved(list) {
       const el = $('saved');
       if (!list || !list.length) { el.innerHTML = '<p style="color:var(--muted); font-size:13px;">None yet.</p>'; return; }
       el.innerHTML = list.map(c => {
         const lvl = (c.classes||[]).reduce((s,x)=>s+(x.level||0),0);
-        const owner = c.owner && c.owner!==username ? ` <span class="pill">${c.owner}</span>` : '';
-        return `<div class="c" data-id="${c.id}"><span><b style="color:${c.color||'#dd4444'}">${c.name}</b>${owner} <span style="color:var(--muted)">· L${lvl}</span></span><button class="del" data-id="${c.id}">✕</button></div>`;
+        const owner = c.owner && c.owner!==username ? ` <span class="pill">${esc(c.owner)}</span>` : '';
+        return `<div class="c" data-id="${esc(c.id)}"><span><b style="color:${esc(c.color||'#dd4444')}">${esc(c.name)}</b>${owner} <span style="color:var(--muted)">· L${lvl}</span></span><button class="del" data-id="${esc(c.id)}">✕</button></div>`;
       }).join('');
       window._chars = list;
       el.querySelectorAll('.c').forEach(row => row.onclick = e => {
@@ -737,6 +748,8 @@
       catch (e) { $('boot').textContent = 'Failed to load SRD data: ' + e.message; return; }
       $('boot').classList.add('hidden'); $('app').classList.remove('hidden');
       $('who').textContent = 'Logged in as ' + username;
+      if (pendingHomebrew) SRD.setHomebrew(pendingHomebrew);
+      reconcileChar();
       applyPreset(char.race);
       renderTabs(); renderTab(); renderRail(); initPreview();
       $('save-btn').onclick = () => {
@@ -761,9 +774,18 @@
         loginOverlay.classList.add('hidden'); startApp();
       });
       socket.on('load-user-characters', renderSaved);
+      socket.on('load-homebrew', (hb) => {
+        pendingHomebrew = hb;
+        if (SRD) {
+          SRD.setHomebrew(hb); reconcileChar(); pruneSpells();
+          // Don't blow away the panel if the user is mid-edit inside it.
+          const editing = document.activeElement && $('tab-body').contains(document.activeElement);
+          if (!$('app').classList.contains('hidden') && !editing) { renderTabs(); renderTab(); renderRail(); }
+        }
+      });
       socket.on('character-saved-success', (c) => { char.id = c.id; msg('Saved “'+c.name+'”'); });
       socket.on('character-deleted', () => socket.emit('get-characters'));
-      socket.on('error', (m) => { showLoginError(m); loginBtn.disabled=false; loginBtn.textContent='Login'; });
+      socket.on('error', (m) => { if (!username) { showLoginError(m); loginBtn.disabled=false; loginBtn.textContent='Login'; } else { msg(m, true); } });
     }
     loginBtn.onclick = doLogin;
     userInput.onkeypress = e => { if (e.key==='Enter') doLogin(); };

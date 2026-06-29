@@ -11,7 +11,8 @@ const server = http.createServer(app);
 
 // CORS configuration for socket.io
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] }
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  maxHttpBufferSize: 512 * 1024
 });
 
 const PORT = process.env.PORT || 3000;
@@ -63,6 +64,11 @@ function saveMaps() {
 
 let charactersDB = loadJSON('characters.json', {});
 
+// Custom homebrew content (shared): { races: {index:..}, classes: {index:..} }
+let homebrewDB = loadJSON('homebrew.json', { races: {}, classes: {} });
+if (!homebrewDB.races) homebrewDB.races = {};
+if (!homebrewDB.classes) homebrewDB.classes = {};
+
 // Serve static files
 app.use(express.static(path.join(__dirname)));
 
@@ -70,8 +76,10 @@ app.use(express.static(path.join(__dirname)));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'character_creator.html')));
 app.get('/gm', (req, res) => res.sendFile(path.join(__dirname, '3d_tabletop.html')));
 app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'player_Screen.html')));
+app.get('/homebrew', (req, res) => res.sendFile(path.join(__dirname, 'homebrew.html')));
 
-// Helper: Check if user is GM
+// Helper: Check if user is GM. NOTE: login is unauthenticated (the client supplies its
+// own username), so isGM and owner checks are advisory conveniences, not a security boundary.
 function isGM(username) {
   return username && username.toLowerCase() === 'gm';
 }
@@ -107,6 +115,12 @@ io.on('connection', (socket) => {
       canAccessCharacter(socket.username, char)
     );
     socket.emit('load-user-characters', accessibleChars);
+
+    // Send all homebrew (custom races/classes are shared content)
+    socket.emit('load-homebrew', {
+      races: Object.values(homebrewDB.races),
+      classes: Object.values(homebrewDB.classes)
+    });
   });
 
   // Get characters (filtered by permission)
@@ -199,6 +213,70 @@ io.on('connection', (socket) => {
 
     // Notify all clients
     io.emit('character-deleted', charId);
+  });
+
+  // --- Homebrew (custom races/classes) — shared content ---
+  function broadcastHomebrew() {
+    io.emit('load-homebrew', {
+      races: Object.values(homebrewDB.races),
+      classes: Object.values(homebrewDB.classes)
+    });
+  }
+
+  socket.on('get-homebrew', () => {
+    socket.emit('load-homebrew', {
+      races: Object.values(homebrewDB.races),
+      classes: Object.values(homebrewDB.classes)
+    });
+  });
+
+  socket.on('save-homebrew', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const type = payload && payload.type;
+    const data = payload && payload.data;
+    if ((type !== 'race' && type !== 'class') || !data || typeof data.name !== 'string' || !data.name.trim()) {
+      socket.emit('error', 'Invalid homebrew');
+      return;
+    }
+    data.name = data.name.trim().slice(0, 60);
+    if (JSON.stringify(data).length > 20000) { socket.emit('error', 'Homebrew too large'); return; }
+    const store = type === 'race' ? homebrewDB.races : homebrewDB.classes;
+    const isNew = !(data.index && store[data.index]);
+    if (isNew && Object.values(store).filter(e => e.owner === socket.username).length >= 100) {
+      socket.emit('error', 'Homebrew limit reached (100 per user)');
+      return;
+    }
+    if (data.index && store[data.index]) {
+      if (!isGM(socket.username) && store[data.index].owner !== socket.username) {
+        socket.emit('error', 'Permission denied');
+        return;
+      }
+      data.owner = store[data.index].owner;
+    } else {
+      data.index = 'hb-' + type + '-' + crypto.randomUUID().slice(0, 8);
+      data.owner = socket.username;
+    }
+    data.custom = true;
+    store[data.index] = data;
+    saveJSON('homebrew.json', homebrewDB);
+    console.log(`[HOMEBREW] ${type} "${data.name}" by ${socket.username}`);
+    socket.emit('homebrew-saved-success', { type, data });
+    broadcastHomebrew();
+  });
+
+  socket.on('delete-homebrew', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const type = payload && payload.type;
+    const index = payload && payload.index;
+    const store = type === 'race' ? homebrewDB.races : (type === 'class' ? homebrewDB.classes : null);
+    if (!store || !store[index]) { socket.emit('error', 'Homebrew not found'); return; }
+    if (!isGM(socket.username) && store[index].owner !== socket.username) {
+      socket.emit('error', 'Permission denied');
+      return;
+    }
+    delete store[index];
+    saveJSON('homebrew.json', homebrewDB);
+    broadcastHomebrew();
   });
 
   // --- Map synchronization (per-map, scoped by Socket.IO rooms) ---
