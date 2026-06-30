@@ -494,7 +494,7 @@
         let pendingHomebrew = null;
         let myCharacters = [];
         let activeCharId = null;
-        const hpState = {}; // charId -> current HP (session-local)
+        const hpState = {}; // charId -> current HP (mirrors the server, kept in sync)
         const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 
         let scene, camera, renderer, controls;
@@ -1106,16 +1106,20 @@
                 ac: acInfo.ac, acSource: acInfo.source, spellInfo, speed: SRD.speed(char.race), init: mods.dex, pp };
         }
 
-        function getCurrentHP(charId, maxHP) {
-            if (hpState[charId] == null) {
-                const stored = sessionStorage.getItem('vtt_hp_' + charId);
-                hpState[charId] = stored != null ? Math.min(+stored, maxHP) : maxHP;
+        // Current HP is server-persisted: seed from the character's stored hp.current
+        // (falling back to full HP), and push every change back to the server.
+        function getCurrentHP(char, maxHP) {
+            if (hpState[char.id] == null) {
+                hpState[char.id] = (char.hp && typeof char.hp.current === 'number')
+                    ? Math.min(char.hp.current, maxHP) : maxHP;
             }
-            return Math.max(0, Math.min(hpState[charId], maxHP));
+            return Math.max(0, Math.min(hpState[char.id], maxHP));
         }
-        function setCurrentHP(charId, value, maxHP) {
-            hpState[charId] = Math.max(0, Math.min(value, maxHP));
-            sessionStorage.setItem('vtt_hp_' + charId, hpState[charId]);
+        function setCurrentHP(char, value, maxHP) {
+            const v = Math.max(0, Math.min(Math.round(value), maxHP));
+            hpState[char.id] = v;
+            if (char.hp) char.hp.current = v; else char.hp = { current: v };
+            if (socket) socket.emit('update-hp', { id: char.id, current: v });
         }
 
         function renderHUD() {
@@ -1147,7 +1151,7 @@
 
         function renderCharPanel(char, d) {
             const cc = document.getElementById('char-content');
-            const cur = getCurrentHP(char.id, d.maxHP);
+            const cur = getCurrentHP(char, d.maxHP);
             const pct = d.maxHP > 0 ? Math.round((cur / d.maxHP) * 100) : 0;
             const race = SRD.get('races', char.race);
             const sub = char.subrace && SRD.get('subraces', char.subrace);
@@ -1197,8 +1201,8 @@
             if (sel) sel.onchange = e => { activeCharId = e.target.value; renderHUD(); };
             cc.querySelectorAll('.hp-controls button').forEach(btn => btn.onclick = () => {
                 const v = btn.dataset.hp;
-                if (v === 'full') setCurrentHP(char.id, d.maxHP, d.maxHP);
-                else setCurrentHP(char.id, getCurrentHP(char.id, d.maxHP) + (+v), d.maxHP);
+                if (v === 'full') setCurrentHP(char, d.maxHP, d.maxHP);
+                else setCurrentHP(char, getCurrentHP(char, d.maxHP) + (+v), d.maxHP);
                 renderCharPanel(char, d);
             });
         }
@@ -1526,6 +1530,15 @@
                 myCharacters = myCharacters.filter(c => c.id !== charId);
                 if (activeCharId === charId) activeCharId = myCharacters[0] ? myCharacters[0].id : null;
                 renderHUD();
+            });
+
+            // Live HP sync: another client (or this one elsewhere) changed current HP.
+            socket.on('hp-updated', ({ id, current }) => {
+                hpState[id] = current;
+                const c = myCharacters.find(x => x.id === id);
+                if (c) { if (c.hp) c.hp.current = current; else c.hp = { current }; }
+                const a = activeChar();
+                if (a && a.id === id) renderHUD();
             });
 
             // Estado completo do mapa ao conectar
