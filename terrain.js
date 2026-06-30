@@ -58,15 +58,14 @@ export class Terrain {
     this.mesh.castShadow = true;
     this.mesh.name = 'terrain';
 
-    const wgeo = new THREE.PlaneGeometry(SIZE, SIZE);
-    wgeo.rotateX(-Math.PI / 2);
+    // Water is built only over submerged cells (see _rebuildWater) so it pools in
+    // depressions instead of flooding the whole map; geometry is filled on demand.
     const wmat = new THREE.MeshStandardMaterial({
       color: 0x2f6ea5, transparent: true, opacity: 0.62,
       metalness: 0.1, roughness: 0.3, depthWrite: false, side: THREE.DoubleSide
     });
-    this.waterMesh = new THREE.Mesh(wgeo, wmat);
-    this.waterMesh.position.y = this.water.level;
-    this.waterMesh.visible = this.water.enabled;
+    this.waterMesh = new THREE.Mesh(new THREE.BufferGeometry(), wmat);
+    this.waterMesh.visible = false;
     this.waterMesh.renderOrder = 1;
     this.waterMesh.name = 'water';
 
@@ -76,7 +75,33 @@ export class Terrain {
 
     this._applyHeights();
     this._updateColors();
+    this._rebuildWater();
   }
+
+  // Build a water surface covering only the cells whose terrain dips below the
+  // water level. Flat ground at/above the level gets no water (no z-fighting),
+  // and isolated pits become isolated ponds.
+  _rebuildWater() {
+    const geo = this.waterMesh.geometry;
+    if (!this.water.enabled) { this.waterMesh.visible = false; return; }
+    const level = this.water.level, h = this.heights, pos = [];
+    for (let iz = 0; iz < RES - 1; iz++) {
+      for (let ix = 0; ix < RES - 1; ix++) {
+        const a = h[iz * RES + ix], b = h[iz * RES + ix + 1], c = h[(iz + 1) * RES + ix], d = h[(iz + 1) * RES + ix + 1];
+        if (Math.min(a, b, c, d) >= level) continue; // cell not submerged
+        const x0 = -HALF + ix * STEP, x1 = x0 + STEP, z0 = -HALF + iz * STEP, z1 = z0 + STEP;
+        pos.push(x0, level, z0, x1, level, z0, x1, level, z1,
+                 x0, level, z0, x1, level, z1, x0, level, z1);
+      }
+    }
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.deleteAttribute('normal');
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    this.waterMesh.visible = pos.length > 0;
+  }
+  // Recompute the water surface (call after terrain heights settle, e.g. stroke-end).
+  refreshWater() { this._rebuildWater(); }
 
   // --- index / coordinate helpers ---
   inBounds(x, z) { return x >= -HALF && x <= HALF && z >= -HALF && z <= HALF; }
@@ -172,8 +197,7 @@ export class Terrain {
   setWater({ enabled, level }) {
     if (enabled != null) this.water.enabled = enabled;
     if (level != null) this.water.level = level;
-    this.waterMesh.position.y = this.water.level;
-    this.waterMesh.visible = this.water.enabled;
+    this._rebuildWater();
   }
 
   reset() {
@@ -223,9 +247,10 @@ export class Terrain {
       this.splat.set(u8.subarray(0, RES * RES * 4));
       changedS = true;
     }
-    if (data.water) this.setWater(data.water);
     if (changedH) this._applyHeights();
     if (changedS) this._updateColors();
+    if (data.water) this.setWater(data.water);      // setWater rebuilds the water surface
+    else if (changedH) this._rebuildWater();         // heights changed → ponds may shift
     return changedH || changedS || !!data.water;
   }
 
