@@ -487,7 +487,10 @@
         import {
             loadSRD, ABILITIES, ABILITY_NAMES, abilityMod, fmtMod, proficiencyBonus
         } from './srd.js';
+        import { Terrain } from './terrain.js';
         // --- Firebase Imports REMOVED ---
+
+        let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
 
         // --- Phase 4: character sheet state ---
         let SRD = null;
@@ -599,8 +602,12 @@
             grid = new THREE.GridHelper(gridSize, gridDivisions, 0x888888, 0x888888);
             grid.material.opacity = 0.5;
             grid.material.transparent = true;
-            grid.position.y = 0.01; 
+            grid.position.y = 0.01;
             scene.add(grid);
+            // Tactical terrain (GM-authored heightmap + water); hidden until a terrain arrives.
+            terrain = new Terrain();
+            terrain.group.visible = false;
+            scene.add(terrain.group);
             raycaster = new THREE.Raycaster();
             mouse = new THREE.Vector2();
             rulerTooltip = document.getElementById('ruler-tooltip');
@@ -939,6 +946,11 @@
                         halfHeight = (1 * heightScale) / 2 * 0.4; // Escalonado
                     }
                     break;
+                case 'cave':
+                case 'arch':
+                    objectMesh = createPropMesh(data.type);
+                    halfHeight = 0;
+                    break;
                 default:
                     return; // Tipo desconhecido
             }
@@ -1080,6 +1092,23 @@
             leftLeg.position.set(-0.15 * B, ly, 0); rightLeg.position.set(0.15 * B, ly, 0);
         }
         // --- End Character Model Functions ---
+
+        // Decorative terrain props (mirrors the GM screen).
+        function createPropMesh(type) {
+            const group = new THREE.Group();
+            if (type === 'cave') {
+                const rock = new THREE.MeshLambertMaterial({ color: 0x6b6b6b });
+                const dome = new THREE.Mesh(new THREE.SphereGeometry(1.2, 20, 14, 0, Math.PI * 2, 0, Math.PI / 2), rock);
+                dome.castShadow = true; group.add(dome);
+                const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.6), new THREE.MeshBasicMaterial({ color: 0x0a0a0a }));
+                mouth.position.set(0, 0.42, 1.0); group.add(mouth);
+            } else { // arch
+                const stone = new THREE.MeshLambertMaterial({ color: 0x8a7f6b });
+                const arch = new THREE.Mesh(new THREE.TorusGeometry(1.0, 0.22, 12, 24, Math.PI), stone);
+                arch.castShadow = true; group.add(arch);
+            }
+            return group;
+        }
 
         // --- Phase 4: Character sheet HUD rendering ---
         function activeChar() {
@@ -1550,6 +1579,18 @@
 
                 data.objects.forEach(objData => createObjectFromData(objData.id, objData));
                 data.rulers.forEach(rulerData => createRulerLineFromData(rulerData.id, rulerData));
+
+                // Terrain: rebuild from the map's stored blob, or flatten + hide if none.
+                if (terrain) {
+                    terrain.reset();
+                    if (data.terrain) { terrain.applyData(data.terrain); terrain.group.visible = true; }
+                    else { terrain.group.visible = false; }
+                }
+            });
+
+            // Live terrain edits from the GM (partial blob).
+            socket.on('terrain-updated', (data) => {
+                if (terrain) { terrain.applyData(data); terrain.group.visible = true; }
             });
 
             socket.on('object-added', (data) => {
