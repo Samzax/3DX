@@ -155,6 +155,8 @@ io.on('connection', (socket) => {
       }
       // Preserve original owner unless GM is changing it
       charData.owner = isGM(socket.username) ? requestedOwner : existing.owner;
+      // Preserve live HP across creator edits (the creator doesn't send it).
+      if (charData.hp == null && existing.hp != null) charData.hp = existing.hp;
     } else {
       // New character - set owner
       charData.owner = requestedOwner;
@@ -213,6 +215,19 @@ io.on('connection', (socket) => {
 
     // Notify all clients
     io.emit('character-deleted', charId);
+  });
+
+  // Update a character's current HP (live, persisted, broadcast to everyone).
+  socket.on('update-hp', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const id = payload && payload.id;
+    const char = id && charactersDB[id];
+    if (!char) { socket.emit('error', 'Character not found'); return; }
+    if (!canAccessCharacter(socket.username, char)) { socket.emit('error', 'Permission denied'); return; }
+    const current = Math.max(0, Math.floor(Number(payload.current) || 0));
+    char.hp = { current };
+    saveJSON('characters.json', charactersDB);
+    io.emit('hp-updated', { id, current });
   });
 
   // --- Homebrew (custom races/classes) — shared content ---
