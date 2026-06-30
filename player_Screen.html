@@ -1583,14 +1583,17 @@
                 // Terrain: rebuild from the map's stored blob, or flatten + hide if none.
                 if (terrain) {
                     terrain.reset();
-                    if (data.terrain) { terrain.applyData(data.terrain); terrain.group.visible = true; }
-                    else { terrain.group.visible = false; }
+                    const hasTerrain = !!data.terrain;
+                    if (hasTerrain) terrain.applyData(data.terrain);
+                    terrain.group.visible = hasTerrain;
+                    // On a terrain map the heightmap is the ground; hide the flat tabletop.
+                    if (plane) plane.visible = !hasTerrain;
                 }
             });
 
             // Live terrain edits from the GM (partial blob).
             socket.on('terrain-updated', (data) => {
-                if (terrain) { terrain.applyData(data); terrain.group.visible = true; }
+                if (terrain) { terrain.applyData(data); terrain.group.visible = true; if (plane) plane.visible = false; }
             });
 
             socket.on('object-added', (data) => {
