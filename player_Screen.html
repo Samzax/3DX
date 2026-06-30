@@ -328,6 +328,38 @@
             color: #ccc;
         }
 
+        /* --- Phase 4: character sheet HUD --- */
+        .hud-panel.sheet { max-width: 620px; max-height: 82vh; overflow-y: auto; }
+        .sheet-sub { color: #9aa0aa; font-size: 13px; font-weight: 400; }
+        .char-select { width: 100%; padding: 8px; margin-bottom: 14px; background:#1a1a1a; border:1px solid #444; border-radius:6px; color:#f0f0f0; font-size:14px; }
+        .metrics-row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+        .metric-card { flex:1 1 70px; background:#1f1f24; border:1px solid #3a3a44; border-radius:8px; padding:8px 4px; text-align:center; }
+        .metric-card .l { font-size:11px; color:#9aa0aa; text-transform:uppercase; letter-spacing:.5px; }
+        .metric-card .v { font-size:18px; font-weight:700; color:#fff; margin-top:2px; }
+        .metric-card .s { font-size:10px; color:#6b7280; }
+        .ability-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px; }
+        .ability-cell { background:#1f1f24; border:1px solid #3a3a44; border-radius:8px; padding:8px; text-align:center; }
+        .ability-cell .ab-name { font-size:11px; color:#9aa0aa; text-transform:uppercase; }
+        .ability-cell .ab-score { font-size:20px; font-weight:700; color:#fff; }
+        .ability-cell .ab-mod { font-size:12px; color:#60A5FA; }
+        .ability-cell .ab-save { font-size:10px; color:#6b7280; }
+        .sheet h4 { font-size:13px; color:#cbd0d8; margin:14px 0 6px; border-bottom:1px solid #3a3a44; padding-bottom:4px; }
+        .row-item { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:5px 0; font-size:13px; border-bottom:1px solid #2a2a30; }
+        .row-item:last-child { border-bottom:none; }
+        .row-item b { color:#fff; }
+        .tag { font-size:10px; padding:1px 6px; border-radius:999px; background:#3a3a44; color:#aab; }
+        .muted { color:#6b7280; font-size:13px; }
+        .hp-controls { display:flex; gap:6px; margin-top:8px; }
+        .hp-controls button { flex:1; padding:6px 0; background:#3a3a44; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; }
+        .hp-controls button:hover { background:#4a4a55; }
+        .hp-controls button.heal { background:#2f5d3a; }
+        .hp-controls button.heal:hover { background:#3a7349; }
+        .hp-controls button.dmg { background:#5d2f2f; }
+        .hp-controls button.dmg:hover { background:#733a3a; }
+        details.spell-lvl { margin-bottom:8px; }
+        details.spell-lvl summary { color:#cbd0d8; font-size:13px; font-weight:600; padding:4px 0; }
+        details.spell-lvl .row-item { padding-left:10px; }
+
     </style>
 
     <!-- Import Map for Three.js -->
@@ -419,57 +451,30 @@
     <div id="hud-panel-overlay" class="hidden"> 
         
         <!-- Character Panel -->
-        <div id="char-panel" class="hud-panel hidden">
-            <h3>Character Stats</h3>
-            
-            <div class="stat-bar-group">
-                <label>HP (Health Points)</label>
-                <div class="stat-bar-outer">
-                    <div class="stat-bar-inner" style="width: 90%;"></div>
-                </div>
-                <span>180 / 200</span>
-            </div>
-            
-            <div class="stat-bar-group">
-                <label>Mana (Magic Points)</label>
-                <div class="stat-bar-outer">
-                    <div class="stat-bar-inner" style="width: 50%; background-color: #3b82f6;"></div>
-                </div>
-                <span>50 / 100</span>
-            </div>
-            
-            <p>Other stats and info would go here...</p>
-            
+        <div id="char-panel" class="hud-panel sheet hidden">
+            <h3 id="char-title">Character</h3>
+            <div id="char-content"><p class="muted">No character loaded.</p></div>
             <button class="close-panel-btn">Close</button>
         </div>
 
         <!-- Inventory Panel -->
-        <div id="inv-panel" class="hud-panel hidden">
+        <div id="inv-panel" class="hud-panel sheet hidden">
             <h3>Inventory</h3>
-            <p>Main Slots, Gold, etc.</p>
-            <ul>
-                <li>Health Potion</li>
-                <li>Longsword</li>
-                <li>Backpack</li>
-            </ul>
+            <div id="inv-content"><p class="muted">No character loaded.</p></div>
             <button class="close-panel-btn">Close</button>
         </div>
-        
+
         <!-- Spells Panel -->
-        <div id="spells-panel" class="hud-panel hidden">
+        <div id="spells-panel" class="hud-panel sheet hidden">
             <h3>Spells</h3>
-            <p>Cantrips, Level 1, Level 2...</p>
-            <ul>
-                <li>Fireball</li>
-                <li>Magic Missile</li>
-            </ul>
+            <div id="spells-content"><p class="muted">No character loaded.</p></div>
             <button class="close-panel-btn">Close</button>
         </div>
-        
+
         <!-- Actions Panel -->
-        <div id="actions-panel" class="hud-panel hidden">
+        <div id="actions-panel" class="hud-panel sheet hidden">
             <h3>Actions</h3>
-            <p>Attack, Dash, Dodge, Bonus Actions...</p>
+            <div id="actions-content"><p class="muted">No character loaded.</p></div>
             <button class="close-panel-btn">Close</button>
         </div>
     </div>
@@ -479,7 +484,18 @@
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import {
+            loadSRD, ABILITIES, ABILITY_NAMES, abilityMod, fmtMod, proficiencyBonus
+        } from './srd.js';
         // --- Firebase Imports REMOVED ---
+
+        // --- Phase 4: character sheet state ---
+        let SRD = null;
+        let pendingHomebrew = null;
+        let myCharacters = [];
+        let activeCharId = null;
+        const hpState = {}; // charId -> current HP (session-local)
+        const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 
         let scene, camera, renderer, controls;
         let plane, grid;
@@ -538,10 +554,7 @@
             dashSize: 0.2, 
             gapSize: 0.1 
         });
-        // --- NEW: Materials for Characters ---
-        const characterBaseMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
-        const characterEyeMaterial = new THREE.MeshBasicMaterial({ color: 0x000000 });
-        // --- End New ---
+        // --- Character materials are created per-part in createCharacterModel (see below) ---
 
         // --- Firebase Functions REMOVED ---
 
@@ -663,18 +676,20 @@
                 button.addEventListener('click', () => {
                     const panelId = button.dataset.panel;
                     document.querySelectorAll('.hud-panel').forEach(p => p.classList.add('hidden'));
-                    
-                    // --- BUG FIX: Ativar overlay com display: flex ---
+
+                    renderHUD(); // refresh sheet from latest character data
+
+                    // Show overlay: must drop the `hidden` class (display:none !important)
+                    // AND set display, since the class would otherwise override the inline style.
+                    hudOverlay.classList.remove('hidden');
                     hudOverlay.style.display = 'flex';
-                    // --- End Bug Fix ---
                     document.getElementById(panelId).classList.remove('hidden');
                 });
             });
 
             function closeAllPanels() {
-                // --- BUG FIX: Esconder overlay com display: none ---
+                hudOverlay.classList.add('hidden');
                 hudOverlay.style.display = 'none';
-                // --- End Bug Fix ---
                 document.querySelectorAll('.hud-panel').forEach(p => p.classList.add('hidden'));
             }
 
@@ -995,86 +1010,260 @@
         }
         // --- End Object Management ---
         
-        // --- NEW: Character Model Functions (Copied from GM) ---
+        // --- Character Model Functions (per-part colors + proportions; mirrors GM screen) ---
         const BASE_TORSO_HEIGHT = 1;
         const BASE_HEAD_RADIUS = 0.4;
         const BASE_ARM_LENGTH = 0.8;
-        
+
+        function charColors(charData) {
+            const c = (charData.appearance && charData.appearance.colors) || {};
+            const legacy = charData.color || '#dd4444';
+            return {
+                skin: c.skin || '#c68642',
+                hair: c.hair || '#3b2716',
+                torso: c.torso || legacy,
+                legs: c.legs || '#3a3f4a',
+                eyes: c.eyes || '#111111'
+            };
+        }
+
         function createCharacterModel(charData) {
             const modelGroup = new THREE.Group();
-            const modelMaterial = characterBaseMaterial.clone();
-            modelMaterial.color.set(charData.color);
+            const col = charColors(charData);
+            const skinMat = new THREE.MeshLambertMaterial({ color: col.skin });
+            const torsoMat = new THREE.MeshLambertMaterial({ color: col.torso });
+            const legsMat = new THREE.MeshLambertMaterial({ color: col.legs });
+            const hairMat = new THREE.MeshLambertMaterial({ color: col.hair });
+            const eyeMat = new THREE.MeshBasicMaterial({ color: col.eyes });
 
-            const torsoGeo = new THREE.CylinderGeometry(0.3, 0.3, BASE_TORSO_HEIGHT, 32);
-            const torso = new THREE.Mesh(torsoGeo, modelMaterial);
-            torso.name = 'torso';
-            modelGroup.add(torso);
-            const headGeo = new THREE.SphereGeometry(BASE_HEAD_RADIUS, 32, 32);
-            const head = new THREE.Mesh(headGeo, modelMaterial);
-            head.name = 'head';
-            modelGroup.add(head);
-            const eyeGeo = new THREE.SphereGeometry(0.05, 16, 16);
-            const leftEye = new THREE.Mesh(eyeGeo, characterEyeMaterial);
-            leftEye.name = 'leftEye';
-            modelGroup.add(leftEye);
-            const rightEye = new THREE.Mesh(eyeGeo, characterEyeMaterial);
-            rightEye.name = 'rightEye';
-            modelGroup.add(rightEye);
-            const armGeo = new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16);
-            const leftArm = new THREE.Mesh(armGeo, modelMaterial);
-            leftArm.name = 'leftArm';
-            modelGroup.add(leftArm);
-            const rightArm = new THREE.Mesh(armGeo, modelMaterial);
-            rightArm.name = 'rightArm';
-            modelGroup.add(rightArm);
-            const legGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16); 
-            const leftLeg = new THREE.Mesh(legGeo, modelMaterial);
-            leftLeg.name = 'leftLeg';
-            modelGroup.add(leftLeg);
-            const rightLeg = new THREE.Mesh(legGeo, modelMaterial);
-            rightLeg.name = 'rightLeg';
-            modelGroup.add(rightLeg);
+            const add = (geo, mat, name) => { const m = new THREE.Mesh(geo, mat); m.name = name; modelGroup.add(m); return m; };
+            add(new THREE.CylinderGeometry(0.3, 0.3, BASE_TORSO_HEIGHT, 32), torsoMat, 'torso');
+            add(new THREE.SphereGeometry(BASE_HEAD_RADIUS, 32, 32), skinMat, 'head');
+            add(new THREE.SphereGeometry(BASE_HEAD_RADIUS * 1.02, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), hairMat, 'hair');
+            add(new THREE.SphereGeometry(0.05, 16, 16), eyeMat, 'leftEye');
+            add(new THREE.SphereGeometry(0.05, 16, 16), eyeMat, 'rightEye');
+            add(new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16), skinMat, 'leftArm');
+            add(new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16), skinMat, 'rightArm');
+            add(new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16), legsMat, 'leftLeg');
+            add(new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16), legsMat, 'rightLeg');
 
-            updateCharacterAppearance(modelGroup, charData.appearance);
-            modelGroup.scale.set(0.4, 0.4, 0.4); 
+            updateCharacterAppearance(modelGroup, charData.appearance || {});
+            modelGroup.scale.set(0.4, 0.4, 0.4);
             return modelGroup;
         }
 
         function updateCharacterAppearance(modelGroup, appearance) {
-            const heightScale = appearance.height || 1;
-            const headScale = appearance.headSize || 1;
-            const armScale = appearance.armLength || 1;
-            
-            const torso = modelGroup.getObjectByName('torso');
-            const head = modelGroup.getObjectByName('head');
-            const leftEye = modelGroup.getObjectByName('leftEye');
-            const rightEye = modelGroup.getObjectByName('rightEye');
-            const leftArm = modelGroup.getObjectByName('leftArm');
-            const rightArm = modelGroup.getObjectByName('rightArm');
-            const leftLeg = modelGroup.getObjectByName('leftLeg');
-            const rightLeg = modelGroup.getObjectByName('rightLeg');
+            const H = appearance.height || 1;
+            const B = appearance.build || 1;
+            const HS = appearance.headSize || 1;
+            const AL = appearance.armLength || 1;
+            const LL = appearance.legLength || 1;
+            const g = (n) => modelGroup.getObjectByName(n);
+            const torso = g('torso'), head = g('head'), hair = g('hair'),
+                  leftEye = g('leftEye'), rightEye = g('rightEye'),
+                  leftArm = g('leftArm'), rightArm = g('rightArm'),
+                  leftLeg = g('leftLeg'), rightLeg = g('rightLeg');
 
-            torso.scale.y = heightScale;
-            torso.position.y = (BASE_TORSO_HEIGHT * heightScale) / 2 - 0.5; 
-            head.scale.set(headScale, headScale, headScale);
-            const scaledHeadRadius = BASE_HEAD_RADIUS * headScale;
-            head.position.y = (BASE_TORSO_HEIGHT * heightScale) + scaledHeadRadius - 0.5;
-            leftEye.position.y = head.position.y + (0.1 * headScale);
-            rightEye.position.y = head.position.y + (0.1 * headScale);
-            leftEye.position.z = (scaledHeadRadius - 0.05);
-            rightEye.position.z = (scaledHeadRadius - 0.05);
-            leftArm.scale.y = armScale;
-            rightArm.scale.y = armScale;
-            leftArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
-            rightArm.position.y = torso.position.y + (BASE_TORSO_HEIGHT * heightScale / 2) - (BASE_ARM_LENGTH * armScale / 2);
-            leftArm.position.x = -0.4;
-            rightArm.position.x = 0.4;
-            leftLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
-            rightLeg.position.y = torso.position.y - (BASE_TORSO_HEIGHT * heightScale / 2);
-            leftLeg.position.x = -0.15;
-            rightLeg.position.x = 0.15;
+            torso.scale.set(B, H, B);
+            torso.position.y = (BASE_TORSO_HEIGHT * H) / 2 - 0.5;
+            head.scale.set(HS, HS, HS);
+            const hr = BASE_HEAD_RADIUS * HS;
+            head.position.y = (BASE_TORSO_HEIGHT * H) + hr - 0.5;
+            if (hair) { hair.scale.set(HS, HS, HS); hair.position.y = head.position.y; }
+            leftEye.position.set(-0.13 * HS, head.position.y + 0.1 * HS, hr - 0.05);
+            rightEye.position.set(0.13 * HS, head.position.y + 0.1 * HS, hr - 0.05);
+            leftArm.scale.set(B, AL, B); rightArm.scale.set(B, AL, B);
+            const ay = torso.position.y + (BASE_TORSO_HEIGHT * H / 2) - (BASE_ARM_LENGTH * AL / 2);
+            leftArm.position.set(-0.4 * B, ay, 0); rightArm.position.set(0.4 * B, ay, 0);
+            leftLeg.scale.set(B, LL, B); rightLeg.scale.set(B, LL, B);
+            const ly = torso.position.y - (BASE_TORSO_HEIGHT * H / 2);
+            leftLeg.position.set(-0.15 * B, ly, 0); rightLeg.position.set(0.15 * B, ly, 0);
         }
-        // --- End New Character Model Functions ---
+        // --- End Character Model Functions ---
+
+        // --- Phase 4: Character sheet HUD rendering ---
+        function activeChar() {
+            return myCharacters.find(c => c.id === activeCharId) || myCharacters[0] || null;
+        }
+
+        function deriveSheet(char) {
+            const base = char.abilities || char.stats || { str:10, dex:10, con:10, int:10, wis:10, cha:10 };
+            const classes = char.classes || [];
+            const finals = SRD.finalAbilities(base, char.race, char.subrace, char.racialChoice || []);
+            const mods = {}; for (const a of ABILITIES) mods[a] = abilityMod(finals[a]);
+            const total = SRD.totalLevel(classes);
+            const prof = proficiencyBonus(total);
+            const saves = SRD.saveProficiencies(classes);
+            const granted = new Set([...SRD.raceSkillGrants(char.race).fixed, ...SRD.backgroundSkillGrants(char.background)]);
+            const proficient = new Set([...granted, ...(char.skills || [])]);
+            const maxHP = SRD.maxHP(classes, mods.con);
+            const eq = char.equipment || {};
+            const acInfo = SRD.armorClass({ armorIdx: eq.armor, shield: eq.shield, dexMod: mods.dex, classes, conMod: mods.con, wisMod: mods.wis });
+            const spellInfo = SRD.spellSlots(classes);
+            spellInfo.casters.forEach(c => { c.dc = 8 + prof + (mods[c.ability] || 0); c.atk = prof + (mods[c.ability] || 0); });
+            const pp = 10 + mods.wis + (proficient.has('perception') ? prof : 0);
+            return { base, finals, mods, total, prof, saves, proficient, maxHP,
+                ac: acInfo.ac, acSource: acInfo.source, spellInfo, speed: SRD.speed(char.race), init: mods.dex, pp };
+        }
+
+        function getCurrentHP(charId, maxHP) {
+            if (hpState[charId] == null) {
+                const stored = sessionStorage.getItem('vtt_hp_' + charId);
+                hpState[charId] = stored != null ? Math.min(+stored, maxHP) : maxHP;
+            }
+            return Math.max(0, Math.min(hpState[charId], maxHP));
+        }
+        function setCurrentHP(charId, value, maxHP) {
+            hpState[charId] = Math.max(0, Math.min(value, maxHP));
+            sessionStorage.setItem('vtt_hp_' + charId, hpState[charId]);
+        }
+
+        function renderHUD() {
+            const cc = document.getElementById('char-content');
+            const ic = document.getElementById('inv-content');
+            const sc = document.getElementById('spells-content');
+            const ac = document.getElementById('actions-content');
+            if (!cc) return;
+            if (!SRD) { const m = '<p class="muted">Loading character data…</p>'; cc.innerHTML = ic.innerHTML = sc.innerHTML = ac.innerHTML = m; return; }
+            const char = activeChar();
+            if (!char) {
+                const m = '<p class="muted">No character is assigned to you yet. Build one in the Character Creator (the “/” page) and it will appear here.</p>';
+                cc.innerHTML = ic.innerHTML = sc.innerHTML = ac.innerHTML = m;
+                document.getElementById('char-title').textContent = 'Character';
+                return;
+            }
+            const d = deriveSheet(char);
+            renderCharPanel(char, d);
+            renderInvPanel(char, d);
+            renderSpellsPanel(char, d);
+            renderActionsPanel(char, d);
+        }
+
+        function selectorHTML(activeId) {
+            if (myCharacters.length <= 1) return '';
+            const opts = myCharacters.map(c => `<option value="${escHtml(c.id)}" ${c.id === activeId ? 'selected' : ''}>${escHtml(c.name || 'Unnamed')}</option>`).join('');
+            return `<select id="char-select" class="char-select">${opts}</select>`;
+        }
+
+        function renderCharPanel(char, d) {
+            const cc = document.getElementById('char-content');
+            const cur = getCurrentHP(char.id, d.maxHP);
+            const pct = d.maxHP > 0 ? Math.round((cur / d.maxHP) * 100) : 0;
+            const race = SRD.get('races', char.race);
+            const sub = char.subrace && SRD.get('subraces', char.subrace);
+            const classTxt = (char.classes || []).map(c => {
+                const cl = SRD.get('classes', c.class); const s = c.subclass && SRD.get('subclasses', c.subclass);
+                return `${escHtml(cl ? cl.name : c.class)} ${c.level}${s ? ` (${escHtml(s.name)})` : ''}`;
+            }).join(' / ') || '—';
+            document.getElementById('char-title').innerHTML = `${escHtml(char.name || 'Unnamed')} <span class="sheet-sub">${escHtml(sub ? sub.name : (race ? race.name : ''))} · ${classTxt}</span>`;
+
+            const metrics = [
+                ['HP', `${cur}/${d.maxHP}`], ['AC', d.ac], ['Speed', d.speed],
+                ['Init', fmtMod(d.init)], ['Prof', fmtMod(d.prof)], ['PP', d.pp]
+            ].map(([l, v]) => `<div class="metric-card"><div class="l">${l}</div><div class="v">${v}</div></div>`).join('');
+
+            const abilities = ABILITIES.map(a => {
+                const isSave = d.saves.has(a);
+                return `<div class="ability-cell"><div class="ab-name">${a.toUpperCase()}</div><div class="ab-score">${d.finals[a]}</div><div class="ab-mod">${fmtMod(d.mods[a])}</div><div class="ab-save">save ${fmtMod(d.mods[a] + (isSave ? d.prof : 0))}${isSave ? ' ✓' : ''}</div></div>`;
+            }).join('');
+
+            const skills = SRD.skills.slice().sort((a, b) => a.name.localeCompare(b.name)).map(sk => {
+                const ab = sk.ability_score.index;
+                const isProf = d.proficient.has(sk.index);
+                const bonus = d.mods[ab] + (isProf ? d.prof : 0);
+                return `<div class="row-item"><span>${isProf ? '●' : '<span style="color:#555">○</span>'} ${escHtml(sk.name)} <span class="tag">${ab}</span></span><b>${fmtMod(bonus)}</b></div>`;
+            }).join('');
+
+            cc.innerHTML = `${selectorHTML(char.id)}
+                <div class="metrics-row">${metrics}</div>
+                <div class="stat-bar-group">
+                    <label>Hit Points</label>
+                    <div class="stat-bar-outer"><div class="stat-bar-inner" style="width:${pct}%; background-color:${pct < 30 ? '#d14444' : (pct < 60 ? '#d1a544' : '#44d17a')};"></div></div>
+                    <span>${cur} / ${d.maxHP}</span>
+                    <div class="hp-controls">
+                        <button class="dmg" data-hp="-5">−5</button>
+                        <button class="dmg" data-hp="-1">−1</button>
+                        <button class="heal" data-hp="1">+1</button>
+                        <button class="heal" data-hp="5">+5</button>
+                        <button data-hp="full">Full</button>
+                    </div>
+                </div>
+                <h4>Abilities</h4>
+                <div class="ability-grid">${abilities}</div>
+                <h4>Skills</h4>
+                ${skills}`;
+
+            const sel = document.getElementById('char-select');
+            if (sel) sel.onchange = e => { activeCharId = e.target.value; renderHUD(); };
+            cc.querySelectorAll('.hp-controls button').forEach(btn => btn.onclick = () => {
+                const v = btn.dataset.hp;
+                if (v === 'full') setCurrentHP(char.id, d.maxHP, d.maxHP);
+                else setCurrentHP(char.id, getCurrentHP(char.id, d.maxHP) + (+v), d.maxHP);
+                renderCharPanel(char, d);
+            });
+        }
+
+        function renderInvPanel(char, d) {
+            const ic = document.getElementById('inv-content');
+            const eq = char.equipment || {};
+            const armor = eq.armor ? SRD.get('equipment', eq.armor) : null;
+            const armorTxt = armor ? armor.name : 'None';
+            const weapons = (eq.weapons || []).map(wi => {
+                const w = SRD.get('equipment', wi); if (!w) return '';
+                const a = SRD.weaponAttack(w, d.mods, char.classes || [], d.prof);
+                return `<div class="row-item"><span>${escHtml(w.name)} <span class="tag">${a.ranged ? 'ranged ' + a.range : 'melee'}</span></span><b>${fmtMod(a.attack)} · ${a.damage}${a.versatile ? ' (' + a.versatile + ' 2H)' : ''} ${escHtml(a.damageType)}</b></div>`;
+            }).join('') || '<p class="muted">No weapons.</p>';
+            const gear = (eq.items || []).map(gi => SRD.get('equipment', gi)).filter(Boolean)
+                .map(g => `<div class="row-item"><span>${escHtml(g.name)}</span></div>`).join('') || '<p class="muted">No gear.</p>';
+            ic.innerHTML = `
+                <h4>Armor</h4>
+                <div class="row-item"><span>${escHtml(armorTxt)}${eq.shield ? ' + Shield' : ''}</span><b>AC ${d.ac}</b></div>
+                <div class="muted" style="margin-top:4px;">${escHtml(d.acSource)}</div>
+                <h4>Weapons</h4>${weapons}
+                <h4>Gear</h4>${gear}`;
+        }
+
+        function renderSpellsPanel(char, d) {
+            const sc = document.getElementById('spells-content');
+            const casters = (char.classes || []).filter(c => SRD.isCaster(c.class));
+            if (!casters.length) { sc.innerHTML = '<p class="muted">This character has no spellcasting classes.</p>'; return; }
+            const si = d.spellInfo;
+            const slotLine = Object.entries(si.slots).filter(([l, n]) => n > 0).map(([l, n]) => `L${l}×${n}`).join('  ·  ');
+            const pactLine = si.pact ? `Pact ${si.pact.count}×L${si.pact.level}` : '';
+            const casterSummary = si.casters.map(ci => {
+                const cl = SRD.get('classes', ci.class);
+                return `<div class="row-item"><span>${escHtml(cl ? cl.name : ci.class)} <span class="tag">${ci.ability ? ci.ability.toUpperCase() : ''}</span></span><b>DC ${ci.dc} · atk ${fmtMod(ci.atk)}</b></div>`;
+            }).join('');
+            const known = (char.spells || []).map(x => SRD.get('spells', x)).filter(Boolean).sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
+            const byLevel = {};
+            known.forEach(s => { (byLevel[s.level] = byLevel[s.level] || []).push(s); });
+            const spellSections = Object.keys(byLevel).map(Number).sort((a, b) => a - b).map(lv => {
+                const label = lv === 0 ? 'Cantrips' : `Level ${lv}`;
+                const items = byLevel[lv].map(s => `<div class="row-item"><span>${escHtml(s.name)}${s.concentration ? ' <span class="tag">C</span>' : ''}${s.ritual ? ' <span class="tag">R</span>' : ''}</span></div>`).join('');
+                return `<details class="spell-lvl" open><summary>${label} <span class="muted">(${byLevel[lv].length})</span></summary>${items}</details>`;
+            }).join('') || '<p class="muted">No spells known. Add them in the Character Creator.</p>';
+            sc.innerHTML = `
+                <div class="row-item"><span>Spell slots</span><b>${slotLine || '—'}${pactLine ? '  ·  ' + pactLine : ''}</b></div>
+                <h4>Spellcasting</h4>${casterSummary}
+                <h4>Known / Prepared</h4>${spellSections}`;
+        }
+
+        function renderActionsPanel(char, d) {
+            const ac = document.getElementById('actions-content');
+            const eq = char.equipment || {};
+            const attacks = (eq.weapons || []).map(wi => {
+                const w = SRD.get('equipment', wi); if (!w) return '';
+                const a = SRD.weaponAttack(w, d.mods, char.classes || [], d.prof);
+                return `<div class="row-item"><span>${escHtml(w.name)} <span class="tag">${a.ranged ? 'ranged ' + a.range : 'melee'}</span></span><b>${fmtMod(a.attack)} to hit · ${a.damage} ${escHtml(a.damageType)}</b></div>`;
+            }).join('') || '<p class="muted">No weapon attacks.</p>';
+            const standard = ['Attack', 'Cast a Spell', 'Dash', 'Disengage', 'Dodge', 'Help', 'Hide', 'Ready', 'Search', 'Use an Object']
+                .map(x => `<div class="row-item"><span>${x}</span></div>`).join('');
+            ac.innerHTML = `
+                <h4>Attacks</h4>${attacks}
+                <h4>Standard Actions</h4>${standard}
+                <div class="muted" style="margin-top:8px;">Bonus actions &amp; reactions depend on your class features and prepared spells.</div>`;
+        }
+        // --- End Phase 4 sheet rendering ---
 
         // --- UI Management (Left Menu) ---
         function setTool(toolName) {
@@ -1311,6 +1500,34 @@
                 if (loginOverlay) loginOverlay.classList.add('hidden');
             });
 
+            // --- Phase 4: character data for the HUD ---
+            socket.on('load-user-characters', (chars) => {
+                myCharacters = Array.isArray(chars) ? chars : [];
+                if (!myCharacters.find(c => c.id === activeCharId)) {
+                    activeCharId = myCharacters[0] ? myCharacters[0].id : null;
+                }
+                renderHUD();
+            });
+
+            socket.on('load-homebrew', (hb) => {
+                pendingHomebrew = hb;
+                if (SRD) { SRD.setHomebrew(hb); renderHUD(); }
+            });
+
+            socket.on('character-updated', (char) => {
+                if (!char || !char.id) return;
+                const i = myCharacters.findIndex(c => c.id === char.id);
+                if (i >= 0) myCharacters[i] = char;
+                else if (char.owner === username || (username && username.toLowerCase() === 'gm')) myCharacters.push(char);
+                renderHUD();
+            });
+
+            socket.on('character-deleted', (charId) => {
+                myCharacters = myCharacters.filter(c => c.id !== charId);
+                if (activeCharId === charId) activeCharId = myCharacters[0] ? myCharacters[0].id : null;
+                renderHUD();
+            });
+
             // Estado completo do mapa ao conectar
             socket.on('map-state', (data) => {
                 objects.forEach(obj => scene.remove(obj));
@@ -1414,6 +1631,13 @@
         } catch (e) {
             console.error('Fatal Error on Init:', e);
         }
+
+        // Load SRD data for the character-sheet HUD (independent of the 3D scene).
+        loadSRD().then(srd => {
+            SRD = srd;
+            if (pendingHomebrew) SRD.setHomebrew(pendingHomebrew);
+            renderHUD();
+        }).catch(e => console.error('Failed to load SRD data:', e));
         
     </script>
 </body>
