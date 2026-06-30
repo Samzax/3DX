@@ -265,6 +265,27 @@
         #btn-up:disabled { opacity: 0.4; cursor: not-allowed; }
         #breadcrumb { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+        /* --- Terrain editor panel --- */
+        #terrain-panel {
+            position: absolute; left: 78px; top: 10px; width: 220px; z-index: 30;
+            background: rgba(20,20,24,0.92); border: 1px solid #444; border-radius: 10px;
+            padding: 12px; color: #eee; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        #terrain-panel.hidden { display: none; }
+        #terrain-panel h3 { margin: 0 0 10px; font-size: 15px; color: #ffdd55; }
+        #terrain-panel .tp-label { font-size: 11px; text-transform: uppercase; color: #9aa0aa; margin: 10px 0 5px; letter-spacing: .5px; }
+        #terrain-panel .tp-row { display: flex; flex-wrap: wrap; gap: 5px; }
+        #terrain-panel .brush-mode { flex: 1 1 30%; padding: 6px 4px; font-size: 12px; background: #3a3a44; color: #fff; border: 1px solid #4a4a55; border-radius: 6px; cursor: pointer; }
+        #terrain-panel .brush-mode.active { background: #ffdd55; color: #1a1a1a; font-weight: 700; border-color: #ffdd55; }
+        #terrain-mats { gap: 8px; }
+        #terrain-mats .mat-swatch { width: 34px; height: 28px; border-radius: 6px; border: 2px solid #555; cursor: pointer; }
+        #terrain-mats .mat-swatch.active { border-color: #fff; box-shadow: 0 0 6px #fff; }
+        #terrain-panel .tp-slider { margin: 8px 0; }
+        #terrain-panel .tp-slider label { display: block; font-size: 12px; color: #cbd0d8; margin-bottom: 3px; }
+        #terrain-panel .tp-slider input[type=range] { width: 100%; }
+        #terrain-panel .tp-reset { width: 100%; margin-top: 10px; padding: 7px; background: #5d2f2f; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+        #terrain-panel .tp-reset:hover { background: #733a3a; }
+
     </style>
 
     <!-- Import Map for Three.js -->
@@ -344,8 +365,46 @@
         </div>
 
         <button id="btn-tool-3" class="tool-button" title="Tool 3">T3</button>
+        <button id="btn-tool-terrain" class="tool-button" title="Terrain (tactical maps only)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20l5-9 4 5 3-4 6 8z"></path></svg>
+        </button>
     </div>
     <!-- --- End Tool Menu --- -->
+
+    <!-- --- Terrain editor panel (shown when the Terrain tool is active on a tactical map) --- -->
+    <div id="terrain-panel" class="hidden">
+        <h3>Terrain</h3>
+        <div class="tp-label">Brush</div>
+        <div class="tp-row" id="terrain-brushes">
+            <button class="brush-mode active" data-mode="raise">Raise</button>
+            <button class="brush-mode" data-mode="lower">Lower</button>
+            <button class="brush-mode" data-mode="smooth">Smooth</button>
+            <button class="brush-mode" data-mode="flatten">Flatten</button>
+            <button class="brush-mode" data-mode="noise">Noise</button>
+            <button class="brush-mode" data-mode="paint">Paint</button>
+        </div>
+        <div class="tp-label">Material (Paint)</div>
+        <div class="tp-row" id="terrain-mats">
+            <button class="mat-swatch active" data-mat="0" style="background:#4a7a3a;" title="Grass"></button>
+            <button class="mat-swatch" data-mat="1" style="background:#6b4f2a;" title="Dirt"></button>
+            <button class="mat-swatch" data-mat="2" style="background:#7d7d7d;" title="Rock"></button>
+            <button class="mat-swatch" data-mat="3" style="background:#c2b280;" title="Sand"></button>
+        </div>
+        <div class="tp-slider">
+            <label>Radius <span id="brush-radius-val">6</span></label>
+            <input type="range" id="brush-radius" min="1" max="25" step="1" value="6">
+        </div>
+        <div class="tp-slider">
+            <label>Strength <span id="brush-strength-val">0.35</span></label>
+            <input type="range" id="brush-strength" min="0.02" max="1" step="0.01" value="0.35">
+        </div>
+        <div class="tp-label">Water</div>
+        <div class="tp-slider">
+            <label><input type="checkbox" id="water-toggle"> Enabled · level <span id="water-level-val">0.0</span></label>
+            <input type="range" id="water-level" min="-10" max="20" step="0.1" value="0">
+        </div>
+        <button id="terrain-reset" class="tp-reset">Reset terrain</button>
+    </div>
 
     <!-- --- Layer navigation (breadcrumb, top-center) --- -->
     <div id="layer-nav">
@@ -359,6 +418,8 @@
         <button id="btn-token" class="menu-button">Token (Cylinder)</button>
         <button id="btn-cube" class="menu-button">Cube</button>
         <button id="btn-sphere" class="menu-button">Sphere</button>
+        <button id="btn-cave" class="menu-button">Cave (prop)</button>
+        <button id="btn-arch" class="menu-button">Rock Arch (prop)</button>
         
         <!-- --- New Character Menu Container --- -->
         <div id="character-menu-container">
@@ -379,7 +440,16 @@
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { Terrain, MATERIALS } from './terrain.js';
         // --- Firebase/LocalStorage Imports REMOVED ---
+
+        // --- Terrain editor state (tactical layer only) ---
+        let terrain = null;
+        let terrainBrushRing = null;
+        let isSculpting = false;
+        let strokeRef = 0;                         // flatten target captured at stroke start
+        let strokeChanged = { heights: false, splat: false };
+        const terrainBrush = { mode: 'raise', radius: 6, strength: 0.35, material: 0 };
 
         let scene, camera, renderer, controls;
         let plane, grid;
@@ -565,6 +635,11 @@
             rulerSegments.forEach(s => { scene.remove(s); if (s.geometry) s.geometry.dispose(); });
             rulerSegments = [];
             showLayerGrid(mapDepth(key));
+            // Hide terrain + its panel off the tactical leaf; map-state will repopulate it.
+            if (terrain) terrain.group.visible = false;
+            isSculpting = false;
+            if (terrainBrushRing) terrainBrushRing.visible = false;
+            updateTerrainPanel();
             updateBreadcrumb();
             if (socket) socket.emit('join-map', { key });
         }
@@ -652,6 +727,19 @@
                 data.rulers.forEach(rulerData => {
                     createRulerLineFromData(rulerData.id, rulerData);
                 });
+
+                // Terrain: rebuild from the stored blob; visible only on the tactical leaf.
+                if (terrain) {
+                    terrain.reset();
+                    if (data.terrain) terrain.applyData(data.terrain);
+                    terrain.group.visible = (mapDepth(currentMapKey) === 2);
+                    syncWaterControls();
+                }
+            });
+
+            // Live terrain edits (echo to other GM tabs; players handle this too).
+            socket.on('terrain-updated', (data) => {
+                if (terrain) { terrain.applyData(data); syncWaterControls(); }
             });
             
             // 2. Ouvir por novos objetos
@@ -749,6 +837,18 @@
             grid.material.transparent = true;
             grid.position.y = 0.01;
             scene.add(grid);
+            // Tactical terrain (heightmap + material paint + water). Hidden off-tactical.
+            terrain = new Terrain();
+            terrain.group.visible = false;
+            scene.add(terrain.group);
+            // Brush-radius indicator that follows the cursor while the terrain tool is active.
+            terrainBrushRing = new THREE.Mesh(
+                new THREE.RingGeometry(0.97, 1, 48),
+                new THREE.MeshBasicMaterial({ color: 0xffdd55, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+            );
+            terrainBrushRing.rotation.x = -Math.PI / 2;
+            terrainBrushRing.visible = false;
+            scene.add(terrainBrushRing);
             // Show the correct grid (hex vs square) for the current layer
             showLayerGrid(mapDepth(currentMapKey));
             updateBreadcrumb();
@@ -758,6 +858,7 @@
             window.addEventListener('resize', onWindowResize);
             renderer.domElement.addEventListener('pointerdown', onPointerDown);
             renderer.domElement.addEventListener('pointermove', onPointerMove);
+            renderer.domElement.addEventListener('pointerup', onPointerUp);
             renderer.domElement.addEventListener('contextmenu', onContextMenu);
             window.addEventListener('keydown', onKeyDown); // Modificado para incluir 'delete'
             renderer.domElement.addEventListener('dblclick', onDoubleClick); // double-click a hex to descend
@@ -766,9 +867,13 @@
             menuButtons.token = document.getElementById('btn-token');
             menuButtons.cube = document.getElementById('btn-cube');
             menuButtons.sphere = document.getElementById('btn-sphere');
+            menuButtons.cave = document.getElementById('btn-cave');
+            menuButtons.arch = document.getElementById('btn-arch');
             menuButtons.token.addEventListener('click', () => setSelectedObjectType('token'));
             menuButtons.cube.addEventListener('click', () => setSelectedObjectType('cube'));
             menuButtons.sphere.addEventListener('click', () => setSelectedObjectType('sphere'));
+            menuButtons.cave.addEventListener('click', () => setSelectedObjectType('cave'));
+            menuButtons.arch.addEventListener('click', () => setSelectedObjectType('arch'));
             // Characters are loaded from the server via Socket.IO (see initSocket).
 
             // --- Tool Menu Listeners (Left) ---
@@ -812,6 +917,31 @@
 
             toolMenuButtons.tool3.addEventListener('click', () => setTool('tool3'));
 
+            // --- Terrain tool wiring ---
+            toolMenuButtons.terrain = document.getElementById('btn-tool-terrain');
+            toolMenuButtons.terrain.addEventListener('click', () => setTool('terrain'));
+            document.querySelectorAll('#terrain-panel .brush-mode').forEach(btn => {
+                btn.addEventListener('click', () => setBrushMode(btn.dataset.mode));
+            });
+            document.querySelectorAll('#terrain-mats .mat-swatch').forEach(btn => {
+                btn.addEventListener('click', () => setBrushMaterial(+btn.dataset.mat));
+            });
+            const radiusInput = document.getElementById('brush-radius');
+            const strengthInput = document.getElementById('brush-strength');
+            radiusInput.addEventListener('input', e => { terrainBrush.radius = +e.target.value; document.getElementById('brush-radius-val').textContent = (+e.target.value).toFixed(0); });
+            strengthInput.addEventListener('input', e => { terrainBrush.strength = +e.target.value; document.getElementById('brush-strength-val').textContent = (+e.target.value).toFixed(2); });
+            const waterToggle = document.getElementById('water-toggle');
+            const waterLevel = document.getElementById('water-level');
+            waterToggle.addEventListener('change', e => { terrain.setWater({ enabled: e.target.checked }); emitTerrain({ water: true }); });
+            waterLevel.addEventListener('input', e => { terrain.setWater({ level: +e.target.value }); document.getElementById('water-level-val').textContent = (+e.target.value).toFixed(1); });
+            waterLevel.addEventListener('change', () => emitTerrain({ water: true }));
+            document.getElementById('terrain-reset').addEventListener('click', () => {
+                if (!confirm('Reset all terrain on this tactical map?')) return;
+                terrain.reset();
+                waterToggle.checked = false; waterLevel.value = 0; document.getElementById('water-level-val').textContent = '0.0';
+                emitTerrain({ heights: true, splat: true, water: true });
+            });
+
             const upBtn = document.getElementById('btn-up');
             if (upBtn) upBtn.addEventListener('click', goUp);
 
@@ -844,9 +974,23 @@
         function onPointerDown(event) { // Não mais assíncrona
             if (isDraggingHeight) {
                 isDraggingHeight = false;
-                controls.enabled = true; 
+                controls.enabled = true;
                 deselectObject();
-                return; 
+                return;
+            }
+
+            // Terrain sculpt/paint: start a stroke (left button only).
+            if (terrainActive() && event.button === 0) {
+                const p = pointerToGround(event);
+                if (p) {
+                    isSculpting = true;
+                    controls.enabled = false;
+                    strokeRef = terrain.sampleHeight(p.x, p.z);
+                    strokeChanged = { heights: false, splat: false };
+                    terrainDab(p);
+                    updateBrushRing(p);
+                }
+                return;
             }
 
             const canvas = renderer.domElement;
@@ -941,6 +1085,16 @@
             lastMouseX = event.clientX;
             lastMouseY = event.clientY;
 
+            // Terrain tool: paint along the drag, or just move the brush ring while hovering.
+            if (terrainActive()) {
+                const p = pointerToGround(event);
+                if (p) {
+                    if (isSculpting) terrainDab(p);
+                    updateBrushRing(p);
+                }
+                if (isSculpting) return;
+            }
+
             if (isDraggingHeight && selectedObject) {
                 const deltaY = event.movementY * -0.01; 
                 selectedObject.position.y += deltaY;
@@ -982,8 +1136,18 @@
             }
         }
 
+        function onPointerUp(event) {
+            // End a terrain stroke and sync only the layer(s) that changed.
+            if (isSculpting) {
+                isSculpting = false;
+                controls.enabled = !terrainActive(); // stays disabled while the terrain tool is active
+                if (strokeChanged.heights || strokeChanged.splat) emitTerrain(strokeChanged);
+                strokeChanged = { heights: false, splat: false };
+            }
+        }
+
         function onContextMenu(event) { // Não mais assíncrona
-            event.preventDefault(); 
+            event.preventDefault();
             if (currentTool !== 'ruler') return;
             
             const canvas = renderer.domElement;
@@ -1089,11 +1253,20 @@
                         return; // Sem dados, não adicionar
                     }
                     break;
+                case 'cave':
+                    halfHeight = 0;
+                    dataToSave = { type: 'cave' };
+                    break;
+                case 'arch':
+                    halfHeight = 0;
+                    dataToSave = { type: 'arch' };
+                    break;
                 default:
-                    return; 
+                    return;
             }
 
-            dataToSave.position = { x: position.x, y: halfHeight, z: position.z };
+            // Seat the object on the terrain surface (flat y=0 off the tactical layer).
+            dataToSave.position = { x: position.x, y: groundY(position.x, position.z, halfHeight), z: position.z };
             
             // --- MODIFIED: Emitir para o servidor ---
             socket.emit('add-object', dataToSave);
@@ -1127,6 +1300,11 @@
                         const heightScale = data.characterData.appearance.height || 1;
                         halfHeight = (1 * heightScale) / 2 * 0.4; // Escalonado
                     }
+                    break;
+                case 'cave':
+                case 'arch':
+                    objectMesh = createPropMesh(data.type);
+                    halfHeight = 0;
                     break;
                 default:
                     return; // Tipo desconhecido
@@ -1183,15 +1361,15 @@
                 case 'standard':
                     object.position.x = newPosition.x;
                     object.position.z = newPosition.z;
-                    object.position.y = Math.max(object.position.y, halfHeight); 
+                    object.position.y = groundY(object.position.x, object.position.z, halfHeight);
                     break;
                 case 'x-only':
                     object.position.x = newPosition.x;
-                    object.position.y = Math.max(object.position.y, halfHeight);
+                    object.position.y = groundY(object.position.x, object.position.z, halfHeight);
                     break;
                 case 'z-only':
                     object.position.z = newPosition.z;
-                    object.position.y = Math.max(object.position.y, halfHeight);
+                    object.position.y = groundY(object.position.x, object.position.z, halfHeight);
                     break;
                 case 'y-only':
                     break;
@@ -1339,16 +1517,94 @@
                 rulerTooltip.style.display = 'none';
             }
             currentTool = toolName;
-            if(toolName !== 'add' && toolName !== null) { 
+            if(toolName !== 'add' && toolName !== null) {
                 deselectObjectType();
             }
             for (const key in toolMenuButtons) {
-                if (key === toolName || (key === 'ruler' && toolName === 'ruler')) { 
+                if (key === toolName || (key === 'ruler' && toolName === 'ruler')) {
                     toolMenuButtons[key].classList.add('active');
                 } else {
                     toolMenuButtons[key].classList.remove('active');
                 }
             }
+            updateTerrainPanel();
+        }
+
+        // --- Terrain editor logic ---
+        function terrainActive() { return currentTool === 'terrain' && mapDepth(currentMapKey) === 2; }
+        function updateTerrainPanel() {
+            const panel = document.getElementById('terrain-panel');
+            const show = currentTool === 'terrain' && mapDepth(currentMapKey) === 2;
+            panel.classList.toggle('hidden', !show);
+            if (terrainBrushRing) terrainBrushRing.visible = false;
+            // Disable orbit while the terrain tool is active so drags sculpt instead of
+            // rotating the camera. Switch to another tool (e.g. Move) to orbit again.
+            if (controls) controls.enabled = !terrainActive();
+            if (currentTool === 'terrain' && mapDepth(currentMapKey) !== 2) {
+                console.warn('Terrain editing is only available on a tactical map (double-click down to one).');
+            }
+        }
+        function setBrushMode(mode) {
+            terrainBrush.mode = mode;
+            document.querySelectorAll('#terrain-panel .brush-mode').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+        }
+        function setBrushMaterial(i) {
+            terrainBrush.material = i;
+            document.querySelectorAll('#terrain-mats .mat-swatch').forEach(b => b.classList.toggle('active', +b.dataset.mat === i));
+            if (terrainBrush.mode !== 'paint') setBrushMode('paint');
+        }
+        function emitTerrain(flags) {
+            if (socket) socket.emit('update-terrain', terrain.delta(flags));
+        }
+        function pointerToGround(event) {
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const hit = raycaster.intersectObject(plane)[0];
+            return hit ? hit.point : null;
+        }
+        function terrainDab(p) {
+            const b = terrainBrush;
+            if (b.mode === 'paint') { terrain.paint(p.x, p.z, b.radius, b.strength, b.material); strokeChanged.splat = true; }
+            else { terrain.sculpt(p.x, p.z, b.radius, b.strength, b.mode, strokeRef); strokeChanged.heights = true; }
+        }
+        function updateBrushRing(p) {
+            if (!terrainBrushRing) return;
+            terrainBrushRing.visible = true;
+            terrainBrushRing.position.set(p.x, terrain.sampleHeight(p.x, p.z) + 0.05, p.z);
+            terrainBrushRing.scale.set(terrainBrush.radius, terrainBrush.radius, terrainBrush.radius);
+        }
+        // Ground height a token should rest at, for the current map.
+        function groundY(x, z, halfHeight) {
+            const base = (terrain && mapDepth(currentMapKey) === 2) ? terrain.sampleHeight(x, z) : 0;
+            return base + halfHeight;
+        }
+        function syncWaterControls() {
+            if (!terrain) return;
+            const t = document.getElementById('water-toggle');
+            const l = document.getElementById('water-level');
+            const v = document.getElementById('water-level-val');
+            if (t) t.checked = terrain.water.enabled;
+            if (l) l.value = terrain.water.level;
+            if (v) v.textContent = (+terrain.water.level).toFixed(1);
+        }
+
+        // Simple decorative props for the folded geometry a heightmap can't do.
+        function createPropMesh(type) {
+            const group = new THREE.Group();
+            if (type === 'cave') {
+                const rock = new THREE.MeshLambertMaterial({ color: 0x6b6b6b });
+                const dome = new THREE.Mesh(new THREE.SphereGeometry(1.2, 20, 14, 0, Math.PI * 2, 0, Math.PI / 2), rock);
+                dome.castShadow = true; group.add(dome);
+                const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.6), new THREE.MeshBasicMaterial({ color: 0x0a0a0a }));
+                mouth.position.set(0, 0.42, 1.0); group.add(mouth);
+            } else { // arch
+                const stone = new THREE.MeshLambertMaterial({ color: 0x8a7f6b });
+                const arch = new THREE.Mesh(new THREE.TorusGeometry(1.0, 0.22, 12, 24, Math.PI), stone);
+                arch.position.y = 0.0; arch.castShadow = true; group.add(arch);
+            }
+            return group;
         }
 
         // --- Move Tool Logic ---

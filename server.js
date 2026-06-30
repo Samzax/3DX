@@ -302,7 +302,8 @@ io.on('connection', (socket) => {
     socket.emit('map-state', {
       key,
       objects: Object.values(m.objects),
-      rulers: Object.values(m.rulers)
+      rulers: Object.values(m.rulers),
+      terrain: m.terrain || null
     });
   }
 
@@ -370,6 +371,26 @@ io.on('connection', (socket) => {
     map.rulers = {};
     saveMaps();
     io.to(key).emit('rulers-cleared');
+  });
+
+  // Terrain edits (GM-authored). Partial blobs ({heights?, splat?, water?}) are
+  // merged into the map's stored terrain and relayed to everyone else in the room.
+  // heights/splat are opaque base64 strings here — only the clients en/decode them.
+  socket.on('update-terrain', (data) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
+    const t = map.terrain || (map.terrain = { res: 128, size: 100, water: { enabled: false, level: 0 } });
+    if (typeof data.heights === 'string') t.heights = data.heights;
+    if (typeof data.splat === 'string') t.splat = data.splat;
+    if (data.water && typeof data.water === 'object') {
+      t.water = {
+        enabled: !!data.water.enabled,
+        level: Math.max(-50, Math.min(50, Number(data.water.level) || 0))
+      };
+    }
+    saveMaps();
+    socket.to(key).emit('terrain-updated', data);
   });
 
   socket.on('disconnect', () => {
