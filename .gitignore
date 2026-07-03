@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# Runtime save state written by server.js (characters, map state, homebrew)
+data/saves/

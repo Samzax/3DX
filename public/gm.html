@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Virtual Tabletop (Mestre - Sincronizado)</title>
+    <link rel="stylesheet" href="/css/tabletop.css">
+    <link rel="stylesheet" href="/css/gm.css">
+
+    <!-- Import Map for Three.js (must stay inline) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "/vendor/three/three.module.js",
+            "three/addons/": "/vendor/three/"
+        }
+    }
+    </script>
+
+    <!-- Socket.IO client (served by server.js) -->
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+<!-- Login Modal (auto-hidden once the GM auto-login succeeds) -->
+<div id="login-overlay">
+  <div id="login-modal">
+    <h2>🎲 VTT Login</h2>
+    <input
+      type="text"
+      id="username-input"
+      placeholder="Enter your username"
+      autocomplete="username"
+      maxlength="20"
+    />
+    <button id="login-btn">Login</button>
+    <div id="login-error" class="hidden"></div>
+  </div>
+</div>
+    <!-- This container holds the 3D scene -->
+    <div id="scene-container"></div>
+
+    <!-- --- Tool Menu (Left) --- -->
+    <div id="tool-menu">
+        <div id="tool-move-wrapper" style="position: relative;">
+            <button id="btn-tool-move" class="tool-button" title="Move Tool (Hold for options)">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
+            </button>
+            <div id="move-submenu">
+                <button id="btn-move-standard" class="menu-button">Standard (X/Z)</button>
+                <button id="btn-move-x" class="menu-button">X-Axis Only</button>
+                <button id="btn-move-z" class="menu-button">Z-Axis Only</button>
+                <button id="btn-move-y" class="menu-button">Y-Axis (Height)</button>
+            </div>
+        </div>
+
+        <button id="btn-tool-ruler" class="tool-button" title="Ruler Tool (Hold for options)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="21" x2="21" y2="3"></line><path d="M11.5 12.5l3 3"></path><path d="M8.5 15.5l3 3"></path><path d="M5.5 18.5l3 3"></path><path d="M12.5 11.5l3-3"></path><path d="M15.5 8.5l3-3"></path><path d="M18.5 5.5l3-3"></path></svg>
+        </button>
+        <div id="ruler-submenu" style="display: none; position: absolute; left: 105%; top: 56px; width: 150px; background-color: rgba(0, 0, 0, 0.85); padding: 10px; border-radius: 8px; border: 1px solid #444; z-index: 100;">
+            <button id="btn-ruler-straight" class="menu-button active">Straight Line</button>
+            <button id="btn-ruler-curved" class="menu-button">Curved Line</button>
+
+            <div id="ruler-colors" style="display: flex; gap: 8px; margin-top: 10px; border-top: 1px solid #444; padding-top: 10px; justify-content: center;">
+                <button class="color-swatch active" data-color="0x00ffff" style="background-color: #00ffff;" title="Cyan"></button>
+                <button class="color-swatch" data-color="0xff00ff" style="background-color: #ff00ff;" title="Magenta"></button>
+                <button class="color-swatch" data-color="0xffff00" style="background-color: #ffff00;" title="Yellow"></button>
+                <button class="color-swatch" data-color="0xff0000" style="background-color: #ff0000;" title="Red"></button>
+            </div>
+
+            <div id="ruler-snap-mode" style="margin-top: 10px; border-top: 1px solid #444; padding-top: 10px;">
+                <button id="btn-ruler-snap-center" class="menu-button active" style="font-size: 13px;">Snap: Center</button>
+                <button id="btn-ruler-snap-corner" class="menu-button" style="font-size: 13px;">Snap: Corner</button>
+            </div>
+        </div>
+
+        <button id="btn-tool-3" class="tool-button" title="Tool 3">T3</button>
+        <button id="btn-tool-terrain" class="tool-button" title="Terrain (tactical maps only)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20l5-9 4 5 3-4 6 8z"></path></svg>
+        </button>
+    </div>
+
+    <!-- --- Terrain editor panel (shown when the Terrain tool is active on a tactical map) --- -->
+    <div id="terrain-panel" class="hidden">
+        <h3>Terrain</h3>
+        <div class="tp-label">Brush</div>
+        <div class="tp-row" id="terrain-brushes">
+            <button class="brush-mode active" data-mode="raise">Raise</button>
+            <button class="brush-mode" data-mode="lower">Lower</button>
+            <button class="brush-mode" data-mode="smooth">Smooth</button>
+            <button class="brush-mode" data-mode="flatten">Flatten</button>
+            <button class="brush-mode" data-mode="noise">Noise</button>
+            <button class="brush-mode" data-mode="paint">Paint</button>
+        </div>
+        <div class="tp-label">Material (Paint)</div>
+        <div class="tp-row" id="terrain-mats">
+            <button class="mat-swatch active" data-mat="0" style="background:#4a7a3a;" title="Grass"></button>
+            <button class="mat-swatch" data-mat="1" style="background:#6b4f2a;" title="Dirt"></button>
+            <button class="mat-swatch" data-mat="2" style="background:#7d7d7d;" title="Rock"></button>
+            <button class="mat-swatch" data-mat="3" style="background:#c2b280;" title="Sand"></button>
+        </div>
+        <div class="tp-slider">
+            <label>Radius <span id="brush-radius-val">6</span></label>
+            <input type="range" id="brush-radius" min="1" max="25" step="1" value="6">
+        </div>
+        <div class="tp-slider">
+            <label>Strength <span id="brush-strength-val">0.35</span></label>
+            <input type="range" id="brush-strength" min="0.02" max="1" step="0.01" value="0.35">
+        </div>
+        <div class="tp-label">Water</div>
+        <div class="tp-slider">
+            <label><input type="checkbox" id="water-toggle"> Enabled · level <span id="water-level-val">0.0</span></label>
+            <input type="range" id="water-level" min="-10" max="20" step="0.1" value="0">
+        </div>
+        <button id="terrain-reset" class="tp-reset">Reset terrain</button>
+    </div>
+
+    <!-- --- Layer navigation (breadcrumb, top-center) --- -->
+    <div id="layer-nav">
+        <button id="btn-up" title="Up a level">▲ Up</button>
+        <span id="breadcrumb">World</span>
+    </div>
+
+    <!-- --- Object Menu (Right) --- -->
+    <div id="object-menu">
+        <h2>Add Object</h2>
+        <button id="btn-token" class="menu-button">Token (Cylinder)</button>
+        <button id="btn-cube" class="menu-button">Cube</button>
+        <button id="btn-sphere" class="menu-button">Sphere</button>
+        <button id="btn-cave" class="menu-button">Cave (prop)</button>
+        <button id="btn-arch" class="menu-button">Rock Arch (prop)</button>
+
+        <div id="character-menu-container">
+            <h2>Characters</h2>
+            <div id="character-button-list">
+                <p style="font-size: 12px; color: #999;">No characters found. Create one in the Character Creator!</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- --- Ruler Tooltip --- -->
+    <div id="ruler-tooltip">0 ft</div>
+
+    <script type="module" src="/js/pages/gm.js"></script>
+</body>
+</html>

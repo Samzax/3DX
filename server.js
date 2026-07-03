@@ -16,11 +16,21 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.join(__dirname, 'data');
+// Runtime save state lives in data/saves/ (gitignored); data/srd/ is read-only reference data.
+const DATA_DIR = path.join(__dirname, 'data', 'saves');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)){
-  try { fs.mkdirSync(DATA_DIR); } catch (e) { console.error("Error creating data folder:", e); }
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch (e) { console.error("Error creating data folder:", e); }
+}
+
+// One-time migration: saves used to live directly in data/
+for (const f of ['characters.json', 'map_state.json', 'homebrew.json']) {
+  const oldPath = path.join(__dirname, 'data', f);
+  const newPath = path.join(DATA_DIR, f);
+  if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
+    try { fs.renameSync(oldPath, newPath); } catch (e) { console.error(`Error migrating ${f}:`, e); }
+  }
 }
 
 // File helper functions
@@ -69,14 +79,16 @@ let homebrewDB = loadJSON('homebrew.json', { races: {}, classes: {} });
 if (!homebrewDB.races) homebrewDB.races = {};
 if (!homebrewDB.classes) homebrewDB.classes = {};
 
-// Serve static files
-app.use(express.static(path.join(__dirname)));
+// Serve the client (HTML shells, CSS, JS modules) and the read-only SRD data.
+const PUBLIC_DIR = path.join(__dirname, 'public');
+app.use(express.static(PUBLIC_DIR));
+app.use('/data/srd', express.static(path.join(__dirname, 'data', 'srd')));
 
 // Routes
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'character_creator.html')));
-app.get('/gm', (req, res) => res.sendFile(path.join(__dirname, '3d_tabletop.html')));
-app.get('/player', (req, res) => res.sendFile(path.join(__dirname, 'player_Screen.html')));
-app.get('/homebrew', (req, res) => res.sendFile(path.join(__dirname, 'homebrew.html')));
+app.get('/', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'creator.html')));
+app.get('/gm', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'gm.html')));
+app.get('/player', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'player.html')));
+app.get('/homebrew', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'homebrew.html')));
 
 // Helper: Check if user is GM. NOTE: login is unauthenticated (the client supplies its
 // own username), so isGM and owner checks are advisory conveniences, not a security boundary.

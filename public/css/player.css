@@ -1,0 +1,172 @@
+/* player.css — player screen only: submenu buttons, bottom HUD, panel modals,
+   HP bar, and the character-sheet panels. */
+
+#move-submenu .menu-button,
+#ruler-submenu .menu-button {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 8px;
+  background-color: #555;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  transition: background-color 0.2s;
+}
+#move-submenu .menu-button:hover,
+#ruler-submenu .menu-button:hover {
+  background-color: #777;
+}
+#move-submenu .menu-button:last-child,
+#ruler-submenu .menu-button:last-child {
+  margin-bottom: 0;
+}
+#move-submenu .menu-button.active,
+#ruler-submenu .menu-button.active {
+  background-color: #007bff;
+  font-weight: bold;
+}
+
+/* --- Player HUD (bottom) --- */
+#player-hud {
+  position: absolute;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  background-color: rgba(0, 0, 0, 0.8);
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #444;
+  z-index: 20;
+}
+.hud-button {
+  background-color: #555;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 15px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.hud-button:hover {
+  background-color: #777;
+}
+
+/* --- HUD panel (modal) --- */
+#hud-panel-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0.6);
+  display: none; /* starts hidden */
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+.hud-panel {
+  background-color: #2d2d2d;
+  border: 1px solid #555;
+  border-radius: 10px;
+  padding: 20px;
+  width: 90%;
+  max-width: 500px;
+  color: #f0f0f0;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+.hud-panel h3 {
+  margin-top: 0;
+  color: #fff;
+  border-bottom: 1px solid #444;
+  padding-bottom: 10px;
+  margin-bottom: 20px;
+}
+.close-panel-btn {
+  background-color: #555;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 15px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  margin-top: 20px;
+  float: right;
+}
+.close-panel-btn:hover {
+  background-color: #777;
+}
+
+/* --- Stat bars (HP) --- */
+.stat-bar-group {
+  margin-bottom: 15px;
+}
+.stat-bar-group label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 5px;
+  color: #aaa;
+}
+.stat-bar-outer {
+  width: 100%;
+  height: 20px;
+  background-color: #4a4a4a;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid #333;
+}
+.stat-bar-inner {
+  height: 100%;
+  background-color: #d14444; /* Default red for HP */
+  border-radius: 10px 0 0 10px;
+  transition: width 0.3s ease;
+}
+.stat-bar-group span {
+  display: block;
+  text-align: right;
+  font-size: 12px;
+  margin-top: 4px;
+  color: #ccc;
+}
+
+/* --- Character sheet HUD --- */
+.hud-panel.sheet { max-width: 620px; max-height: 82vh; overflow-y: auto; }
+.sheet-sub { color: #9aa0aa; font-size: 13px; font-weight: 400; }
+.char-select { width: 100%; padding: 8px; margin-bottom: 14px; background:#1a1a1a; border:1px solid #444; border-radius:6px; color:#f0f0f0; font-size:14px; }
+.metrics-row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+.metric-card { flex:1 1 70px; background:#1f1f24; border:1px solid #3a3a44; border-radius:8px; padding:8px 4px; text-align:center; }
+.metric-card .l { font-size:11px; color:#9aa0aa; text-transform:uppercase; letter-spacing:.5px; }
+.metric-card .v { font-size:18px; font-weight:700; color:#fff; margin-top:2px; }
+.metric-card .s { font-size:10px; color:#6b7280; }
+.ability-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px; }
+.ability-cell { background:#1f1f24; border:1px solid #3a3a44; border-radius:8px; padding:8px; text-align:center; }
+.ability-cell .ab-name { font-size:11px; color:#9aa0aa; text-transform:uppercase; }
+.ability-cell .ab-score { font-size:20px; font-weight:700; color:#fff; }
+.ability-cell .ab-mod { font-size:12px; color:#60A5FA; }
+.ability-cell .ab-save { font-size:10px; color:#6b7280; }
+.sheet h4 { font-size:13px; color:#cbd0d8; margin:14px 0 6px; border-bottom:1px solid #3a3a44; padding-bottom:4px; }
+.row-item { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:5px 0; font-size:13px; border-bottom:1px solid #2a2a30; }
+.row-item:last-child { border-bottom:none; }
+.row-item b { color:#fff; }
+.tag { font-size:10px; padding:1px 6px; border-radius:999px; background:#3a3a44; color:#aab; }
+.muted { color:#6b7280; font-size:13px; }
+.hp-controls { display:flex; gap:6px; margin-top:8px; }
+.hp-controls button { flex:1; padding:6px 0; background:#3a3a44; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; font-weight:600; }
+.hp-controls button:hover { background:#4a4a55; }
+.hp-controls button.heal { background:#2f5d3a; }
+.hp-controls button.heal:hover { background:#3a7349; }
+.hp-controls button.dmg { background:#5d2f2f; }
+.hp-controls button.dmg:hover { background:#733a3a; }
+details.spell-lvl { margin-bottom:8px; }
+details.spell-lvl summary { color:#cbd0d8; font-size:13px; font-weight:600; padding:4px 0; }
+details.spell-lvl .row-item { padding-left:10px; }

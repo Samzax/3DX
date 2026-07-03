@@ -1,0 +1,184 @@
+/* tabletop.css — chrome shared by the GM (/gm) and player (/player) 3D screens:
+   login modal, full-viewport scene container, left tool menu, ruler tooltip. */
+
+#login-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+
+#login-modal {
+  background-color: #2d2d2d;
+  border: 2px solid #555;
+  border-radius: 12px;
+  padding: 40px;
+  width: 90%;
+  max-width: 400px;
+  color: #f0f0f0;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.8);
+}
+
+#login-modal h2 {
+  margin-top: 0;
+  color: #60A5FA;
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+#login-modal input {
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 20px;
+  background-color: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #f0f0f0;
+  font-size: 16px;
+}
+
+#login-modal input:focus {
+  outline: none;
+  border-color: #60A5FA;
+}
+
+#login-modal button {
+  width: 100%;
+  padding: 12px;
+  background-color: #60A5FA;
+  color: #1a1a1a;
+  border: none;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+#login-modal button:hover {
+  background-color: #3b82f6;
+}
+
+#login-modal button:disabled {
+  background-color: #555;
+  cursor: not-allowed;
+}
+
+#login-error {
+  color: #ff4444;
+  margin-top: 10px;
+  text-align: center;
+  font-size: 14px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+  background-color: #1a1a1a;
+  color: #f0f0f0;
+  overflow: hidden; /* Hide scrollbars */
+  cursor: crosshair; /* Default cursor for tabletop */
+}
+
+#scene-container {
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1; /* Send 3D scene to back */
+}
+
+/* --- Left tool menu --- */
+#tool-menu {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  background-color: rgba(0, 0, 0, 0.7);
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #444;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10;
+}
+
+.tool-button {
+  width: 48px;
+  height: 48px;
+  padding: 8px;
+  background-color: #555;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s;
+  user-select: none; /* Prevent text selection on long press */
+  position: relative; /* For submenu positioning */
+}
+.tool-button:hover {
+  background-color: #777;
+}
+.tool-button.active {
+  background-color: #007bff;
+}
+
+#move-submenu {
+  display: none; /* Hidden by default */
+  position: absolute;
+  left: 105%; /* Position to the right of the button */
+  top: 0;
+  width: 150px;
+  background-color: rgba(0, 0, 0, 0.85);
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #444;
+  z-index: 100;
+}
+
+.color-swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid #555;
+  cursor: pointer;
+  padding: 0;
+  background-clip: content-box; /* Ensures border is outside the color */
+}
+.color-swatch.active {
+  border-color: #fff;
+  box-shadow: 0 0 5px #fff;
+}
+
+#ruler-tooltip {
+  position: absolute;
+  display: none; /* Hidden by default */
+  background-color: rgba(0, 0, 0, 0.85);
+  color: #fff;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: bold;
+  pointer-events: none; /* Prevent tooltip from blocking clicks */
+  z-index: 101;
+  transform: translate(10px, -35px); /* Position above and to the right of cursor */
+  white-space: nowrap;
+}
