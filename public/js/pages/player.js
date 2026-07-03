@@ -40,6 +40,7 @@ let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
 let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
 let boundsRect = null;   // pocket-map boundary rectangle
+let currentMapKey = 'world'; // players travel between maps via portals
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -252,7 +253,8 @@ function onDoubleClick(event) {
     while (top.parent && top.parent !== scene) top = top.parent;
     const obj = objects.find(o => o === top);
     if (obj && obj.userData.objectType === 'portal' && obj.userData.portalTarget && socket) {
-        socket.emit('join-map', { key: obj.userData.portalTarget });
+        currentMapKey = obj.userData.portalTarget;
+        socket.emit('join-map', { key: currentMapKey });
         // Fresh map, fresh viewpoint.
         controls.target.set(0, 0, 0);
         camera.position.set(20, 30, 20);
@@ -552,6 +554,8 @@ function initSocket(username) {
         console.log('Conectado ao servidor com ID:', socket.id);
         socket.emit('login', username);
         sessionStorage.setItem('vtt_username', username);
+        // Reconnects auto-join 'world' server-side; come back to where we were.
+        if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
 
     socket.on('login-success', (userData) => {
@@ -598,6 +602,9 @@ function initSocket(username) {
 
     // Full map state on connect
     socket.on('map-state', (data) => {
+        // Ignore states for maps we're not on (e.g. the automatic 'world' join
+        // that precedes our re-join after a reconnect).
+        if (data.key && data.key !== currentMapKey) return;
         objects.forEach(obj => scene.remove(obj));
         objects = [];
         ruler.removeSegments();

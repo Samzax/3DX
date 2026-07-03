@@ -275,6 +275,8 @@ function initSocket() {
         // Auto-login as GM on this single connection
         socket.emit('login', 'GM');
         sessionStorage.setItem('vtt_username', 'GM');
+        // Reconnects auto-join 'world' server-side; come back to where we were.
+        if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
 
     socket.on('login-success', (userData) => {
@@ -293,6 +295,9 @@ function initSocket() {
 
     // Full map state on connect / map switch
     socket.on('map-state', (data) => {
+        // Ignore states for maps we're not on (e.g. the automatic 'world' join
+        // that precedes our re-join after a reconnect).
+        if (data.key && data.key !== currentMapKey) return;
         objects.forEach(obj => scene.remove(obj));
         objects = [];
         ruler.removeSegments();
@@ -565,6 +570,7 @@ function onPointerDown(event) {
         strokeRef = terrainBrush.flattenRef != null ? terrainBrush.flattenRef : terrain.sampleHeight(p.x, p.z);
         lastDab = null;
         terrainDab(p);
+        terrain.flushMeshes();
         updateBrushCursor(p);
         return;
     }
@@ -637,7 +643,7 @@ function onPointerMove(event) {
     if (terrainActive()) {
         const p = pointerToGround(event);
         if (p) {
-            if (isSculpting) strokeTo(p);
+            if (isSculpting) { strokeTo(p); terrain.flushMeshes(); }
             if (rampStart) updateRampPreview(p);
             updateBrushCursor(p);
         }
@@ -1012,6 +1018,9 @@ function strokeTo(p) {
     const dx = p.x - lastDab.x, dz = p.z - lastDab.z;
     const dist = Math.hypot(dx, dz);
     if (dist < spacing) return;
+    // Pick jumped (fast flick, or the ray slipped off the terrain onto the far
+    // ground plane): teleport instead of dragging a scar across the map.
+    if (dist > Math.max(20, terrainBrush.radius * 4)) { terrainDab(p); return; }
     const steps = Math.min(64, Math.floor(dist / spacing));
     for (let s = 1; s <= steps; s++) {
         terrainDab({ x: lastDab.x + (dx * s) / steps, z: lastDab.z + (dz * s) / steps });
