@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, GRID_CELL_SIZE } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -53,13 +53,17 @@ let isDraggingHeight = false;
 let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
 
-// ===== Three-layer map (World -> Region -> Tactical) =====
+// ===== Map tree (World -> Region -> Tactical) + pocket maps =====
 // A map is identified by a path key:
 //   "world"            depth 0  -> hex grid, 90 km per hex
 //   "world/q,r"        depth 1  -> hex grid, 9 km per hex
 //   "world/q,r/q,r"    depth 2  -> square grid, 5 ft per cell (tactical)
+//   "pocket/<id>"      pocket   -> square grid dungeon/room, entered via portals
 let currentMapKey = 'world';
+let currentMapMeta = null;          // pocket metadata ({kind,name,width,height,parentKey})
 let hexGridGroup = null;
+let boundsRect = null;              // pocket boundary rectangle
+let pendingPortal = null;           // portal placement waiting for 'pocket-created'
 
 const SQRT3 = Math.sqrt(3);
 const HEX_SIZE = 2;            // world units (circumradius) used to draw hexes
@@ -69,7 +73,10 @@ const KM_PER_HEX = { 0: 90, 1: 9 }; // depth -> km label per hex
 const hexLineMaterial = new THREE.LineBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.5 });
 
 function mapDepth(key) { return key.split('/').length - 1; }      // 0 world, 1 region, 2 tactical
-function isHexLayer(depth = mapDepth(currentMapKey)) { return depth < 2; }
+function isPocket(key = currentMapKey) { return key.startsWith('pocket/'); }
+// Square-grid maps with editable terrain: hex-tree leaves and pocket dungeons.
+function isTacticalKey(key = currentMapKey) { return isPocket(key) || mapDepth(key) === 2; }
+function isHexLayer(depth = mapDepth(currentMapKey)) { return !isPocket(currentMapKey) && depth < 2; }
 
 // --- Pointy-top axial hex math on the XZ ground plane ---
 function hexToWorld(q, r) {
@@ -117,14 +124,14 @@ function buildHexGrid() {
     group.add(new THREE.LineSegments(geom, hexLineMaterial));
     return group;
 }
-function showLayerGrid(depth) {
-    if (grid) grid.visible = (depth === 2);     // square grid only on tactical
+function showLayerGrid(key) {
+    if (grid) grid.visible = isTacticalKey(key);    // square grid on tactical + pockets
     if (hexGridGroup) {
         scene.remove(hexGridGroup);
         hexGridGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
         hexGridGroup = null;
     }
-    if (depth < 2) {
+    if (!isPocket(key) && mapDepth(key) < 2) {
         hexGridGroup = buildHexGrid();
         scene.add(hexGridGroup);
     }
@@ -164,6 +171,9 @@ function enterMap(key) {
     currentMapKey = key;
     if (selectedObject) deselectObject();
     ruler.clearInProgress();
+    // Fresh map, fresh viewpoint: standard overview centered on the origin.
+    controls.target.set(0, 0, 0);
+    camera.position.set(20, 30, 20);
     // reset tool state locally (no server side effects)
     selectedObjectType = null;
     selectedObjectData = null;
@@ -174,10 +184,13 @@ function enterMap(key) {
     objects.forEach(o => scene.remove(o));
     objects = [];
     ruler.removeSegments();
-    showLayerGrid(mapDepth(key));
+    showLayerGrid(key);
+    // Pocket metadata + bounds arrive with map-state; clear the old ones now.
+    currentMapMeta = null;
+    if (boundsRect) { scene.remove(boundsRect); boundsRect.geometry.dispose(); boundsRect = null; }
     // Hide terrain + its panel off the tactical leaf; map-state will repopulate it.
     if (terrain) terrain.group.visible = false;
-    styleGroundForTerrain(plane, mapDepth(key) === 2); // refined again by map-state
+    styleGroundForTerrain(plane, isTacticalKey(key)); // refined again by map-state
     isSculpting = false;
     lastDab = null;
     rampStart = null;
@@ -188,6 +201,10 @@ function enterMap(key) {
     if (socket) socket.emit('join-map', { key });
 }
 function goUp() {
+    if (isPocket()) {
+        enterMap((currentMapMeta && currentMapMeta.parentKey) || 'world');
+        return;
+    }
     if (mapDepth(currentMapKey) <= 0) return;
     enterMap(currentMapKey.split('/').slice(0, -1).join('/'));
 }
@@ -200,6 +217,14 @@ function updateBreadcrumb() {
     const bc = document.getElementById('breadcrumb');
     const up = document.getElementById('btn-up');
     if (!bc) return;
+    if (isPocket()) {
+        const m = currentMapMeta;
+        const name = (m && m.name) || 'Pocket map';
+        const dims = m ? ` (${m.width}×${m.height})` : '';
+        bc.textContent = `⌖ ${name}${dims}   —   each square = 5 ft`;
+        if (up) up.disabled = false; // Up exits through the parent link
+        return;
+    }
     const segs = currentMapKey.split('/');
     const labels = ['World'];
     for (let i = 1; i < segs.length; i++) labels.push((i === 1 ? 'Region' : 'Tactical') + ' (' + segs[i] + ')');
@@ -209,9 +234,23 @@ function updateBreadcrumb() {
     if (up) up.disabled = (depth === 0);
 }
 function onDoubleClick(event) {
-    if (mapDepth(currentMapKey) >= 2) return;
     if (currentTool === 'add' || currentTool === 'move' || currentTool === 'ruler') return;
     castFromPointer(event, { renderer, camera, raycaster, mouse });
+
+    // Portals first: double-click one to travel to its target map (any layer).
+    const objHit = raycaster.intersectObjects(objects, true)[0];
+    if (objHit) {
+        let top = objHit.object;
+        while (top.parent && top.parent !== scene) top = top.parent;
+        const obj = objects.find(o => o === top);
+        if (obj && obj.userData.objectType === 'portal' && obj.userData.portalTarget) {
+            enterMap(obj.userData.portalTarget);
+            return;
+        }
+    }
+
+    // Hex layers: double-click a hex to descend.
+    if (!isHexLayer()) return;
     const hit = raycaster.intersectObject(plane)[0];
     if (!hit) return;
     const h = worldToHex(hit.point.x, hit.point.z);
@@ -252,6 +291,15 @@ function initSocket() {
         data.objects.forEach(objData => createObjectFromData(objData.id, objData));
         data.rulers.forEach(rulerData => ruler.addFromData(rulerData.id, rulerData));
 
+        // Pocket metadata: name/dimensions drive the breadcrumb + boundary rect.
+        currentMapMeta = data.meta || null;
+        if (boundsRect) { scene.remove(boundsRect); boundsRect.geometry.dispose(); boundsRect = null; }
+        if (currentMapMeta && currentMapMeta.kind === 'pocket') {
+            boundsRect = buildBoundsRect(currentMapMeta.width, currentMapMeta.height);
+            scene.add(boundsRect);
+        }
+        updateBreadcrumb();
+
         // Terrain: rebuild from the stored chunks; visible only on the tactical leaf.
         if (terrain) {
             terrain.reset();
@@ -271,7 +319,7 @@ function initSocket() {
                     console.log('[terrain] migrated legacy terrain to chunked format v2');
                 }
             }
-            const tactical = mapDepth(currentMapKey) === 2;
+            const tactical = isTacticalKey(currentMapKey);
             terrain.group.visible = tactical;
             // On tactical maps the plane stays visible as the implicit flat
             // ground under/around the sparse chunks (sits at -0.02, so flat
@@ -284,6 +332,16 @@ function initSocket() {
     // Live terrain edits (echo to other GM tabs; players handle this too).
     socket.on('terrain-updated', (data) => {
         if (terrain) { terrain.applyData(data); syncWaterControls(); }
+    });
+
+    // A pocket map we requested is ready: drop its entry portal where the GM clicked.
+    socket.on('pocket-created', ({ key, name }) => {
+        if (!pendingPortal) return;
+        socket.emit('add-object', {
+            type: 'portal', target: key, name,
+            position: pendingPortal.position
+        });
+        pendingPortal = null;
     });
 
     socket.on('object-added', (data) => {
@@ -350,7 +408,7 @@ function init() {
     });
 
     // Show the correct grid (hex vs square) for the current layer
-    showLayerGrid(mapDepth(currentMapKey));
+    showLayerGrid(currentMapKey);
     updateBreadcrumb();
 
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
@@ -367,11 +425,15 @@ function init() {
     menuButtons.sphere = document.getElementById('btn-sphere');
     menuButtons.cave = document.getElementById('btn-cave');
     menuButtons.arch = document.getElementById('btn-arch');
+    menuButtons['portal-new'] = document.getElementById('btn-portal-new');
+    menuButtons['portal-link'] = document.getElementById('btn-portal-link');
     menuButtons.token.addEventListener('click', () => setSelectedObjectType('token'));
     menuButtons.cube.addEventListener('click', () => setSelectedObjectType('cube'));
     menuButtons.sphere.addEventListener('click', () => setSelectedObjectType('sphere'));
     menuButtons.cave.addEventListener('click', () => setSelectedObjectType('cave'));
     menuButtons.arch.addEventListener('click', () => setSelectedObjectType('arch'));
+    menuButtons['portal-new'].addEventListener('click', () => setSelectedObjectType('portal-new'));
+    menuButtons['portal-link'].addEventListener('click', () => setSelectedObjectType('portal-link'));
     // Characters are loaded from the server via Socket.IO (see initSocket).
 
     // --- Tool Menu Listeners (Left) ---
@@ -745,6 +807,28 @@ function addObject(position) {
             halfHeight = 0;
             dataToSave = { type: 'arch' };
             break;
+        case 'portal-new': {
+            // Create a pocket dungeon; its entry portal lands where the GM clicked
+            // once the server replies with the new map key ('pocket-created').
+            const name = prompt('Dungeon/room name?', 'New Dungeon');
+            if (!name) return;
+            const sizeStr = prompt('Size in cells (width x height)?', '24x24') || '24x24';
+            const m = sizeStr.match(/(\d+)\s*[xX×]\s*(\d+)/);
+            const width = m ? +m[1] : 24, height = m ? +m[2] : 24;
+            pendingPortal = {
+                position: { x: position.x, y: groundY(position.x, position.z, 0), z: position.z }
+            };
+            socket.emit('create-pocket-map', { name, width, height, parentKey: currentMapKey });
+            return;
+        }
+        case 'portal-link': {
+            // Link to any existing map by key (hex-tree or pocket).
+            const target = prompt('Target map key (e.g. world/0,0/0,0 or pocket/ab12cd34)?', 'world');
+            if (!target || !target.trim()) return;
+            halfHeight = 0;
+            dataToSave = { type: 'portal', target: target.trim(), name: target.trim() };
+            break;
+        }
         default:
             return;
     }
@@ -857,14 +941,14 @@ function setTool(toolName) {
 }
 
 // --- Terrain editor logic ---
-function terrainActive() { return currentTool === 'terrain' && mapDepth(currentMapKey) === 2; }
+function terrainActive() { return currentTool === 'terrain' && isTacticalKey(); }
 function updateTerrainPanel() {
     const panel = document.getElementById('terrain-panel');
-    const show = currentTool === 'terrain' && mapDepth(currentMapKey) === 2;
+    const show = currentTool === 'terrain' && isTacticalKey();
     panel.classList.toggle('hidden', !show);
     if (terrain) terrain.setBrush({ visible: false });
-    if (currentTool === 'terrain' && mapDepth(currentMapKey) !== 2) {
-        console.warn('Terrain editing is only available on a tactical map (double-click down to one).');
+    if (currentTool === 'terrain' && !isTacticalKey()) {
+        console.warn('Terrain editing is only available on tactical/pocket maps (double-click down to one).');
     }
     updateHintBar();
 }
@@ -988,13 +1072,13 @@ function updateHintBar() {
     } else if (currentTool === 'add') {
         hint = `Add — LMB place object · ${cam}`;
     } else {
-        hint = `${cam} · double-click hex to enter map`;
+        hint = `${cam} · double-click hex/portal to travel`;
     }
     bar.textContent = hint;
 }
 // Ground height a token should rest at, for the current map.
 function groundY(x, z, halfHeight) {
-    const base = (terrain && mapDepth(currentMapKey) === 2) ? terrain.sampleHeight(x, z) : 0;
+    const base = (terrain && isTacticalKey()) ? terrain.sampleHeight(x, z) : 0;
     return base + halfHeight;
 }
 function syncWaterControls() {

@@ -95,6 +95,30 @@ export function createPropMesh(type) {
     return group;
 }
 
+// Portal: a standing glowing ring on a stone base. Double-clicking it travels to
+// userData.portalTarget (another map key — a pocket dungeon or any world map).
+export function createPortalMesh() {
+    const group = new THREE.Group();
+    const base = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.5, 0.62, 0.12, 16),
+        new THREE.MeshLambertMaterial({ color: 0x555566 }));
+    base.position.y = 0.06;
+    base.castShadow = true;
+    group.add(base);
+    const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.7, 0.12, 12, 32),
+        new THREE.MeshLambertMaterial({ color: 0x7b3fbf, emissive: 0x3a1d66 }));
+    ring.position.y = 0.95;
+    ring.castShadow = true;
+    group.add(ring);
+    const swirl = new THREE.Mesh(
+        new THREE.CircleGeometry(0.6, 24),
+        new THREE.MeshBasicMaterial({ color: 0xb38cff, transparent: true, opacity: 0.5, side: THREE.DoubleSide }));
+    swirl.position.y = 0.95;
+    group.add(swirl);
+    return group;
+}
+
 // Build a synced scene object from server data ('object-added' / 'map-state').
 // Returns the mesh with userData (syncId, halfHeight, characterData/objectType)
 // filled in, or null for unknown types. The caller adds it to scene + object list.
@@ -133,10 +157,19 @@ export function buildObjectFromData(id, data) {
             objectMesh = createPropMesh(data.type);
             halfHeight = 0;
             break;
+        case 'portal':
+            objectMesh = createPortalMesh();
+            halfHeight = 0;
+            break;
         default:
             return null;
     }
     if (!objectMesh) return null;
+
+    if (data.type === 'portal') {
+        objectMesh.userData.portalTarget = data.target || null;
+        objectMesh.userData.portalName = data.name || 'Portal';
+    }
 
     objectMesh.position.set(data.position.x, data.position.y, data.position.z);
     objectMesh.castShadow = true;

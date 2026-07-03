@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -39,6 +39,7 @@ let isDraggingHeight = false;
 let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
 let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
+let boundsRect = null;   // pocket-map boundary rectangle
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -59,6 +60,7 @@ function init() {
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
     renderer.domElement.addEventListener('pointermove', onPointerMove);
     renderer.domElement.addEventListener('contextmenu', onContextMenu);
+    renderer.domElement.addEventListener('dblclick', onDoubleClick); // portal travel
     window.addEventListener('keydown', onKeyDown);
     wasRightDrag = trackRightDrag(renderer.domElement);
 
@@ -237,6 +239,23 @@ function onPointerMove(event) {
         ruler.updateTooltip(previewPoints, false);
     } else if (currentTool === 'ruler') {
         ruler.updateTooltip([], false, true); // show "0 ft" at the cursor
+    }
+}
+
+// Double-click a portal to travel to its target map (the server sends the new
+// map-state back; players navigate the world exclusively through portals).
+function onDoubleClick(event) {
+    castFromPointer(event, { renderer, camera, raycaster, mouse });
+    const hit = raycaster.intersectObjects(objects, true)[0];
+    if (!hit) return;
+    let top = hit.object;
+    while (top.parent && top.parent !== scene) top = top.parent;
+    const obj = objects.find(o => o === top);
+    if (obj && obj.userData.objectType === 'portal' && obj.userData.portalTarget && socket) {
+        socket.emit('join-map', { key: obj.userData.portalTarget });
+        // Fresh map, fresh viewpoint.
+        controls.target.set(0, 0, 0);
+        camera.position.set(20, 30, 20);
     }
 }
 
@@ -585,6 +604,13 @@ function initSocket(username) {
 
         data.objects.forEach(objData => createObjectFromData(objData.id, objData));
         data.rulers.forEach(rulerData => ruler.addFromData(rulerData.id, rulerData));
+
+        // Pocket-map boundary rectangle (dungeons/rooms).
+        if (boundsRect) { scene.remove(boundsRect); boundsRect.geometry.dispose(); boundsRect = null; }
+        if (data.meta && data.meta.kind === 'pocket') {
+            boundsRect = buildBoundsRect(data.meta.width, data.meta.height);
+            scene.add(boundsRect);
+        }
 
         // Terrain: rebuild from the map's stored chunks, or flatten + hide if none.
         if (terrain) {

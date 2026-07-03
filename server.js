@@ -316,7 +316,8 @@ io.on('connection', (socket) => {
       key,
       objects: Object.values(m.objects),
       rulers: Object.values(m.rulers),
-      terrain: m.terrain || null
+      terrain: m.terrain || null,
+      meta: m.meta || null
     });
   }
 
@@ -336,6 +337,29 @@ io.on('connection', (socket) => {
     getMap(key);
     console.log(`[MAP] ${socket.username || socket.id} -> ${key}`);
     sendMapState(key);
+  });
+
+  // Create a pocket map (dungeon/cave/room): its own map key outside the hex tree,
+  // entered through portal objects. Ships with an exit portal back to the parent.
+  socket.on('create-pocket-map', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const name = String((payload && payload.name) || 'Pocket').trim().slice(0, 40) || 'Pocket';
+    const clampDim = (v) => Math.max(4, Math.min(256, Math.floor(Number(v) || 24)));
+    const width = clampDim(payload && payload.width);
+    const height = clampDim(payload && payload.height);
+    const parentKey = String((payload && payload.parentKey) || DEFAULT_MAP_KEY);
+    const key = 'pocket/' + crypto.randomUUID().slice(0, 8);
+    const exitId = crypto.randomUUID();
+    maps[key] = {
+      objects: {
+        [exitId]: { id: exitId, type: 'portal', target: parentKey, name: 'Exit', position: { x: 0, y: 0, z: 0 } }
+      },
+      rulers: {},
+      meta: { kind: 'pocket', name, width, height, parentKey }
+    };
+    saveMaps();
+    console.log(`[POCKET] "${name}" (${width}x${height}) -> ${key} by ${socket.username}`);
+    socket.emit('pocket-created', { key, name });
   });
 
   socket.on('add-object', (data) => {
