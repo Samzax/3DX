@@ -95,6 +95,21 @@ export function styleGroundForTerrain(plane, on) {
     plane.material.color.set(on ? 0x4a7a3a : 0x4a4a4a);
 }
 
+// Boundary rectangle for finite pocket maps (dungeons/rooms), W x H cells centered
+// on the origin. Pages add/remove it on map switches.
+export function buildBoundsRect(widthCells, heightCells, color = 0xffdd55) {
+    const w = widthCells / 2, h = heightCells / 2, y = 0.03;
+    const pts = [
+        new THREE.Vector3(-w, y, -h), new THREE.Vector3(w, y, -h),
+        new THREE.Vector3(w, y, h), new THREE.Vector3(-w, y, h),
+        new THREE.Vector3(-w, y, -h)
+    ];
+    return new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 })
+    );
+}
+
 // Right-drag orbits the camera, so a contextmenu event only counts as a deliberate
 // right-CLICK when the pointer barely moved between down and up. Returns a predicate
 // to call from the contextmenu handler: true means "this was a drag, ignore it".
