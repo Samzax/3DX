@@ -3,8 +3,8 @@
 // Scene boilerplate, meshes and the ruler tool live in ../shared/.
 
 import * as THREE from 'three';
-import { Terrain, MATERIALS, RES, SIZE } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, GRID_CELL_SIZE } from '../shared/scene.js';
+import { Terrain, MATERIALS } from '../shared/terrain.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -13,12 +13,11 @@ import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 let terrain = null;
 let isSculpting = false;
 let strokeRef = 0;                         // flatten target captured at stroke start
-let strokeChanged = { heights: false, splat: false };
 let lastDab = null;                        // last dab position, for fixed-spacing strokes
 let shiftDown = false;                     // Shift inverts raise<->lower while held
 const terrainBrush = { mode: 'raise', radius: 6, strength: 0.35, material: 0, flattenRef: null };
 
-// Undo/redo: full heights+splat snapshots taken at stroke start (~100 KB each).
+// Undo/redo: copy-on-write patches of only the chunks each stroke touched.
 const UNDO_LIMIT = 20;
 const undoStack = [], redoStack = [];
 
@@ -178,7 +177,7 @@ function enterMap(key) {
     showLayerGrid(mapDepth(key));
     // Hide terrain + its panel off the tactical leaf; map-state will repopulate it.
     if (terrain) terrain.group.visible = false;
-    if (plane) plane.visible = (mapDepth(key) !== 2); // restored/hidden again by map-state
+    styleGroundForTerrain(plane, mapDepth(key) === 2); // refined again by map-state
     isSculpting = false;
     lastDab = null;
     rampStart = null;
@@ -253,16 +252,31 @@ function initSocket() {
         data.objects.forEach(objData => createObjectFromData(objData.id, objData));
         data.rulers.forEach(rulerData => ruler.addFromData(rulerData.id, rulerData));
 
-        // Terrain: rebuild from the stored blob; visible only on the tactical leaf.
+        // Terrain: rebuild from the stored chunks; visible only on the tactical leaf.
         if (terrain) {
             terrain.reset();
-            if (data.terrain) terrain.applyData(data.terrain);
+            undoStack.length = 0;
+            redoStack.length = 0;
+            if (data.terrain) {
+                const res = terrain.applyData(data.terrain);
+                if (res.migrated) {
+                    // Legacy single-tile terrain was resampled onto the chunk
+                    // lattice — push the converted map back so the server (and
+                    // players) switch to format v2. Batched to stay under the
+                    // socket buffer.
+                    terrain.collectDirtyPayload(); // drain; full batches follow
+                    for (const batch of terrain.fullPayloadBatches()) {
+                        socket.emit('update-terrain', batch);
+                    }
+                    console.log('[terrain] migrated legacy terrain to chunked format v2');
+                }
+            }
             const tactical = mapDepth(currentMapKey) === 2;
             terrain.group.visible = tactical;
-            // The terrain mesh is the ground on tactical maps; hide the flat
-            // tabletop so dug (negative) terrain isn't masked by it. The plane
-            // is invisible but still raycast for XZ picking.
-            if (plane) plane.visible = !tactical;
+            // On tactical maps the plane stays visible as the implicit flat
+            // ground under/around the sparse chunks (sits at -0.02, so flat
+            // chunks and dug pits are never masked).
+            styleGroundForTerrain(plane, tactical);
             syncWaterControls();
         }
     });
@@ -413,15 +427,21 @@ function init() {
     strengthInput.addEventListener('input', e => { terrainBrush.strength = +e.target.value; document.getElementById('brush-strength-val').textContent = (+e.target.value).toFixed(2); });
     const waterToggle = document.getElementById('water-toggle');
     const waterLevel = document.getElementById('water-level');
-    waterToggle.addEventListener('change', e => { terrain.setWater({ enabled: e.target.checked }); emitTerrain({ water: true }); });
+    waterToggle.addEventListener('change', e => { terrain.setWater({ enabled: e.target.checked }); emitWater(); });
     waterLevel.addEventListener('input', e => { terrain.setWater({ level: +e.target.value }); document.getElementById('water-level-val').textContent = (+e.target.value).toFixed(1); });
-    waterLevel.addEventListener('change', () => emitTerrain({ water: true }));
+    waterLevel.addEventListener('change', () => emitWater());
     document.getElementById('terrain-reset').addEventListener('click', () => {
         if (!confirm('Reset all terrain on this tactical map?')) return;
-        pushUndo();
+        terrain.beginStroke();
         terrain.reset();
+        const patch = terrain.endStroke();
+        if (patch) {
+            undoStack.push(patch);
+            if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+            redoStack.length = 0;
+        }
         waterToggle.checked = false; waterLevel.value = 0; document.getElementById('water-level-val').textContent = '0.0';
-        emitTerrain({ heights: true, splat: true, water: true });
+        if (socket) socket.emit('update-terrain', { clear: true, water: { ...terrain.water } });
     });
 
     const flattenBtn = document.getElementById('flatten-target');
@@ -436,7 +456,11 @@ function init() {
         [rulerSubMenu, toolMenuButtons.ruler]
     ]);
 
-    startRenderLoop({ renderer, scene, camera, controls });
+    startRenderLoop({
+        renderer, scene, camera, controls,
+        // Streaming window: keep chunk meshes only near the camera target.
+        onTick: () => { if (terrain && terrain.group.visible) terrain.updateWindow(controls.target); }
+    });
     initSocket();
 }
 
@@ -464,11 +488,10 @@ function onPointerDown(event) {
             updateRampPreview(p);
             return;
         }
-        // Sculpt/paint: start a stroke.
-        pushUndo();
+        // Sculpt/paint: start a stroke (copy-on-write undo opens with it).
+        terrain.beginStroke();
         isSculpting = true;
         strokeRef = terrainBrush.flattenRef != null ? terrainBrush.flattenRef : terrain.sampleHeight(p.x, p.z);
-        strokeChanged = { heights: false, splat: false };
         lastDab = null;
         terrainDab(p);
         updateBrushCursor(p);
@@ -587,24 +610,36 @@ function onPointerUp(event) {
         const p = pointerToGround(event);
         rampPreview.visible = false;
         if (p && Math.hypot(p.x - rampStart.x, p.z - rampStart.z) > 0.5) {
-            pushUndo();
+            terrain.beginStroke();
             terrain.ramp(rampStart.x, rampStart.z, rampStart.h,
                 p.x, p.z, terrain.sampleHeight(p.x, p.z),
                 terrainBrush.radius, 1);
-            terrain.refreshWater();
-            emitTerrain({ heights: true });
+            finishTerrainStroke();
         }
         rampStart = null;
         return;
     }
 
-    // End a terrain stroke and sync only the layer(s) that changed.
+    // End a terrain stroke: close the undo patch, sync only the dirty chunks.
     if (isSculpting) {
         isSculpting = false;
         lastDab = null;
-        if (strokeChanged.heights) terrain.refreshWater(); // pools settle into the new shape
-        if (strokeChanged.heights || strokeChanged.splat) emitTerrain(strokeChanged);
-        strokeChanged = { heights: false, splat: false };
+        finishTerrainStroke();
+    }
+}
+
+// Close the open stroke: record its undo patch and emit the dirty chunks.
+function finishTerrainStroke() {
+    const patch = terrain.endStroke();
+    if (patch) {
+        undoStack.push(patch);
+        if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+        redoStack.length = 0;
+    }
+    const payload = terrain.collectDirtyPayload();
+    if (payload) {
+        if (payload.heightsChanged) terrain.refreshWater(); // pools settle into the new shape
+        if (socket) socket.emit('update-terrain', { chunks: payload.chunks });
     }
 }
 
@@ -850,15 +885,16 @@ function setBrushRadius(r) {
     document.getElementById('brush-radius-val').textContent = terrainBrush.radius.toFixed(0);
     terrain.setBrush({ radius: terrainBrush.radius });
 }
-function emitTerrain(flags) {
-    if (socket) socket.emit('update-terrain', terrain.delta(flags));
+function emitWater() {
+    if (socket) socket.emit('update-terrain', { water: { ...terrain.water } });
 }
-// Pick against the actual terrain surface on tactical maps (fall back to the flat
+// Pick against the actual terrain chunks on tactical maps (fall back to the flat
 // plane elsewhere) so the brush lands where the cursor visually touches the ground.
 function pointerToGround(event) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const targets = (terrain && terrain.group.visible) ? [terrain.mesh, plane] : [plane];
-    const hit = raycaster.intersectObjects(targets, false)[0];
+    const hit = (terrain && terrain.group.visible)
+        ? raycaster.intersectObjects([terrain.chunkGroup, plane], true)[0]
+        : raycaster.intersectObject(plane)[0];
     return hit ? hit.point : null;
 }
 // The effective brush mode for a dab: Shift inverts raise<->lower.
@@ -871,8 +907,8 @@ function effectiveBrushMode() {
 function terrainDab(p) {
     const b = terrainBrush;
     const mode = effectiveBrushMode();
-    if (mode === 'paint') { terrain.paint(p.x, p.z, b.radius, b.strength, b.material); strokeChanged.splat = true; }
-    else { terrain.sculpt(p.x, p.z, b.radius, b.strength, mode, strokeRef); strokeChanged.heights = true; }
+    if (mode === 'paint') terrain.paint(p.x, p.z, b.radius, b.strength, b.material);
+    else terrain.sculpt(p.x, p.z, b.radius, b.strength, mode, strokeRef);
     lastDab = { x: p.x, z: p.z };
 }
 // Lay dabs at fixed spacing along the drag path so stroke intensity doesn't
@@ -901,14 +937,7 @@ function sampleUnderCursor(p) {
     const label = document.getElementById('flatten-target');
     if (label) label.textContent = h.toFixed(1);
     if (terrainBrush.mode === 'paint') {
-        // Dominant splat channel at the sampled point.
-        const step = SIZE / (RES - 1);
-        const fx = Math.max(0, Math.min(RES - 1, Math.round((p.x + SIZE / 2) / step)));
-        const fz = Math.max(0, Math.min(RES - 1, Math.round((p.z + SIZE / 2) / step)));
-        const i = fz * RES + fx;
-        let best = 0;
-        for (let m = 1; m < 4; m++) if (terrain.splat[i * 4 + m] > terrain.splat[i * 4 + best]) best = m;
-        setBrushMaterial(best);
+        setBrushMaterial(terrain.dominantMaterial(p.x, p.z));
     }
 }
 function clearFlattenTarget() {
@@ -925,25 +954,20 @@ function updateRampPreview(p) {
     rampPreview.geometry.setFromPoints(pts);
     rampPreview.visible = true;
 }
-// --- Undo/redo (terrain strokes only; syncs via the normal terrain delta) ---
-function pushUndo() {
-    undoStack.push(terrain.snapshot());
-    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-    redoStack.length = 0;
-}
+// --- Undo/redo (terrain strokes only; syncs the affected chunks) ---
 function undoTerrain() {
     if (!undoStack.length || !terrain) return;
-    redoStack.push(terrain.snapshot());
-    terrain.restore(undoStack.pop());
-    emitTerrain({ heights: true, splat: true });
-    syncWaterControls();
+    const patch = undoStack.pop();
+    redoStack.push(terrain.applyPatch(patch));      // applyPatch returns the inverse
+    terrain.collectDirtyPayload();                  // drain; we encode the keys directly
+    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(patch)));
 }
 function redoTerrain() {
     if (!redoStack.length || !terrain) return;
-    undoStack.push(terrain.snapshot());
-    terrain.restore(redoStack.pop());
-    emitTerrain({ heights: true, splat: true });
-    syncWaterControls();
+    const patch = redoStack.pop();
+    undoStack.push(terrain.applyPatch(patch));
+    terrain.collectDirtyPayload();
+    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(patch)));
 }
 // --- Status hint bar: always tell the user what the mouse does right now ---
 function updateHintBar() {
