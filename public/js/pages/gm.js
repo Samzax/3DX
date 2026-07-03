@@ -53,12 +53,13 @@ let isDraggingHeight = false;
 let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
 
-// ===== Map tree (World -> Region -> Tactical) + pocket maps =====
+// ===== Map tree (DMG scale ladder, p14) + pocket maps =====
 // A map is identified by a path key:
-//   "world"            depth 0  -> hex grid, 90 km per hex
-//   "world/q,r"        depth 1  -> hex grid, 9 km per hex
-//   "world/q,r/q,r"    depth 2  -> square grid, 5 ft per cell (tactical)
-//   "pocket/<id>"      pocket   -> square grid dungeon/room, entered via portals
+//   "world"                depth 0  -> Continent hexes, 60 miles per hex
+//   "world/q,r"            depth 1  -> Kingdom hexes, 6 miles per hex
+//   "world/q,r/q,r"        depth 2  -> Province hexes, 1 mile per hex
+//   "world/q,r/q,r/q,r"    depth 3  -> square grid, 5 ft per cell (tactical)
+//   "pocket/<id>"          pocket   -> square grid dungeon/room, entered via portals
 let currentMapKey = 'world';
 let currentMapMeta = null;          // pocket metadata ({kind,name,width,height,parentKey})
 let hexGridGroup = null;
@@ -68,15 +69,21 @@ let pendingPortal = null;           // portal placement waiting for 'pocket-crea
 const SQRT3 = Math.sqrt(3);
 const HEX_SIZE = 2;            // world units (circumradius) used to draw hexes
 const HEX_MAP_RADIUS = 6;      // hex field radius, in hexes
-const KM_PER_HEX = { 0: 90, 1: 9 }; // depth -> km label per hex
+const TACTICAL_DEPTH = 3;      // depth of the square-grid leaf
+// DMG p14 hex scales per depth (hex layers only).
+const HEX_SCALES = {
+    0: { miles: 60, label: 'Continent' },
+    1: { miles: 6,  label: 'Kingdom' },
+    2: { miles: 1,  label: 'Province' }
+};
 
 const hexLineMaterial = new THREE.LineBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.5 });
 
-function mapDepth(key) { return key.split('/').length - 1; }      // 0 world, 1 region, 2 tactical
+function mapDepth(key) { return key.split('/').length - 1; }      // 0..2 hex layers, 3 tactical
 function isPocket(key = currentMapKey) { return key.startsWith('pocket/'); }
 // Square-grid maps with editable terrain: hex-tree leaves and pocket dungeons.
-function isTacticalKey(key = currentMapKey) { return isPocket(key) || mapDepth(key) === 2; }
-function isHexLayer(depth = mapDepth(currentMapKey)) { return !isPocket(currentMapKey) && depth < 2; }
+function isTacticalKey(key = currentMapKey) { return isPocket(key) || mapDepth(key) >= TACTICAL_DEPTH; }
+function isHexLayer(depth = mapDepth(currentMapKey)) { return !isPocket(currentMapKey) && depth < TACTICAL_DEPTH; }
 
 // --- Pointy-top axial hex math on the XZ ground plane ---
 function hexToWorld(q, r) {
@@ -131,7 +138,7 @@ function showLayerGrid(key) {
         hexGridGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
         hexGridGroup = null;
     }
-    if (!isPocket(key) && mapDepth(key) < 2) {
+    if (!isPocket(key) && mapDepth(key) < TACTICAL_DEPTH) {
         hexGridGroup = buildHexGrid();
         scene.add(hexGridGroup);
     }
@@ -155,13 +162,14 @@ function getCurrentRulerSnap(point) {
     return ruler.snap(point);
 }
 function measurePath(points) {
-    // hex layers: sum of hex steps * km per hex
-    const km = KM_PER_HEX[mapDepth(currentMapKey)] || 0;
+    // hex layers: sum of hex steps * miles per hex (DMG scales)
+    const scale = HEX_SCALES[mapDepth(currentMapKey)];
+    const miles = scale ? scale.miles : 0;
     let steps = 0;
     for (let i = 0; i < points.length - 1; i++) {
         steps += hexDistance(worldToHex(points[i].x, points[i].z), worldToHex(points[i + 1].x, points[i + 1].z));
     }
-    return { value: steps * km, unit: 'km' };
+    return { value: steps * miles, unit: 'mi' };
 }
 
 const emitRuler = (data) => socket.emit('add-ruler', data);
@@ -209,7 +217,7 @@ function goUp() {
     enterMap(currentMapKey.split('/').slice(0, -1).join('/'));
 }
 function descendInto(q, r) {
-    if (mapDepth(currentMapKey) >= 2) return; // tactical is the leaf
+    if (mapDepth(currentMapKey) >= TACTICAL_DEPTH) return; // tactical is the leaf
     if (!hexInField(q, r)) return;
     enterMap(`${currentMapKey}/${q},${r}`);
 }
@@ -226,10 +234,11 @@ function updateBreadcrumb() {
         return;
     }
     const segs = currentMapKey.split('/');
-    const labels = ['World'];
-    for (let i = 1; i < segs.length; i++) labels.push((i === 1 ? 'Region' : 'Tactical') + ' (' + segs[i] + ')');
+    const layerName = (d) => (HEX_SCALES[d] ? HEX_SCALES[d].label : 'Tactical');
+    const labels = [layerName(0)];
+    for (let i = 1; i < segs.length; i++) labels.push(layerName(i) + ' (' + segs[i] + ')');
     const depth = mapDepth(currentMapKey);
-    const scale = depth === 0 ? 'each hex = 90 km' : depth === 1 ? 'each hex = 9 km' : 'each square = 5 ft';
+    const scale = HEX_SCALES[depth] ? `each hex = ${HEX_SCALES[depth].miles} mi` : 'each square = 5 ft';
     bc.textContent = labels.join('  ›  ') + '   —   ' + scale;
     if (up) up.disabled = (depth === 0);
 }

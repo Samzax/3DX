@@ -73,6 +73,35 @@ function saveMaps() {
   saveJSON('map_state.json', { maps });
 }
 
+// One-time migration: the hex ladder gained a layer (Continent 60mi > Kingdom 6mi
+// > Province 1mi > Tactical). Old depth-2 tactical maps (world/q,r/q,r) become
+// Province hex layers, so their content moves to the center sub-hex (.../0,0).
+// Portal targets and pocket parent links pointing at moved keys are rewritten.
+{
+  const renames = {};
+  for (const key of Object.keys(maps)) {
+    const m = maps[key];
+    const hasContent = m && (m.terrain || Object.keys(m.objects || {}).length || Object.keys(m.rulers || {}).length);
+    if (/^world(\/-?\d+,-?\d+){2}$/.test(key) && hasContent && !maps[key + '/0,0']) {
+      renames[key] = key + '/0,0';
+    }
+  }
+  if (Object.keys(renames).length) {
+    for (const [oldKey, newKey] of Object.entries(renames)) {
+      maps[newKey] = maps[oldKey];
+      delete maps[oldKey];
+    }
+    for (const m of Object.values(maps)) {
+      if (m.meta && renames[m.meta.parentKey]) m.meta.parentKey = renames[m.meta.parentKey];
+      for (const obj of Object.values(m.objects || {})) {
+        if (obj.type === 'portal' && renames[obj.target]) obj.target = renames[obj.target];
+      }
+    }
+    saveMaps();
+    console.log(`[MIGRATE] Moved ${Object.keys(renames).length} tactical map(s) down one hex layer:`, Object.values(renames).join(', '));
+  }
+}
+
 let charactersDB = loadJSON('characters.json', {});
 
 // Custom homebrew content (shared): { races: {index:..}, classes: {index:..} }
