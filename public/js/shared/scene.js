@@ -29,6 +29,13 @@ export function createTabletopScene(container) {
     controls.dampingFactor = 0.1;
     controls.maxPolarAngle = Math.PI / 2.1;
     controls.target.set(0, 0, 0);
+    // Editor-style input split: the left button always belongs to the active tool,
+    // the camera lives on the right/middle buttons + wheel, and is never disabled.
+    controls.mouseButtons = {
+        LEFT: null,
+        MIDDLE: THREE.MOUSE.PAN,
+        RIGHT: THREE.MOUSE.ROTATE
+    };
 
     scene.add(new THREE.AmbientLight(0xaaaaaa, 1.5));
     const dirLight = new THREE.DirectionalLight(0xffffff, 3);
@@ -69,12 +76,38 @@ export function createTabletopScene(container) {
     return { scene, camera, renderer, controls, plane, grid, raycaster, mouse };
 }
 
-export function startRenderLoop({ renderer, scene, camera, controls }) {
+export function startRenderLoop({ renderer, scene, camera, controls, onTick }) {
     (function animate() {
         requestAnimationFrame(animate);
+        if (onTick) onTick();
         controls.update();
         renderer.render(scene, camera);
     })();
+}
+
+// Style the tabletop plane as the implicit flat ground under sparse terrain chunks:
+// sits 0.02 below y=0 so flat (untouched) chunk areas never z-fight it, tinted like
+// grass so unedited space reads as ground, not void. `off` restores the neutral look.
+export function styleGroundForTerrain(plane, on) {
+    if (!plane) return;
+    plane.visible = true;
+    plane.position.y = on ? -0.02 : 0;
+    plane.material.color.set(on ? 0x4a7a3a : 0x4a4a4a);
+}
+
+// Right-drag orbits the camera, so a contextmenu event only counts as a deliberate
+// right-CLICK when the pointer barely moved between down and up. Returns a predicate
+// to call from the contextmenu handler: true means "this was a drag, ignore it".
+export function trackRightDrag(domElement, threshold = 6) {
+    let downX = 0, downY = 0, down = false;
+    domElement.addEventListener('pointerdown', (e) => {
+        if (e.button === 2) { down = true; downX = e.clientX; downY = e.clientY; }
+    });
+    return (event) => {
+        if (!down) return false;
+        down = false;
+        return Math.hypot(event.clientX - downX, event.clientY - downY) > threshold;
+    };
 }
 
 // Point the raycaster at a pointer event's position; returns the raycaster.
