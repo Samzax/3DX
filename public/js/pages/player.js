@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -38,6 +38,7 @@ let isDraggingHeight = false;
 
 let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
+let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -59,11 +60,11 @@ function init() {
     renderer.domElement.addEventListener('pointermove', onPointerMove);
     renderer.domElement.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('keydown', onKeyDown);
+    wasRightDrag = trackRightDrag(renderer.domElement);
 
     // --- Tool Menu Listeners (Left) ---
     toolMenuButtons.move = document.getElementById('btn-tool-move');
     toolMenuButtons.ruler = document.getElementById('btn-tool-ruler');
-    toolMenuButtons.tool3 = document.getElementById('btn-tool-3');
     moveSubMenu = document.getElementById('move-submenu');
     moveSubMenuButtons.standard = document.getElementById('btn-move-standard');
     moveSubMenuButtons.x = document.getElementById('btn-move-x');
@@ -98,8 +99,6 @@ function init() {
     document.querySelectorAll('#ruler-colors .color-swatch').forEach(swatch => {
         swatch.addEventListener('click', (e) => setRulerColor(e.target.dataset.color, e.target));
     });
-
-    toolMenuButtons.tool3.addEventListener('click', () => setTool('tool3'));
 
     dismissSubmenusOnOutsideClick([
         [moveSubMenu, toolMenuButtons.move],
@@ -142,9 +141,11 @@ function init() {
 }
 
 function onPointerDown(event) {
+    // Left button = tools; right/middle = camera (OrbitControls).
+    if (event.button !== 0) return;
+
     if (isDraggingHeight) {
         isDraggingHeight = false;
-        controls.enabled = true;
         deselectObject();
         return;
     }
@@ -165,7 +166,6 @@ function onPointerDown(event) {
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
             selectObject(clickedObject);
             isDraggingHeight = true;
-            controls.enabled = false;
         } else {
             if (selectedObject === clickedObject) {
                 deselectObject();
@@ -238,6 +238,7 @@ function onPointerMove(event) {
 
 function onContextMenu(event) {
     event.preventDefault();
+    if (wasRightDrag && wasRightDrag(event)) return; // right-drag = camera orbit, not a click
     if (currentTool !== 'ruler') return;
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const intersects = raycaster.intersectObject(plane);
@@ -253,7 +254,6 @@ function onKeyDown(event) {
             ruler.clearInProgress();
         } else if (isDraggingHeight) {
             isDraggingHeight = false;
-            controls.enabled = true;
             deselectObject();
         } else if (selectedObject) {
             deselectObject();

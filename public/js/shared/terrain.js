@@ -1,5 +1,5 @@
 // terrain.js — heightmap terrain + material painting + water for the tactical map.
-// Shared by the GM editor (3d_tabletop.html) and the player viewer (player_Screen.html).
+// Shared by the GM editor (pages/gm.js) and the player viewer (pages/player.js).
 //
 // Design (see the chat reasoning): a single 2.5D heightmap mesh over the central
 // 100x100-cell tactical area at 128² vertices — one draw call. Material painting
@@ -53,6 +53,44 @@ export class Terrain {
     geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(RES * RES * 3), 3));
     this.geometry = geo;
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+
+    // Brush cursor drawn in the terrain shader itself (edge ring + falloff fill),
+    // so it conforms to slopes and cliffs exactly. Uniform objects are created
+    // once and shared with the compiled program; setBrush mutates them.
+    this._brushUniforms = {
+      uBrushPos:     { value: new THREE.Vector2(0, 0) },
+      uBrushRadius:  { value: 6 },
+      uBrushColor:   { value: new THREE.Color(0xffdd55) },
+      uBrushVisible: { value: 0 }
+    };
+    this.material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, this._brushUniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nvarying vec3 vBrushWorld;')
+        .replace('#include <fog_vertex>',
+          '#include <fog_vertex>\nvBrushWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', [
+          '#include <common>',
+          'varying vec3 vBrushWorld;',
+          'uniform vec2 uBrushPos;',
+          'uniform float uBrushRadius;',
+          'uniform vec3 uBrushColor;',
+          'uniform float uBrushVisible;'
+        ].join('\n'))
+        .replace('#include <dithering_fragment>', [
+          'if (uBrushVisible > 0.5) {',
+          '  float d = distance(vBrushWorld.xz, uBrushPos);',
+          '  float edgeW = max(uBrushRadius * 0.05, 0.06);',
+          '  float edge = 1.0 - smoothstep(0.0, edgeW, abs(d - uBrushRadius));',
+          '  float t = clamp(1.0 - d / uBrushRadius, 0.0, 1.0);',
+          '  float fill = t * t * (3.0 - 2.0 * t) * 0.22;',
+          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, uBrushColor, max(edge * 0.85, fill));',
+          '}',
+          '#include <dithering_fragment>'
+        ].join('\n'));
+    };
+
     this.mesh = new THREE.Mesh(geo, this.material);
     this.mesh.receiveShadow = true;
     this.mesh.castShadow = true;
@@ -152,7 +190,16 @@ export class Terrain {
     }
   }
 
-  // --- Sculpting. mode: raise|lower|smooth|flatten|noise. ref = flatten target. ---
+  // --- Brush cursor (drawn by the terrain shader; see _build) ---
+  setBrush({ x, z, radius, color, visible }) {
+    const u = this._brushUniforms;
+    if (x != null && z != null) u.uBrushPos.value.set(x, z);
+    if (radius != null) u.uBrushRadius.value = radius;
+    if (color != null) u.uBrushColor.value.set(color);
+    if (visible != null) u.uBrushVisible.value = visible ? 1 : 0;
+  }
+
+  // --- Sculpting. mode: raise|lower|smooth|flatten|noise|terrace. ref = flatten target. ---
   sculpt(x, z, radius, strength, mode, ref = 0) {
     if (mode === 'smooth') {
       const updates = [];
@@ -173,6 +220,12 @@ export class Terrain {
         else if (mode === 'lower') this.heights[i] -= strength * f;
         else if (mode === 'flatten') this.heights[i] += (ref - this.heights[i]) * f * Math.min(1, strength);
         else if (mode === 'noise') this.heights[i] += (Math.random() - 0.5) * 2 * strength * f;
+        else if (mode === 'terrace') {
+          // Pull heights toward the nearest step; strength controls the step size.
+          const step = Math.max(0.25, strength * 4);
+          const target = Math.round(this.heights[i] / step) * step;
+          this.heights[i] += (target - this.heights[i]) * f * 0.5;
+        }
         const v = this.heights[i]; this.heights[i] = Math.max(-50, Math.min(50, v));
       });
     }
@@ -191,6 +244,45 @@ export class Terrain {
       }
     });
     this._updateColors();
+  }
+
+  // --- Ramp: blend heights linearly from (x0,z0,h0) to (x1,z1,h1) along the segment,
+  // over a band `halfWidth` wide with smooth falloff at the edges. Roads, riverbeds,
+  // cliff paths — the one shape brushes can't make.
+  ramp(x0, z0, h0, x1, z1, h1, halfWidth, strength = 1) {
+    const dx = x1 - x0, dz = z1 - z0;
+    const lenSq = dx * dx + dz * dz;
+    if (lenSq < 1e-6) return;
+    const minX = Math.min(x0, x1) - halfWidth, maxX = Math.max(x0, x1) + halfWidth;
+    const minZ = Math.min(z0, z1) - halfWidth, maxZ = Math.max(z0, z1) + halfWidth;
+    const ix0 = Math.max(0, Math.floor((minX + HALF) / STEP)), ix1 = Math.min(RES - 1, Math.ceil((maxX + HALF) / STEP));
+    const iz0 = Math.max(0, Math.floor((minZ + HALF) / STEP)), iz1 = Math.min(RES - 1, Math.ceil((maxZ + HALF) / STEP));
+    const s = Math.min(1, strength);
+    for (let iz = iz0; iz <= iz1; iz++) {
+      for (let ix = ix0; ix <= ix1; ix++) {
+        const x = -HALF + ix * STEP, z = -HALF + iz * STEP;
+        const t = Math.max(0, Math.min(1, ((x - x0) * dx + (z - z0) * dz) / lenSq));
+        const px = x0 + t * dx, pz = z0 + t * dz;
+        const dist = Math.hypot(x - px, z - pz);
+        if (dist > halfWidth) continue;
+        const target = h0 + (h1 - h0) * t;
+        const i = iz * RES + ix;
+        this.heights[i] += (target - this.heights[i]) * smooth(1 - dist / halfWidth) * s;
+      }
+    }
+    this._applyHeights();
+  }
+
+  // --- Undo snapshots (heights + splat; water is a separate toggle, not a stroke) ---
+  snapshot() {
+    return { heights: this.heights.slice(), splat: this.splat.slice() };
+  }
+  restore(snap) {
+    this.heights.set(snap.heights);
+    this.splat.set(snap.splat);
+    this._applyHeights();
+    this._updateColors();
+    this._rebuildWater();
   }
 
   // --- Water ---
