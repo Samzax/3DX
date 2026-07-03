@@ -3,19 +3,36 @@
 // Scene boilerplate, meshes and the ruler tool live in ../shared/.
 
 import * as THREE from 'three';
-import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, GRID_CELL_SIZE } from '../shared/scene.js';
+import { Terrain, MATERIALS, RES, SIZE } from '../shared/terrain.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 
 // --- Terrain editor state (tactical layer only) ---
 let terrain = null;
-let terrainBrushRing = null;
 let isSculpting = false;
 let strokeRef = 0;                         // flatten target captured at stroke start
 let strokeChanged = { heights: false, splat: false };
-const terrainBrush = { mode: 'raise', radius: 6, strength: 0.35, material: 0 };
+let lastDab = null;                        // last dab position, for fixed-spacing strokes
+let shiftDown = false;                     // Shift inverts raise<->lower while held
+const terrainBrush = { mode: 'raise', radius: 6, strength: 0.35, material: 0, flattenRef: null };
+
+// Undo/redo: full heights+splat snapshots taken at stroke start (~100 KB each).
+const UNDO_LIMIT = 20;
+const undoStack = [], redoStack = [];
+
+// Ramp gesture state (click-drag a line, applied on release) + its preview line.
+let rampStart = null;                      // { x, z, h }
+let rampPreview = null;
+
+// Brush cursor tint per mode (paint uses the selected material's color).
+const BRUSH_COLORS = {
+    raise: 0x7cdf70, lower: 0xff6b5e, smooth: 0x6ec6ff,
+    flatten: 0xc79bff, noise: 0xffb74d, terrace: 0xffe97a, ramp: 0xff9ff3, paint: 0xffffff
+};
+
+let wasRightDrag = null;                   // set in init(); see trackRightDrag
 
 let scene, camera, renderer, controls, plane, grid, raycaster, mouse;
 let ruler;
@@ -163,7 +180,10 @@ function enterMap(key) {
     if (terrain) terrain.group.visible = false;
     if (plane) plane.visible = (mapDepth(key) !== 2); // restored/hidden again by map-state
     isSculpting = false;
-    if (terrainBrushRing) terrainBrushRing.visible = false;
+    lastDab = null;
+    rampStart = null;
+    if (rampPreview) rampPreview.visible = false;
+    if (terrain) terrain.setBrush({ visible: false });
     updateTerrainPanel();
     updateBreadcrumb();
     if (socket) socket.emit('join-map', { key });
@@ -294,17 +314,20 @@ function init() {
         createTabletopScene(document.getElementById('scene-container')));
 
     // Tactical terrain (heightmap + material paint + water). Hidden off-tactical.
+    // The brush cursor is drawn by the terrain shader (terrain.setBrush).
     terrain = new Terrain();
     terrain.group.visible = false;
     scene.add(terrain.group);
-    // Brush-radius indicator that follows the cursor while the terrain tool is active.
-    terrainBrushRing = new THREE.Mesh(
-        new THREE.RingGeometry(0.97, 1, 48),
-        new THREE.MeshBasicMaterial({ color: 0xffdd55, transparent: true, opacity: 0.9, side: THREE.DoubleSide })
+
+    // Ramp gesture preview: a line from the anchor to the cursor while dragging.
+    rampPreview = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineBasicMaterial({ color: 0xff9ff3, transparent: true, opacity: 0.9 })
     );
-    terrainBrushRing.rotation.x = -Math.PI / 2;
-    terrainBrushRing.visible = false;
-    scene.add(terrainBrushRing);
+    rampPreview.visible = false;
+    scene.add(rampPreview);
+
+    wasRightDrag = trackRightDrag(renderer.domElement);
 
     ruler = new RulerTool({
         scene,
@@ -321,6 +344,7 @@ function init() {
     renderer.domElement.addEventListener('pointerup', onPointerUp);
     renderer.domElement.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
     renderer.domElement.addEventListener('dblclick', onDoubleClick); // double-click a hex to descend
 
     // --- Menu Button Listeners (Right) ---
@@ -339,7 +363,6 @@ function init() {
     // --- Tool Menu Listeners (Left) ---
     toolMenuButtons.move = document.getElementById('btn-tool-move');
     toolMenuButtons.ruler = document.getElementById('btn-tool-ruler');
-    toolMenuButtons.tool3 = document.getElementById('btn-tool-3');
     moveSubMenu = document.getElementById('move-submenu');
     moveSubMenuButtons.standard = document.getElementById('btn-move-standard');
     moveSubMenuButtons.x = document.getElementById('btn-move-x');
@@ -375,8 +398,6 @@ function init() {
         swatch.addEventListener('click', (e) => setRulerColor(e.target.dataset.color, e.target));
     });
 
-    toolMenuButtons.tool3.addEventListener('click', () => setTool('tool3'));
-
     // --- Terrain tool wiring ---
     toolMenuButtons.terrain = document.getElementById('btn-tool-terrain');
     toolMenuButtons.terrain.addEventListener('click', () => setTool('terrain'));
@@ -388,7 +409,7 @@ function init() {
     });
     const radiusInput = document.getElementById('brush-radius');
     const strengthInput = document.getElementById('brush-strength');
-    radiusInput.addEventListener('input', e => { terrainBrush.radius = +e.target.value; document.getElementById('brush-radius-val').textContent = (+e.target.value).toFixed(0); });
+    radiusInput.addEventListener('input', e => setBrushRadius(+e.target.value));
     strengthInput.addEventListener('input', e => { terrainBrush.strength = +e.target.value; document.getElementById('brush-strength-val').textContent = (+e.target.value).toFixed(2); });
     const waterToggle = document.getElementById('water-toggle');
     const waterLevel = document.getElementById('water-level');
@@ -397,13 +418,18 @@ function init() {
     waterLevel.addEventListener('change', () => emitTerrain({ water: true }));
     document.getElementById('terrain-reset').addEventListener('click', () => {
         if (!confirm('Reset all terrain on this tactical map?')) return;
+        pushUndo();
         terrain.reset();
         waterToggle.checked = false; waterLevel.value = 0; document.getElementById('water-level-val').textContent = '0.0';
         emitTerrain({ heights: true, splat: true, water: true });
     });
 
+    const flattenBtn = document.getElementById('flatten-target');
+    if (flattenBtn) flattenBtn.addEventListener('click', clearFlattenTarget);
+
     const upBtn = document.getElementById('btn-up');
     if (upBtn) upBtn.addEventListener('click', goUp);
+    updateHintBar();
 
     dismissSubmenusOnOutsideClick([
         [moveSubMenu, toolMenuButtons.move],
@@ -415,24 +441,37 @@ function init() {
 }
 
 function onPointerDown(event) {
+    // The left button belongs to tools; right/middle belong to the camera (OrbitControls).
+    if (event.button !== 0) return;
+
     if (isDraggingHeight) {
         isDraggingHeight = false;
-        controls.enabled = true;
         deselectObject();
         return;
     }
 
-    // Terrain sculpt/paint: start a stroke (left button only).
-    if (terrainActive() && event.button === 0) {
+    if (terrainActive()) {
         const p = pointerToGround(event);
-        if (p) {
-            isSculpting = true;
-            controls.enabled = false;
-            strokeRef = terrain.sampleHeight(p.x, p.z);
-            strokeChanged = { heights: false, splat: false };
-            terrainDab(p);
-            updateBrushRing(p);
+        if (!p) return;
+        // Alt+click: eyedropper. Samples the height as the flatten target
+        // (and the dominant material when painting) instead of stroking.
+        if (event.altKey) {
+            sampleUnderCursor(p);
+            return;
         }
+        if (terrainBrush.mode === 'ramp') {
+            rampStart = { x: p.x, z: p.z, h: terrain.sampleHeight(p.x, p.z) };
+            updateRampPreview(p);
+            return;
+        }
+        // Sculpt/paint: start a stroke.
+        pushUndo();
+        isSculpting = true;
+        strokeRef = terrainBrush.flattenRef != null ? terrainBrush.flattenRef : terrain.sampleHeight(p.x, p.z);
+        strokeChanged = { heights: false, splat: false };
+        lastDab = null;
+        terrainDab(p);
+        updateBrushCursor(p);
         return;
     }
 
@@ -452,7 +491,6 @@ function onPointerDown(event) {
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
             selectObject(clickedObject);
             isDraggingHeight = true;
-            controls.enabled = false;
         } else {
             if (selectedObject === clickedObject) {
                 deselectObject();
@@ -500,14 +538,16 @@ function onPointerDown(event) {
 function onPointerMove(event) {
     ruler.trackMouse(event);
 
-    // Terrain tool: paint along the drag, or just move the brush ring while hovering.
+    // Terrain tool: stroke along the drag (fixed-spacing dabs so intensity doesn't
+    // depend on mouse speed), or just move the brush cursor while hovering.
     if (terrainActive()) {
         const p = pointerToGround(event);
         if (p) {
-            if (isSculpting) terrainDab(p);
-            updateBrushRing(p);
+            if (isSculpting) strokeTo(p);
+            if (rampStart) updateRampPreview(p);
+            updateBrushCursor(p);
         }
-        if (isSculpting) return;
+        if (isSculpting || rampStart) return;
     }
 
     if (isDraggingHeight && selectedObject) {
@@ -539,11 +579,29 @@ function onPointerMove(event) {
     }
 }
 
-function onPointerUp() {
+function onPointerUp(event) {
+    if (event.button !== 0) return;
+
+    // Ramp gesture: apply on release.
+    if (rampStart) {
+        const p = pointerToGround(event);
+        rampPreview.visible = false;
+        if (p && Math.hypot(p.x - rampStart.x, p.z - rampStart.z) > 0.5) {
+            pushUndo();
+            terrain.ramp(rampStart.x, rampStart.z, rampStart.h,
+                p.x, p.z, terrain.sampleHeight(p.x, p.z),
+                terrainBrush.radius, 1);
+            terrain.refreshWater();
+            emitTerrain({ heights: true });
+        }
+        rampStart = null;
+        return;
+    }
+
     // End a terrain stroke and sync only the layer(s) that changed.
     if (isSculpting) {
         isSculpting = false;
-        controls.enabled = !terrainActive(); // stays disabled while the terrain tool is active
+        lastDab = null;
         if (strokeChanged.heights) terrain.refreshWater(); // pools settle into the new shape
         if (strokeChanged.heights || strokeChanged.splat) emitTerrain(strokeChanged);
         strokeChanged = { heights: false, splat: false };
@@ -552,6 +610,7 @@ function onPointerUp() {
 
 function onContextMenu(event) {
     event.preventDefault();
+    if (wasRightDrag && wasRightDrag(event)) return; // right-drag = camera orbit, not a click
     if (currentTool !== 'ruler') return;
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const intersects = raycaster.intersectObject(plane);
@@ -560,7 +619,34 @@ function onContextMenu(event) {
     }
 }
 
+const BRUSH_MODE_KEYS = { '1': 'raise', '2': 'lower', '3': 'smooth', '4': 'flatten', '5': 'noise', '6': 'terrace', '7': 'ramp', '8': 'paint' };
+
 function onKeyDown(event) {
+    if (event.key === 'Shift') shiftDown = true;
+    // Don't steal keys while the user types in an input/slider.
+    const tag = event.target && event.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+    // Undo/redo terrain strokes (Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y).
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+        event.preventDefault();
+        event.shiftKey ? redoTerrain() : undoTerrain();
+        return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
+        event.preventDefault();
+        redoTerrain();
+        return;
+    }
+
+    // Terrain hotkeys: [ ] brush size, 1-8 brush modes.
+    if (terrainActive()) {
+        if (event.key === '[') { setBrushRadius(terrainBrush.radius - 1); return; }
+        if (event.key === ']') { setBrushRadius(terrainBrush.radius + 1); return; }
+        const mode = BRUSH_MODE_KEYS[event.key];
+        if (mode) { setBrushMode(mode); return; }
+    }
+
     if ((event.key === "Delete" || event.key === "Backspace") && selectedObject) {
         const docId = selectedObject.userData.syncId;
         if (docId) {
@@ -569,16 +655,22 @@ function onKeyDown(event) {
         }
     }
     if (event.key === "Escape") {
-        if (currentTool === 'ruler' && ruler.points.length > 0) {
+        if (rampStart) {
+            rampStart = null;
+            rampPreview.visible = false;
+        } else if (currentTool === 'ruler' && ruler.points.length > 0) {
             ruler.clearInProgress();
         } else if (isDraggingHeight) {
             isDraggingHeight = false;
-            controls.enabled = true;
             deselectObject();
         } else if (selectedObject) {
             deselectObject();
         }
     }
+}
+
+function onKeyUp(event) {
+    if (event.key === 'Shift') shiftDown = false;
 }
 
 // --- Object Management ---
@@ -735,41 +827,146 @@ function updateTerrainPanel() {
     const panel = document.getElementById('terrain-panel');
     const show = currentTool === 'terrain' && mapDepth(currentMapKey) === 2;
     panel.classList.toggle('hidden', !show);
-    if (terrainBrushRing) terrainBrushRing.visible = false;
-    // Disable orbit while the terrain tool is active so drags sculpt instead of
-    // rotating the camera. Switch to another tool (e.g. Move) to orbit again.
-    if (controls) controls.enabled = !terrainActive();
+    if (terrain) terrain.setBrush({ visible: false });
     if (currentTool === 'terrain' && mapDepth(currentMapKey) !== 2) {
         console.warn('Terrain editing is only available on a tactical map (double-click down to one).');
     }
+    updateHintBar();
 }
 function setBrushMode(mode) {
     terrainBrush.mode = mode;
     document.querySelectorAll('#terrain-panel .brush-mode').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    updateHintBar();
 }
 function setBrushMaterial(i) {
     terrainBrush.material = i;
     document.querySelectorAll('#terrain-mats .mat-swatch').forEach(b => b.classList.toggle('active', +b.dataset.mat === i));
     if (terrainBrush.mode !== 'paint') setBrushMode('paint');
 }
+function setBrushRadius(r) {
+    terrainBrush.radius = Math.max(1, Math.min(25, r));
+    const input = document.getElementById('brush-radius');
+    if (input) input.value = terrainBrush.radius;
+    document.getElementById('brush-radius-val').textContent = terrainBrush.radius.toFixed(0);
+    terrain.setBrush({ radius: terrainBrush.radius });
+}
 function emitTerrain(flags) {
     if (socket) socket.emit('update-terrain', terrain.delta(flags));
 }
+// Pick against the actual terrain surface on tactical maps (fall back to the flat
+// plane elsewhere) so the brush lands where the cursor visually touches the ground.
 function pointerToGround(event) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const hit = raycaster.intersectObject(plane)[0];
+    const targets = (terrain && terrain.group.visible) ? [terrain.mesh, plane] : [plane];
+    const hit = raycaster.intersectObjects(targets, false)[0];
     return hit ? hit.point : null;
+}
+// The effective brush mode for a dab: Shift inverts raise<->lower.
+function effectiveBrushMode() {
+    const m = terrainBrush.mode;
+    if (shiftDown && m === 'raise') return 'lower';
+    if (shiftDown && m === 'lower') return 'raise';
+    return m;
 }
 function terrainDab(p) {
     const b = terrainBrush;
-    if (b.mode === 'paint') { terrain.paint(p.x, p.z, b.radius, b.strength, b.material); strokeChanged.splat = true; }
-    else { terrain.sculpt(p.x, p.z, b.radius, b.strength, b.mode, strokeRef); strokeChanged.heights = true; }
+    const mode = effectiveBrushMode();
+    if (mode === 'paint') { terrain.paint(p.x, p.z, b.radius, b.strength, b.material); strokeChanged.splat = true; }
+    else { terrain.sculpt(p.x, p.z, b.radius, b.strength, mode, strokeRef); strokeChanged.heights = true; }
+    lastDab = { x: p.x, z: p.z };
 }
-function updateBrushRing(p) {
-    if (!terrainBrushRing) return;
-    terrainBrushRing.visible = true;
-    terrainBrushRing.position.set(p.x, terrain.sampleHeight(p.x, p.z) + 0.05, p.z);
-    terrainBrushRing.scale.set(terrainBrush.radius, terrainBrush.radius, terrainBrush.radius);
+// Lay dabs at fixed spacing along the drag path so stroke intensity doesn't
+// depend on mouse speed or frame rate.
+function strokeTo(p) {
+    if (!lastDab) { terrainDab(p); return; }
+    const spacing = Math.max(0.4, terrainBrush.radius * 0.25);
+    const dx = p.x - lastDab.x, dz = p.z - lastDab.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < spacing) return;
+    const steps = Math.min(64, Math.floor(dist / spacing));
+    for (let s = 1; s <= steps; s++) {
+        terrainDab({ x: lastDab.x + (dx * s) / steps, z: lastDab.z + (dz * s) / steps });
+    }
+}
+// Move/tint the shader brush cursor (paint mode shows the selected material color).
+function updateBrushCursor(p) {
+    const mode = effectiveBrushMode();
+    const color = mode === 'paint' ? MATERIALS[terrainBrush.material].color : BRUSH_COLORS[mode];
+    terrain.setBrush({ x: p.x, z: p.z, radius: terrainBrush.radius, color, visible: true });
+}
+// Alt+click eyedropper: set the flatten target (and pick up the material in paint mode).
+function sampleUnderCursor(p) {
+    const h = terrain.sampleHeight(p.x, p.z);
+    terrainBrush.flattenRef = h;
+    const label = document.getElementById('flatten-target');
+    if (label) label.textContent = h.toFixed(1);
+    if (terrainBrush.mode === 'paint') {
+        // Dominant splat channel at the sampled point.
+        const step = SIZE / (RES - 1);
+        const fx = Math.max(0, Math.min(RES - 1, Math.round((p.x + SIZE / 2) / step)));
+        const fz = Math.max(0, Math.min(RES - 1, Math.round((p.z + SIZE / 2) / step)));
+        const i = fz * RES + fx;
+        let best = 0;
+        for (let m = 1; m < 4; m++) if (terrain.splat[i * 4 + m] > terrain.splat[i * 4 + best]) best = m;
+        setBrushMaterial(best);
+    }
+}
+function clearFlattenTarget() {
+    terrainBrush.flattenRef = null;
+    const label = document.getElementById('flatten-target');
+    if (label) label.textContent = 'auto';
+}
+function updateRampPreview(p) {
+    if (!rampStart) return;
+    const pts = [
+        new THREE.Vector3(rampStart.x, rampStart.h + 0.1, rampStart.z),
+        new THREE.Vector3(p.x, terrain.sampleHeight(p.x, p.z) + 0.1, p.z)
+    ];
+    rampPreview.geometry.setFromPoints(pts);
+    rampPreview.visible = true;
+}
+// --- Undo/redo (terrain strokes only; syncs via the normal terrain delta) ---
+function pushUndo() {
+    undoStack.push(terrain.snapshot());
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack.length = 0;
+}
+function undoTerrain() {
+    if (!undoStack.length || !terrain) return;
+    redoStack.push(terrain.snapshot());
+    terrain.restore(undoStack.pop());
+    emitTerrain({ heights: true, splat: true });
+    syncWaterControls();
+}
+function redoTerrain() {
+    if (!redoStack.length || !terrain) return;
+    undoStack.push(terrain.snapshot());
+    terrain.restore(redoStack.pop());
+    emitTerrain({ heights: true, splat: true });
+    syncWaterControls();
+}
+// --- Status hint bar: always tell the user what the mouse does right now ---
+function updateHintBar() {
+    const bar = document.getElementById('hint-bar');
+    if (!bar) return;
+    const cam = 'RMB orbit · MMB pan · wheel zoom';
+    let hint;
+    if (terrainActive()) {
+        const mode = terrainBrush.mode;
+        const verb = mode === 'ramp' ? 'LMB drag ramp line' : mode === 'paint' ? 'LMB paint' : 'LMB sculpt';
+        hint = `Terrain · ${mode} — ${verb} · Shift invert · Alt+click sample · [ ] size · 1-8 modes · Ctrl+Z undo · ${cam}`;
+    } else if (currentTool === 'terrain') {
+        hint = `Terrain — only on tactical maps: double-click a hex to descend · ${cam}`;
+    } else if (currentTool === 'move') {
+        hint = `Move — LMB select, LMB ground to drop · Del delete · ${cam}`;
+    } else if (currentTool === 'ruler') {
+        hint = `Ruler — LMB add point · right-CLICK restart · Esc cancel · ${cam}`;
+    } else if (currentTool === 'add') {
+        hint = `Add — LMB place object · ${cam}`;
+    } else {
+        hint = `${cam} · double-click hex to enter map`;
+    }
+    bar.textContent = hint;
 }
 // Ground height a token should rest at, for the current map.
 function groundY(x, z, halfHeight) {

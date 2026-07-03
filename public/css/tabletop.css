@@ -1,5 +1,23 @@
 /* tabletop.css — chrome shared by the GM (/gm) and player (/player) 3D screens:
-   login modal, full-viewport scene container, left tool menu, ruler tooltip. */
+   design tokens, login modal, full-viewport scene container, left tool menu,
+   submenus, ruler tooltip, status hint bar. */
+
+/* --- Design tokens: every panel/button consumes these, so restyling the whole
+   app later (art direction pass) is a token edit, not a hunt. --- */
+:root {
+  --panel-bg: rgba(18, 18, 23, 0.88);
+  --panel-border: #3d3d48;
+  --panel-radius: 10px;
+  --btn-bg: #4a4a55;
+  --btn-bg-hover: #5d5d6b;
+  --btn-radius: 6px;
+  --accent: #3b82f6;
+  --accent-warm: #ffdd55;
+  --text: #f0f0f0;
+  --text-dim: #9aa0aa;
+  --gap: 8px;
+  --focus-ring: 2px solid #8ab4ff;
+}
 
 #login-overlay {
   position: fixed;
@@ -106,13 +124,13 @@ body {
   position: absolute;
   top: 10px;
   left: 10px;
-  background-color: rgba(0, 0, 0, 0.7);
+  background-color: var(--panel-bg);
   padding: 10px;
-  border-radius: 10px;
-  border: 1px solid #444;
+  border-radius: var(--panel-radius);
+  border: 1px solid var(--panel-border);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--gap);
   z-index: 10;
 }
 
@@ -120,38 +138,60 @@ body {
   width: 48px;
   height: 48px;
   padding: 8px;
-  background-color: #555;
-  color: #fff;
+  background-color: var(--btn-bg);
+  color: var(--text);
   border: none;
-  border-radius: 5px;
+  border-radius: var(--btn-radius);
   cursor: pointer;
   font-size: 18px;
   font-weight: bold;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background-color 0.2s;
+  transition: background-color 0.15s;
   user-select: none; /* Prevent text selection on long press */
   position: relative; /* For submenu positioning */
 }
 .tool-button:hover {
-  background-color: #777;
+  background-color: var(--btn-bg-hover);
+}
+.tool-button:active {
+  transform: translateY(1px);
 }
 .tool-button.active {
-  background-color: #007bff;
+  background-color: var(--accent);
+}
+.tool-button:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
 }
 
-#move-submenu {
-  display: none; /* Hidden by default */
+/* Flyout submenus anchored to a tool button (move options, ruler options). */
+#move-submenu,
+.tool-submenu {
+  display: none; /* Hidden by default; JS toggles */
   position: absolute;
   left: 105%; /* Position to the right of the button */
   top: 0;
   width: 150px;
-  background-color: rgba(0, 0, 0, 0.85);
+  background-color: var(--panel-bg);
   padding: 10px;
-  border-radius: 8px;
-  border: 1px solid #444;
+  border-radius: var(--panel-radius);
+  border: 1px solid var(--panel-border);
   z-index: 100;
+}
+#ruler-submenu.tool-submenu {
+  top: 56px;
+}
+.submenu-section {
+  margin-top: 10px;
+  border-top: 1px solid var(--panel-border);
+  padding-top: 10px;
+}
+.swatch-row {
+  display: flex;
+  gap: var(--gap);
+  justify-content: center;
 }
 
 .color-swatch {
@@ -167,6 +207,31 @@ body {
   border-color: #fff;
   box-shadow: 0 0 5px #fff;
 }
+.color-swatch:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* --- Status hint bar (bottom-center): what the mouse/keys do right now --- */
+#hint-bar {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 90vw;
+  background-color: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  padding: 6px 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  z-index: 10;
+}
+#hint-bar:empty { display: none; }
 
 #ruler-tooltip {
   position: absolute;

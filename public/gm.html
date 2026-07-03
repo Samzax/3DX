@@ -56,24 +56,23 @@
         <button id="btn-tool-ruler" class="tool-button" title="Ruler Tool (Hold for options)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="21" x2="21" y2="3"></line><path d="M11.5 12.5l3 3"></path><path d="M8.5 15.5l3 3"></path><path d="M5.5 18.5l3 3"></path><path d="M12.5 11.5l3-3"></path><path d="M15.5 8.5l3-3"></path><path d="M18.5 5.5l3-3"></path></svg>
         </button>
-        <div id="ruler-submenu" style="display: none; position: absolute; left: 105%; top: 56px; width: 150px; background-color: rgba(0, 0, 0, 0.85); padding: 10px; border-radius: 8px; border: 1px solid #444; z-index: 100;">
+        <div id="ruler-submenu" class="tool-submenu">
             <button id="btn-ruler-straight" class="menu-button active">Straight Line</button>
             <button id="btn-ruler-curved" class="menu-button">Curved Line</button>
 
-            <div id="ruler-colors" style="display: flex; gap: 8px; margin-top: 10px; border-top: 1px solid #444; padding-top: 10px; justify-content: center;">
+            <div id="ruler-colors" class="submenu-section swatch-row">
                 <button class="color-swatch active" data-color="0x00ffff" style="background-color: #00ffff;" title="Cyan"></button>
                 <button class="color-swatch" data-color="0xff00ff" style="background-color: #ff00ff;" title="Magenta"></button>
                 <button class="color-swatch" data-color="0xffff00" style="background-color: #ffff00;" title="Yellow"></button>
                 <button class="color-swatch" data-color="0xff0000" style="background-color: #ff0000;" title="Red"></button>
             </div>
 
-            <div id="ruler-snap-mode" style="margin-top: 10px; border-top: 1px solid #444; padding-top: 10px;">
-                <button id="btn-ruler-snap-center" class="menu-button active" style="font-size: 13px;">Snap: Center</button>
-                <button id="btn-ruler-snap-corner" class="menu-button" style="font-size: 13px;">Snap: Corner</button>
+            <div id="ruler-snap-mode" class="submenu-section">
+                <button id="btn-ruler-snap-center" class="menu-button active">Snap: Center</button>
+                <button id="btn-ruler-snap-corner" class="menu-button">Snap: Corner</button>
             </div>
         </div>
 
-        <button id="btn-tool-3" class="tool-button" title="Tool 3">T3</button>
         <button id="btn-tool-terrain" class="tool-button" title="Terrain (tactical maps only)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20l5-9 4 5 3-4 6 8z"></path></svg>
         </button>
@@ -84,12 +83,17 @@
         <h3>Terrain</h3>
         <div class="tp-label">Brush</div>
         <div class="tp-row" id="terrain-brushes">
-            <button class="brush-mode active" data-mode="raise">Raise</button>
-            <button class="brush-mode" data-mode="lower">Lower</button>
-            <button class="brush-mode" data-mode="smooth">Smooth</button>
-            <button class="brush-mode" data-mode="flatten">Flatten</button>
-            <button class="brush-mode" data-mode="noise">Noise</button>
-            <button class="brush-mode" data-mode="paint">Paint</button>
+            <button class="brush-mode active" data-mode="raise" title="Raise terrain (1)">Raise</button>
+            <button class="brush-mode" data-mode="lower" title="Lower terrain (2)">Lower</button>
+            <button class="brush-mode" data-mode="smooth" title="Smooth bumps (3)">Smooth</button>
+            <button class="brush-mode" data-mode="flatten" title="Flatten to target (4)">Flatten</button>
+            <button class="brush-mode" data-mode="noise" title="Random roughness (5)">Noise</button>
+            <button class="brush-mode" data-mode="terrace" title="Step heights — strength sets step size (6)">Terrace</button>
+            <button class="brush-mode" data-mode="ramp" title="Drag a line to blend a ramp between two heights (7)">Ramp</button>
+            <button class="brush-mode" data-mode="paint" title="Paint materials (8)">Paint</button>
+        </div>
+        <div class="tp-slider">
+            <label>Flatten target <button id="flatten-target" class="tp-chip" title="Alt+click terrain to sample · click to reset">auto</button></label>
         </div>
         <div class="tp-label">Material (Paint)</div>
         <div class="tp-row" id="terrain-mats">
@@ -139,6 +143,9 @@
 
     <!-- --- Ruler Tooltip --- -->
     <div id="ruler-tooltip">0 ft</div>
+
+    <!-- --- Status hint bar (bottom-center): live mouse/keyboard bindings --- -->
+    <div id="hint-bar"></div>
 
     <script type="module" src="/js/pages/gm.js"></script>
 </body>
