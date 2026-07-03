@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Character Creator — 3DX</title>
+  <link rel="stylesheet" href="/css/creator.css" />
+
+  <!-- Import Map for Three.js (must stay inline) -->
+  <script type="importmap">
+  { "imports": {
+      "three": "/vendor/three/three.module.js",
+      "three/addons/": "/vendor/three/"
+  } }
+  </script>
+</head>
+<body>
+  <div id="login-overlay">
+    <div id="login-modal">
+      <h2>🎲 VTT Login</h2>
+      <input type="text" id="username-input" placeholder="Enter your username" autocomplete="username" maxlength="20" />
+      <button id="login-btn">Login</button>
+      <div id="login-error" class="hidden"></div>
+    </div>
+  </div>
+
+  <div id="boot" class="wrap" style="text-align:center; color:var(--muted);">Loading SRD data…</div>
+
+  <div id="app" class="wrap hidden">
+    <div class="topbar">
+      <div class="title"><span>Character creator</span><span class="badge">SRD 5.1</span></div>
+      <div style="display:flex; align-items:center; gap:14px;"><a href="/homebrew" style="color:var(--accent); font-size:14px; text-decoration:none;">+ Homebrew</a><span class="who" id="who"></span></div>
+    </div>
+
+    <div class="tabs" id="tabs"></div>
+
+    <div class="layout">
+      <div class="panel" id="tab-body"></div>
+
+      <div class="rail">
+        <div class="panel" style="padding:12px;">
+          <canvas id="preview-canvas"></canvas>
+        </div>
+        <div class="panel" style="padding:12px;">
+          <div class="metrics" id="metrics"></div>
+          <div class="mods" id="mods" style="margin-top:6px;"></div>
+          <button class="btn btn-accent" id="save-btn" style="width:100%; margin-top:12px;">Save character</button>
+          <button class="btn btn-ghost btn-sm" id="new-btn" style="width:100%; margin-top:6px;">New / clear</button>
+          <div class="msg" id="msg"></div>
+        </div>
+        <div class="panel" style="padding:12px;">
+          <h3 style="font-size:14px; margin-bottom:8px;">Saved characters</h3>
+          <div class="saved" id="saved"><p style="color:var(--muted); font-size:13px;">None yet.</p></div>
+        </div>
+      </div>
+    </div>
+    <div class="credit">Game content uses the SRD 5.1 under CC BY 4.0. See data/srd/ATTRIBUTION.md.</div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="/js/pages/creator.js"></script>
+</body>
+</html>

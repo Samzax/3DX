@@ -1,0 +1,112 @@
+/* gm.css — GM screen only: object menu (right), layer breadcrumb, terrain panel. */
+
+#object-menu {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background-color: rgba(0, 0, 0, 0.7);
+  padding: 15px;
+  border-radius: 10px;
+  border: 1px solid #444;
+  width: 200px;
+  z-index: 10;
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+#object-menu h2 {
+  margin-top: 0;
+  color: #fff;
+}
+
+.menu-button {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 8px;
+  background-color: #555;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 14px;
+  text-align: left;
+  transition: background-color 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.menu-button:hover {
+  background-color: #777;
+}
+.menu-button:last-child {
+  margin-bottom: 0;
+}
+.menu-button.active {
+  background-color: #007bff;
+  font-weight: bold;
+}
+
+#character-menu-container {
+  margin-top: 15px;
+  border-top: 1px solid #444;
+  padding-top: 15px;
+}
+
+#move-submenu .menu-button {
+  font-size: 13px;
+  text-align: left;
+}
+
+/* --- Layer navigation breadcrumb (top-center) --- */
+#layer-nav {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background-color: rgba(0, 0, 0, 0.7);
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid #444;
+  z-index: 10;
+  color: #f0f0f0;
+  font-size: 14px;
+  max-width: 70vw;
+}
+#btn-up {
+  background-color: #555;
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  padding: 6px 12px;
+  font-weight: bold;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.2s;
+}
+#btn-up:hover { background-color: #777; }
+#btn-up:disabled { opacity: 0.4; cursor: not-allowed; }
+#breadcrumb { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* --- Terrain editor panel --- */
+#terrain-panel {
+  position: absolute; left: 78px; top: 10px; width: 220px; z-index: 30;
+  background: rgba(20,20,24,0.92); border: 1px solid #444; border-radius: 10px;
+  padding: 12px; color: #eee; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+#terrain-panel.hidden { display: none; }
+#terrain-panel h3 { margin: 0 0 10px; font-size: 15px; color: #ffdd55; }
+#terrain-panel .tp-label { font-size: 11px; text-transform: uppercase; color: #9aa0aa; margin: 10px 0 5px; letter-spacing: .5px; }
+#terrain-panel .tp-row { display: flex; flex-wrap: wrap; gap: 5px; }
+#terrain-panel .brush-mode { flex: 1 1 30%; padding: 6px 4px; font-size: 12px; background: #3a3a44; color: #fff; border: 1px solid #4a4a55; border-radius: 6px; cursor: pointer; }
+#terrain-panel .brush-mode.active { background: #ffdd55; color: #1a1a1a; font-weight: 700; border-color: #ffdd55; }
+#terrain-mats { gap: 8px; }
+#terrain-mats .mat-swatch { width: 34px; height: 28px; border-radius: 6px; border: 2px solid #555; cursor: pointer; }
+#terrain-mats .mat-swatch.active { border-color: #fff; box-shadow: 0 0 6px #fff; }
+#terrain-panel .tp-slider { margin: 8px 0; }
+#terrain-panel .tp-slider label { display: block; font-size: 12px; color: #cbd0d8; margin-bottom: 3px; }
+#terrain-panel .tp-slider input[type=range] { width: 100%; }
+#terrain-panel .tp-reset { width: 100%; margin-top: 10px; padding: 7px; background: #5d2f2f; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+#terrain-panel .tp-reset:hover { background: #733a3a; }
