@@ -57,22 +57,20 @@
         <button id="btn-tool-ruler" class="tool-button" title="Ruler Tool (Hold for options)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="21" x2="21" y2="3"></line><path d="M11.5 12.5l3 3"></path><path d="M8.5 15.5l3 3"></path><path d="M5.5 18.5l3 3"></path><path d="M12.5 11.5l3-3"></path><path d="M15.5 8.5l3-3"></path><path d="M18.5 5.5l3-3"></path></svg>
         </button>
-        <div id="ruler-submenu" style="display: none; position: absolute; left: 105%; top: 56px; width: 150px; background-color: rgba(0, 0, 0, 0.85); padding: 10px; border-radius: 8px; border: 1px solid #444; z-index: 100;">
+        <div id="ruler-submenu" class="tool-submenu">
             <button id="btn-ruler-straight" class="menu-button active">Straight Line</button>
             <button id="btn-ruler-curved" class="menu-button">Curved Line</button>
-            <div id="ruler-colors" style="display: flex; gap: 8px; margin-top: 10px; border-top: 1px solid #444; padding-top: 10px; justify-content: center;">
+            <div id="ruler-colors" class="submenu-section swatch-row">
                 <button class="color-swatch active" data-color="0x00ffff" style="background-color: #00ffff;" title="Cyan"></button>
                 <button class="color-swatch" data-color="0xff00ff" style="background-color: #ff00ff;" title="Magenta"></button>
                 <button class="color-swatch" data-color="0xffff00" style="background-color: #ffff00;" title="Yellow"></button>
                 <button class="color-swatch" data-color="0xff0000" style="background-color: #ff0000;" title="Red"></button>
             </div>
-            <div id="ruler-snap-mode" style="margin-top: 10px; border-top: 1px solid #444; padding-top: 10px;">
-                <button id="btn-ruler-snap-center" class="menu-button active" style="font-size: 13px;">Snap: Center</button>
-                <button id="btn-ruler-snap-corner" class="menu-button" style="font-size: 13px;">Snap: Corner</button>
+            <div id="ruler-snap-mode" class="submenu-section">
+                <button id="btn-ruler-snap-center" class="menu-button active">Snap: Center</button>
+                <button id="btn-ruler-snap-corner" class="menu-button">Snap: Corner</button>
             </div>
         </div>
-
-        <button id="btn-tool-3" class="tool-button" title="Tool 3">T3</button>
     </div>
 
     <!-- --- Ruler Tooltip --- -->

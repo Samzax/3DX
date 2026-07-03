@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -38,6 +38,7 @@ let isDraggingHeight = false;
 
 let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
+let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -59,11 +60,11 @@ function init() {
     renderer.domElement.addEventListener('pointermove', onPointerMove);
     renderer.domElement.addEventListener('contextmenu', onContextMenu);
     window.addEventListener('keydown', onKeyDown);
+    wasRightDrag = trackRightDrag(renderer.domElement);
 
     // --- Tool Menu Listeners (Left) ---
     toolMenuButtons.move = document.getElementById('btn-tool-move');
     toolMenuButtons.ruler = document.getElementById('btn-tool-ruler');
-    toolMenuButtons.tool3 = document.getElementById('btn-tool-3');
     moveSubMenu = document.getElementById('move-submenu');
     moveSubMenuButtons.standard = document.getElementById('btn-move-standard');
     moveSubMenuButtons.x = document.getElementById('btn-move-x');
@@ -98,8 +99,6 @@ function init() {
     document.querySelectorAll('#ruler-colors .color-swatch').forEach(swatch => {
         swatch.addEventListener('click', (e) => setRulerColor(e.target.dataset.color, e.target));
     });
-
-    toolMenuButtons.tool3.addEventListener('click', () => setTool('tool3'));
 
     dismissSubmenusOnOutsideClick([
         [moveSubMenu, toolMenuButtons.move],
@@ -137,14 +136,20 @@ function init() {
         if (e.target === hudOverlay) closeAllPanels();
     });
 
-    startRenderLoop({ renderer, scene, camera, controls });
+    startRenderLoop({
+        renderer, scene, camera, controls,
+        // Streaming window: keep chunk meshes only near the camera target.
+        onTick: () => { if (terrain && terrain.group.visible) terrain.updateWindow(controls.target); }
+    });
     // The map arrives from the server once the player logs in (see initSocket).
 }
 
 function onPointerDown(event) {
+    // Left button = tools; right/middle = camera (OrbitControls).
+    if (event.button !== 0) return;
+
     if (isDraggingHeight) {
         isDraggingHeight = false;
-        controls.enabled = true;
         deselectObject();
         return;
     }
@@ -165,7 +170,6 @@ function onPointerDown(event) {
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
             selectObject(clickedObject);
             isDraggingHeight = true;
-            controls.enabled = false;
         } else {
             if (selectedObject === clickedObject) {
                 deselectObject();
@@ -238,6 +242,7 @@ function onPointerMove(event) {
 
 function onContextMenu(event) {
     event.preventDefault();
+    if (wasRightDrag && wasRightDrag(event)) return; // right-drag = camera orbit, not a click
     if (currentTool !== 'ruler') return;
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const intersects = raycaster.intersectObject(plane);
@@ -253,7 +258,6 @@ function onKeyDown(event) {
             ruler.clearInProgress();
         } else if (isDraggingHeight) {
             isDraggingHeight = false;
-            controls.enabled = true;
             deselectObject();
         } else if (selectedObject) {
             deselectObject();
@@ -582,20 +586,20 @@ function initSocket(username) {
         data.objects.forEach(objData => createObjectFromData(objData.id, objData));
         data.rulers.forEach(rulerData => ruler.addFromData(rulerData.id, rulerData));
 
-        // Terrain: rebuild from the map's stored blob, or flatten + hide if none.
+        // Terrain: rebuild from the map's stored chunks, or flatten + hide if none.
         if (terrain) {
             terrain.reset();
             const hasTerrain = !!data.terrain;
             if (hasTerrain) terrain.applyData(data.terrain);
             terrain.group.visible = hasTerrain;
-            // On a terrain map the heightmap is the ground; hide the flat tabletop.
-            if (plane) plane.visible = !hasTerrain;
+            // The plane stays visible as the implicit flat ground around chunks.
+            styleGroundForTerrain(plane, hasTerrain);
         }
     });
 
-    // Live terrain edits from the GM (partial blob).
+    // Live terrain edits from the GM (partial chunk payload).
     socket.on('terrain-updated', (data) => {
-        if (terrain) { terrain.applyData(data); terrain.group.visible = true; if (plane) plane.visible = false; }
+        if (terrain) { terrain.applyData(data); terrain.group.visible = true; styleGroundForTerrain(plane, true); }
     });
 
     socket.on('object-added', (data) => {
