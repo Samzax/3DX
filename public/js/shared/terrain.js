@@ -264,7 +264,8 @@ export class Terrain {
         if (v !== h) this.setH(gx, gz, v);
       });
     }
-    this._rebuildDirtyMeshes();
+    // NOTE: no mesh rebuild here — sculpt() runs per dab, and a fast stroke lays
+    // many dabs per input event. The caller flushes once via flushMeshes().
   }
 
   // Material painting toward channel matIndex (0..3).
@@ -280,8 +281,12 @@ export class Terrain {
       }
       this._markDirty(k, cx, cz, lx, lz, 'splat');
     });
-    this._rebuildDirtyMeshes();
+    // No rebuild here either — see sculpt(); callers flushMeshes() per event.
   }
+
+  // Rebuild all mesh-dirty chunks. Call once per input event after a batch of
+  // sculpt()/paint() dabs (ramp/applyPatch/applyData flush themselves).
+  flushMeshes() { this._rebuildDirtyMeshes(); }
 
   // Ramp: blend heights linearly from (x0,z0,h0) to (x1,z1,h1) along the segment,
   // over a band `halfWidth` wide with smooth falloff at the edges.
