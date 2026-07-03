@@ -4,3 +4,6 @@ node_modules/
 
 # Runtime save state written by server.js (characters, map state, homebrew)
 data/saves/
+
+# Local editor/launch config
+.claude/
