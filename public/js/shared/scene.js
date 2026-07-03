@@ -76,12 +76,23 @@ export function createTabletopScene(container) {
     return { scene, camera, renderer, controls, plane, grid, raycaster, mouse };
 }
 
-export function startRenderLoop({ renderer, scene, camera, controls }) {
+export function startRenderLoop({ renderer, scene, camera, controls, onTick }) {
     (function animate() {
         requestAnimationFrame(animate);
+        if (onTick) onTick();
         controls.update();
         renderer.render(scene, camera);
     })();
+}
+
+// Style the tabletop plane as the implicit flat ground under sparse terrain chunks:
+// sits 0.02 below y=0 so flat (untouched) chunk areas never z-fight it, tinted like
+// grass so unedited space reads as ground, not void. `off` restores the neutral look.
+export function styleGroundForTerrain(plane, on) {
+    if (!plane) return;
+    plane.visible = true;
+    plane.position.y = on ? -0.02 : 0;
+    plane.material.color.set(on ? 0x4a7a3a : 0x4a4a4a);
 }
 
 // Right-drag orbits the camera, so a contextmenu event only counts as a deliberate

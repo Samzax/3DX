@@ -12,7 +12,8 @@ const server = http.createServer(app);
 // CORS configuration for socket.io
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 512 * 1024
+  // Terrain chunk batches (esp. legacy-map migration) can reach a few hundred KB.
+  maxHttpBufferSize: 4 * 1024 * 1024
 });
 
 const PORT = process.env.PORT || 3000;
@@ -385,16 +386,38 @@ io.on('connection', (socket) => {
     io.to(key).emit('rulers-cleared');
   });
 
-  // Terrain edits (GM-authored). Partial blobs ({heights?, splat?, water?}) are
-  // merged into the map's stored terrain and relayed to everyone else in the room.
-  // heights/splat are opaque base64 strings here — only the clients en/decode them.
+  // Terrain edits (GM-authored), chunked format v2:
+  //   { chunks?: { "cx,cz": { heights?, splat? } | null }, water?, clear? }
+  // heights/splat are opaque base64 strings here — only the clients en/decode
+  // them. null deletes a chunk; clear wipes all chunks (GM reset). Legacy v1
+  // stored terrain ({res:128, heights, splat}) is replaced wholesale the first
+  // time a GM client sends v2 chunks (the client migrates and re-uploads).
+  const CHUNK_KEY_RE = /^-?\d+,-?\d+$/;
   socket.on('update-terrain', (data) => {
     if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    if (!data || typeof data !== 'object') return;
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
     const map = getMap(key);
-    const t = map.terrain || (map.terrain = { res: 128, size: 100, water: { enabled: false, level: 0 } });
-    if (typeof data.heights === 'string') t.heights = data.heights;
-    if (typeof data.splat === 'string') t.splat = data.splat;
+    let t = map.terrain;
+    if (!t || t.format !== 2) {
+      t = map.terrain = {
+        format: 2, chunkCells: 32, vertexSpacing: 0.5,
+        water: (t && t.water) ? t.water : { enabled: false, level: 0 },
+        chunks: {}
+      };
+    }
+    if (data.clear) t.chunks = {};
+    if (data.chunks && typeof data.chunks === 'object') {
+      for (const k of Object.keys(data.chunks)) {
+        if (!CHUNK_KEY_RE.test(k)) continue;
+        const v = data.chunks[k];
+        if (v === null) { delete t.chunks[k]; continue; }
+        if (typeof v !== 'object') continue;
+        const c = t.chunks[k] || (t.chunks[k] = {});
+        if (typeof v.heights === 'string') c.heights = v.heights;
+        if (typeof v.splat === 'string') c.splat = v.splat;
+      }
+    }
     if (data.water && typeof data.water === 'object') {
       t.water = {
         enabled: !!data.water.enabled,
