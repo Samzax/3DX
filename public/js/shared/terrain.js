@@ -146,10 +146,16 @@ export class Terrain {
       },
       vertexShader: [
         'attribute float aDepth;',
+        'attribute vec2 aFlow;',        // rivers: (arc length, across -1..1); lakes: 0
+        'attribute float aFlowSpeed;',  // rivers: body speed; lakes: 0
         'varying float vDepth;',
         'varying vec3 vWorld;',
+        'varying vec2 vFlow;',
+        'varying float vFlowSpeed;',
         'void main() {',
         '  vDepth = aDepth;',
+        '  vFlow = aFlow;',
+        '  vFlowSpeed = aFlowSpeed;',
         '  vec4 w = modelMatrix * vec4(position, 1.0);',
         '  vWorld = w.xyz;',
         '  gl_Position = projectionMatrix * viewMatrix * w;',
@@ -164,6 +170,8 @@ export class Terrain {
         'uniform float uBands;',
         'varying float vDepth;',
         'varying vec3 vWorld;',
+        'varying vec2 vFlow;',
+        'varying float vFlowSpeed;',
         'float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
         'float vnoise(vec2 p) {',
         '  vec2 i = floor(p), f = fract(p);',
@@ -177,15 +185,27 @@ export class Terrain {
         '  float t = 1.0 - exp(-d * 0.45);',
         '  if (uBands > 0.5) t = (floor(t * uBands) + 0.5) / uBands;',
         '  vec3 col = mix(uShallow, uDeep, t);',
-        // 3. surface motion: scrolling noise perturbs a fake normal -> sun glints
-        '  vec2 p1 = vWorld.xz * 0.8 + vec2(uTime * 0.06, uTime * 0.045);',
-        '  vec2 p2 = vWorld.xz * 2.3 - vec2(uTime * 0.11, uTime * 0.08);',
+        // 3. surface motion: scrolling noise perturbs a fake normal -> sun glints.
+        //    Lakes drift in world space; rivers scroll along their flow coord.
+        '  vec2 p1, p2;',
+        '  if (vFlowSpeed > 0.001) {',
+        '    p1 = vec2(vFlow.x * 0.5 - uTime * vFlowSpeed, vFlow.y * 1.2);',
+        '    p2 = vec2(vFlow.x * 1.6 - uTime * vFlowSpeed * 1.7, vFlow.y * 2.5);',
+        '  } else {',
+        '    p1 = vWorld.xz * 0.8 + vec2(uTime * 0.06, uTime * 0.045);',
+        '    p2 = vWorld.xz * 2.3 - vec2(uTime * 0.11, uTime * 0.08);',
+        '  }',
         '  float n = vnoise(p1) * 0.65 + vnoise(p2) * 0.35;',
         '  vec3 N = normalize(vec3((n - 0.5) * 0.6, 1.0, (vnoise(p1.yx) - 0.5) * 0.6));',
         '  float glint = pow(max(dot(N, normalize(vec3(0.35, 0.8, 0.25))), 0.0), 40.0);',
         // 2. foam contact line where water meets terrain, edge wobbled by noise
         '  float foamEdge = uFoamWidth * (0.75 + 0.5 * vnoise(vWorld.xz * 1.7 + uTime * 0.25));',
         '  float foam = 1.0 - smoothstep(foamEdge * 0.6, foamEdge, d);',
+        //    rivers: elongated foam streaks racing along the flow
+        '  if (vFlowSpeed > 0.001) {',
+        '    float streak = vnoise(vec2(vFlow.x * 0.9 - uTime * vFlowSpeed * 1.3, vFlow.y * 2.2));',
+        '    foam = max(foam, smoothstep(0.72, 0.95, streak) * 0.65);',
+        '  }',
         // 4. fresnel-ish rim: opaque at grazing angles, clear from above
         '  vec3 V = normalize(cameraPosition - vWorld);',
         '  float fres = pow(1.0 - max(dot(V, vec3(0.0, 1.0, 0.0)), 0.0), 2.0);',
@@ -194,6 +214,41 @@ export class Terrain {
         '  col = mix(col, uFoamColor, foam * 0.85);',
         '  alpha = max(alpha, foam * 0.9);',
         '  gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.95));',
+        '}'
+      ].join('\n')
+    });
+
+    // Mist at waterfall bases: soft pulsing white discs (procedural, no textures).
+    this.mistMaterial = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: [
+        'varying vec2 vUv;',
+        'varying vec3 vWorld;',
+        'void main() {',
+        '  vUv = uv;',
+        '  vec4 w = modelMatrix * vec4(position, 1.0);',
+        '  vWorld = w.xyz;',
+        '  gl_Position = projectionMatrix * viewMatrix * w;',
+        '}'
+      ].join('\n'),
+      fragmentShader: [
+        'uniform float uTime;',
+        'varying vec2 vUv;',
+        'varying vec3 vWorld;',
+        'float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
+        'float vnoise(vec2 p) {',
+        '  vec2 i = floor(p), f = fract(p);',
+        '  f = f * f * (3.0 - 2.0 * f);',
+        '  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),',
+        '             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);',
+        '}',
+        'void main() {',
+        '  float r = length(vUv - 0.5) * 2.0;',
+        '  float swirl = vnoise(vWorld.xz * 1.8 + vec2(uTime * 0.5, uTime * 0.35));',
+        '  float a = smoothstep(1.0, 0.15, r) * (0.3 + 0.35 * swirl);',
+        '  gl_FragColor = vec4(vec3(0.97), a);',
         '}'
       ].join('\n')
     });
@@ -210,6 +265,7 @@ export class Terrain {
   // Advance the water animation (call once per frame from the render loop).
   tick(nowSeconds) {
     this.waterMaterial.uniforms.uTime.value = nowSeconds;
+    this.mistMaterial.uniforms.uTime.value = nowSeconds;
   }
 
   // ===== global lattice access (vertex coords gx,gz; world = g * VSPACE) =====
@@ -580,10 +636,11 @@ export class Terrain {
   }
 
   _clearWaterMesh(id) {
-    const mesh = this._waterMeshes.get(id);
-    if (mesh) {
-      this.waterGroup.remove(mesh);
-      mesh.geometry.dispose();
+    const obj = this._waterMeshes.get(id);
+    if (obj) {
+      this.waterGroup.remove(obj);
+      obj.traverse((o) => { if (o.geometry) o.geometry.dispose(); });
+      if (obj.geometry) obj.geometry.dispose();
       this._waterMeshes.delete(id);
     }
   }
@@ -609,6 +666,10 @@ export class Terrain {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depth, 1));
+    // Lakes don't flow: zero the flow attributes the shared shader expects.
+    const vcount = pos.length / 3;
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(new Float32Array(vcount * 2), 2));
+    geo.setAttribute('aFlowSpeed', new THREE.Float32BufferAttribute(new Float32Array(vcount), 1));
     geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, this.waterMaterial);
     mesh.renderOrder = 1;
@@ -617,8 +678,120 @@ export class Terrain {
     this.waterGroup.add(mesh);
   }
 
+  // --- rivers (W2/W3): Catmull-Rom ribbon draped on the terrain ---
+
+  // Spline samples every ~1 world unit through the GM's waypoints.
+  _riverSamples(points) {
+    if (!points || points.length < 2) return [];
+    const curve = new THREE.CatmullRomCurve3(
+      points.map(p => new THREE.Vector3(p.x, 0, p.z)), false, 'centripetal');
+    const n = Math.max(2, Math.min(2048, Math.ceil(curve.getLength())));
+    return curve.getSpacedPoints(n).map(v => ({ x: v.x, z: v.z }));
+  }
+
+  // Carve the river bed into the terrain: lower vertices near the path toward
+  // (surface - depth), full depth at the centerline fading to zero at the
+  // banks. Uses setH, so it is COW-undoable and syncs as normal chunk edits.
+  carveRiverBed(points, halfWidth, depth) {
+    const samples = this._riverSamples(points);
+    const targets = samples.map(s => ({ x: s.x, z: s.z, t: this.sampleHeight(s.x, s.z) - depth }));
+    // Smooth the bed profile along the path so it doesn't inherit bumps.
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 1; i < targets.length - 1; i++) {
+        targets[i].t = (targets[i - 1].t + targets[i].t * 2 + targets[i + 1].t) / 4;
+      }
+    }
+    for (const s of targets) {
+      this._forEachInRadius(s.x, s.z, halfWidth, (gx, gz, f) => {
+        const h = this.getH(gx, gz);
+        const target = s.t + (1 - f) * depth; // centerline hits s.t, banks stay
+        if (h > target) this.setH(gx, gz, h + (target - h) * Math.min(1, f * 1.5));
+      });
+    }
+  }
+
+  // Ribbon mesh: 3 vertices per sample (left bank / center / right bank),
+  // draped on the terrain. Steep drops become waterfalls (foam-white) with a
+  // pulsing mist disc at their base.
+  _buildRiverMesh(body, samples) {
+    this._clearWaterMesh(body.id);
+    if (!samples || samples.length < 2) return;
+    // Drape + smooth heights along the path.
+    const hs = samples.map(s => this.sampleHeight(s.x, s.z));
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 1; i < hs.length - 1; i++) hs[i] = (hs[i - 1] + hs[i] * 2 + hs[i + 1]) / 4;
+    }
+    // Ends that touch a lake blend to its surface so rivers visibly feed lakes.
+    const blendToLake = (end, dir) => {
+      const lake = this.findLakeAt(samples[end].x, samples[end].z);
+      if (!lake) return;
+      const fp = this._footprints.get(lake.id);
+      const lvl = fp ? fp.level : lake.level;
+      for (let k = 0; k < 5; k++) {
+        const i = end + dir * k;
+        if (i < 0 || i >= hs.length) break;
+        const w = 1 - k / 5;
+        hs[i] = hs[i] * (1 - w) + (lvl - 0.06) * w;
+      }
+    };
+    blendToLake(0, 1);
+    blendToLake(samples.length - 1, -1);
+
+    const half = body.width / 2;
+    const pos = [], depth = [], flow = [], fspd = [], idx = [];
+    const mistBases = [];
+    let arc = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      const a = samples[Math.max(0, i - 1)], b = samples[Math.min(samples.length - 1, i + 1)];
+      let tx = b.x - a.x, tz = b.z - a.z;
+      const tl = Math.hypot(tx, tz) || 1;
+      tx /= tl; tz /= tl;
+      const px = -tz, pz = tx; // path-perpendicular in XZ
+      if (i > 0) arc += Math.hypot(s.x - samples[i - 1].x, s.z - samples[i - 1].z);
+      const fall = i > 0 && (hs[i - 1] - hs[i]) > 1.2; // steep drop = waterfall
+      if (fall) mistBases.push({ x: s.x, y: hs[i], z: s.z });
+      const y = hs[i] + 0.06;
+      const dEdge = fall ? 0.02 : 0.06, dMid = fall ? 0.05 : 0.5; // shallow = foamy
+      pos.push(s.x - px * half, y, s.z - pz * half, s.x, y, s.z, s.x + px * half, y, s.z + pz * half);
+      depth.push(dEdge, dMid, dEdge);
+      flow.push(arc, -1, arc, 0, arc, 1);
+      fspd.push(body.speed, body.speed, body.speed);
+      if (i > 0) {
+        const o = (i - 1) * 3;
+        idx.push(o, o + 3, o + 1, o + 1, o + 3, o + 4, o + 1, o + 4, o + 2, o + 2, o + 4, o + 5);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setIndex(idx);
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depth, 1));
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(flow, 2));
+    geo.setAttribute('aFlowSpeed', new THREE.Float32BufferAttribute(fspd, 1));
+    geo.computeBoundingSphere();
+    const group = new THREE.Group();
+    group.name = 'water';
+    const ribbon = new THREE.Mesh(geo, this.waterMaterial);
+    ribbon.renderOrder = 1;
+    group.add(ribbon);
+    for (const m of mistBases) {
+      const disc = new THREE.Mesh(new THREE.CircleGeometry(half * 1.5, 20), this.mistMaterial);
+      disc.rotation.x = -Math.PI / 2;
+      disc.position.set(m.x, m.y + 0.14, m.z);
+      disc.renderOrder = 2;
+      group.add(disc);
+    }
+    this._waterMeshes.set(body.id, group);
+    this.waterGroup.add(group);
+  }
+
   _recomputeBody(body) {
-    if (body.kind !== 'lake') return; // rivers arrive in W2
+    if (body.kind === 'river') {
+      const samples = this._riverSamples(body.points);
+      this._footprints.set(body.id, { samples, width: body.width });
+      this._buildRiverMesh(body, samples);
+      return;
+    }
     this._footprints.set(body.id,
       this._computeLakeFootprint(body.seed.x, body.seed.z, body.level, body.maxRadius || 96));
     this._buildLakeMesh(body);
@@ -655,28 +828,62 @@ export class Terrain {
     this._clearWaterMesh(id);
     this._footprints.delete(id);
   }
+  addRiver({ points, width = 2.5, speed = 1 }) {
+    const body = {
+      id: 'w' + Math.random().toString(36).slice(2, 8),
+      kind: 'river', points: points.map(p => ({ x: p.x, z: p.z })), width, speed
+    };
+    this.water.bodies.push(body);
+    this._recomputeBody(body);
+    return body;
+  }
   // Which lake footprint contains world (x,z)? Used for click-select/delete.
   findLakeAt(x, z) {
     const k = Math.floor(x) + ',' + Math.floor(z);
     for (const body of this.water.bodies) {
+      if (body.kind !== 'lake') continue;
       const fp = this._footprints.get(body.id);
-      if (fp && fp.cells.has(k)) return body;
+      if (fp && fp.cells && fp.cells.has(k)) return body;
+    }
+    return null;
+  }
+  // Which river ribbon passes near world (x,z)? Used for Alt+click delete.
+  findRiverAt(x, z) {
+    for (const body of this.water.bodies) {
+      if (body.kind !== 'river') continue;
+      const fp = this._footprints.get(body.id);
+      if (!fp || !fp.samples) continue;
+      const r = fp.width / 2 + 0.4;
+      for (const s of fp.samples) {
+        if (Math.hypot(s.x - x, s.z - z) <= r) return body;
+      }
     }
     return null;
   }
 
   // --- water sync (bodies only; footprints are always recomputed locally) ---
   getWaterData() {
-    return { bodies: this.water.bodies.map(b => ({ ...b, seed: { ...b.seed } })) };
+    return {
+      bodies: this.water.bodies.map(b => b.kind === 'river'
+        ? { ...b, points: b.points.map(p => ({ ...p })) }
+        : { ...b, seed: { ...b.seed } })
+    };
   }
   setWaterData(data) {
     if (!data || typeof data !== 'object') return;
     if (Array.isArray(data.bodies)) {
       this.water.bodies = data.bodies
-        .filter(b => b && b.kind === 'lake' && b.seed && isFinite(b.level))
-        .map(b => ({ id: String(b.id), kind: 'lake',
-                     seed: { x: +b.seed.x, z: +b.seed.z },
-                     level: +b.level, maxRadius: +b.maxRadius || 96 }));
+        .filter(b => b && (
+          (b.kind === 'lake' && b.seed && isFinite(b.level)) ||
+          (b.kind === 'river' && Array.isArray(b.points) && b.points.length >= 2)))
+        .map(b => b.kind === 'lake'
+          ? { id: String(b.id), kind: 'lake',
+              seed: { x: +b.seed.x, z: +b.seed.z },
+              level: +b.level, maxRadius: +b.maxRadius || 96 }
+          : { id: String(b.id), kind: 'river',
+              points: b.points.slice(0, 256).map(p => ({ x: +p.x, z: +p.z })),
+              width: Math.max(0.5, Math.min(16, +b.width || 2.5)),
+              speed: Math.max(0.1, Math.min(4, +b.speed || 1)) });
     } else if (data.enabled != null) {
       // Legacy global sheet: convert to one lake seeded at the lowest vertex.
       this.water.bodies = [];
