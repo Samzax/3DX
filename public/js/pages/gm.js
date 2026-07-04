@@ -71,6 +71,7 @@ let rulerSnapSubMenuButtons = {};
 //   "pocket/<id>"          pocket   -> square grid dungeon/room, entered via portals
 let currentMapKey = 'world';
 let currentMapMeta = null;          // pocket metadata ({kind,name,width,height,parentKey})
+let terrainIsUnified = false;       // is the loaded terrain the shared continuous world?
 let hexGridGroup = null;
 let boundsRect = null;              // pocket boundary rectangle
 let pendingPortal = null;           // portal placement waiting for 'pocket-created'
@@ -379,47 +380,37 @@ function initSocket() {
         }
         updateBreadcrumb();
 
-        // Terrain: rebuild from the stored chunks; visible only on the tactical leaf.
+        // Terrain.
         if (terrain) {
-            terrain.reset();
-            undoStack.length = 0;
-            redoStack.length = 0;
-            if (data.terrain) {
-                const res = terrain.applyData(data.terrain);
-                if (res.migrated) {
-                    // Legacy single-tile terrain was resampled onto the chunk
-                    // lattice — push the converted map back so the server (and
-                    // players) switch to format v2. Batched to stay under the
-                    // socket buffer.
-                    terrain.collectDirtyPayload(); // drain; full batches follow
-                    for (const batch of terrain.fullPayloadBatches()) {
-                        socket.emit('update-terrain', batch);
-                    }
-                    console.log('[terrain] migrated legacy terrain to chunked format v2');
+            if (data.unified) {
+                // One continuous world: load it once, then just fly the camera
+                // between provinces (no reload flash, no re-applying 1000s of
+                // chunks every hop).
+                if (!terrainIsUnified) {
+                    terrain.reset();
+                    undoStack.length = 0; redoStack.length = 0;
+                    if (data.terrain) terrain.applyData(data.terrain);
+                    terrainIsUnified = true;
                 }
-            }
-            // Fresh tactical map under a tagged hex: seed starting terrain from
-            // the inherited biome and upload it like hand-sculpted chunks.
-            const noChunks = !data.terrain ||
-                Object.keys(data.terrain.chunks || {}).length === 0;
-            const noWater = !data.terrain || !data.terrain.water ||
-                !(data.terrain.water.bodies && data.terrain.water.bodies.length);
-            if (data.biome && noChunks && noWater &&
-                isTacticalKey(currentMapKey) && !isPocket(currentMapKey)) {
-                terrain.seedFromBiome(data.biome, currentMapKey);
-                terrain.collectDirtyPayload(); // drain; full batches follow
-                for (const batch of terrain.fullPayloadBatches()) {
-                    socket.emit('update-terrain', batch);
+                terrain.group.visible = true;
+                styleGroundForTerrain(plane, true);
+                syncWaterControls();
+                if (data.worldCenter) {
+                    const c = data.worldCenter;   // fly to this province's spot in the world
+                    controls.target.set(c.x, 0, c.z);
+                    camera.position.set(c.x + 20, 30, c.z + 20);
                 }
-                console.log('[terrain] seeded new tactical map from biome:', data.biome);
+            } else {
+                // Hex tiers (no terrain) or a pocket (its own separate terrain).
+                terrainIsUnified = false;
+                terrain.reset();
+                undoStack.length = 0; redoStack.length = 0;
+                if (data.terrain) terrain.applyData(data.terrain);
+                const tactical = isTacticalKey(currentMapKey);
+                terrain.group.visible = tactical;
+                styleGroundForTerrain(plane, tactical);
+                syncWaterControls();
             }
-            const tactical = isTacticalKey(currentMapKey);
-            terrain.group.visible = tactical;
-            // On tactical maps the plane stays visible as the implicit flat
-            // ground under/around the sparse chunks (sits at -0.02, so flat
-            // chunks and dug pits are never masked).
-            styleGroundForTerrain(plane, tactical);
-            syncWaterControls();
         }
     });
 
