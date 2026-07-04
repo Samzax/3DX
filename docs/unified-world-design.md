@@ -126,5 +126,8 @@ what makes an infinite world affordable:
 - Zoom→tier thresholds (camera height at which grid switches) — I'll tune by eye.
 - Summary icon set (water / settlement / dungeon) — start with these three.
 - Rebase threshold distance for the floating origin (e.g. every 4096 u).
-- Whether players can free-roam the world map or only follow the GM's view
-  (affects how aggressive per-player subscription must be).
+- ~~Whether players can free-roam the world map or only follow the GM's view~~
+  **DECIDED: players free-roam independently, but only receive regions the GM
+  has revealed.** U4 subscription is therefore per-player region streaming
+  filtered through a GM-controlled visibility (fog) mask — free camera, gated
+  content. This merges the subscription and fog-of-war work.
