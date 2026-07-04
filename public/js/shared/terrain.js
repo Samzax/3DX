@@ -48,6 +48,30 @@ function b64ToU8(b64) {
 const smooth = (t) => t * t * (3 - 2 * t); // smoothstep falloff
 const ckey = (cx, cz) => cx + ',' + cz;
 
+// --- deterministic noise for biome seeding (same result on every client) ---
+function hashStr(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function lattice(seed, x, z) {
+  let h = (Math.imul(x, 374761393) ^ Math.imul(z, 668265263) ^ seed) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function seededNoise(seed, x, z) {
+  const ix = Math.floor(x), iz = Math.floor(z);
+  const sx = smooth(x - ix), sz = smooth(z - iz);
+  const a = lattice(seed, ix, iz), b = lattice(seed, ix + 1, iz);
+  const c = lattice(seed, ix, iz + 1), d = lattice(seed, ix + 1, iz + 1);
+  return (a * (1 - sx) + b * sx) * (1 - sz) + (c * (1 - sx) + d * sx) * sz;
+}
+function fbm(seed, x, z, oct = 4) {
+  let v = 0, amp = 0.5, f = 1;
+  for (let o = 0; o < oct; o++) { v += seededNoise(seed + o * 101, x * f, z * f) * amp; amp *= 0.5; f *= 2; }
+  return v; // ~0..1
+}
+
 function newChunk() {
   const c = {
     heights: new Float32Array(CHUNK_VERTS * CHUNK_VERTS),
@@ -416,6 +440,81 @@ export class Terrain {
   // Rebuild all mesh-dirty chunks. Call once per input event after a batch of
   // sculpt()/paint() dabs (ramp/applyPatch/applyData flush themselves).
   flushMeshes() { this._rebuildDirtyMeshes(); }
+
+  // Hard-set one vertex's material channel (used by seeding, not brushes).
+  _paintVertex(gx, gz, mat) {
+    const { c, k, cx, cz, lx, lz } = this._chunkForWrite(gx, gz);
+    const i = (lz * CHUNK_VERTS + lx) * 4;
+    c.splat[i] = 0; c.splat[i + 1] = 0; c.splat[i + 2] = 0; c.splat[i + 3] = 0;
+    c.splat[i + mat] = 255;
+    this._markDirty(k, cx, cz, lx, lz, 'splat');
+  }
+
+  // Generate starting terrain for a fresh tactical map from its inherited hex
+  // biome. Deterministic per (biome, seedStr): every client that ran this would
+  // agree — but only the GM runs it and uploads the resulting chunks, so it
+  // syncs like hand-sculpted terrain. Covers a 4x4-chunk area centered on the
+  // origin; the world beyond stays implicit flat ground for the GM to extend.
+  // Material channels: 0 grass, 1 dirt, 2 rock, 3 sand.
+  seedFromBiome(biome, seedStr, radiusChunks = 2) {
+    const seed = hashStr(seedStr + '|' + biome);
+    const R = radiusChunks * CHUNK_VERTS; // lattice verts each side of origin
+    const coastAxis = seed % 4; // which side the coast biome slopes down to
+    const heightAt = (wx, wz) => {
+      const n1 = fbm(seed, wx * 0.025, wz * 0.025);
+      const n2 = fbm(seed + 777, wx * 0.06, wz * 0.06);
+      switch (biome) {
+        case 'plains':    return n1 * 2.2 - 0.6;
+        case 'forest':    return n1 * 3.4 - 0.9 + n2 * 0.6;
+        case 'mountains': return Math.pow(1 - Math.abs(2 * n1 - 1), 1.6) * 9 - 1 + n2 * 1.5;
+        case 'desert':    return fbm(seed, wx * 0.02, wz * 0.045) * 2.6 - 0.5;
+        case 'swamp':     return n1 * 1.2 - 0.65;
+        case 'coast': {
+          const span = R * VSPACE;
+          const t = coastAxis === 0 ? wx / span : coastAxis === 1 ? -wx / span
+                  : coastAxis === 2 ? wz / span : -wz / span;
+          return n1 * 2.0 - 0.2 - (t + 1) * 2.2 + 1.4; // slopes into the sea
+        }
+        default: return n1 * 2 - 0.6;
+      }
+    };
+    // Pass 1: heights.
+    for (let gz = -R; gz < R; gz++) {
+      for (let gx = -R; gx < R; gx++) {
+        this.setH(gx, gz, heightAt(gx * VSPACE, gz * VSPACE));
+      }
+    }
+    // Pass 2: materials from height + slope + variety noise.
+    let minH = Infinity, minAt = { x: 0, z: 0 };
+    for (let gz = -R; gz < R; gz++) {
+      for (let gx = -R; gx < R; gx++) {
+        const h = this.getH(gx, gz);
+        if (h < minH) { minH = h; minAt = { x: gx * VSPACE, z: gz * VSPACE }; }
+        const sx = (this.getH(gx + 1, gz) - this.getH(gx - 1, gz)) / (2 * VSPACE);
+        const sz = (this.getH(gx, gz + 1) - this.getH(gx, gz - 1)) / (2 * VSPACE);
+        const slope = Math.hypot(sx, sz);
+        const n2 = fbm(seed + 777, gx * VSPACE * 0.06, gz * VSPACE * 0.06);
+        let mat = 0; // grass
+        if (biome === 'desert') mat = (slope > 1.4 || n2 > 0.75) ? 2 : 3;
+        else if (biome === 'mountains') mat = (h > 3.5 || slope > 1.1) ? 2 : (h < 0.5 ? 0 : (n2 > 0.5 ? 1 : 0));
+        else if (biome === 'swamp') mat = h < -0.2 ? 1 : 0;
+        else if (biome === 'coast') mat = h < 0.4 ? 3 : (slope > 1.3 ? 2 : 0);
+        else { // plains / forest
+          if (slope > 1.3) mat = 2;
+          else if (n2 > (biome === 'forest' ? 0.55 : 0.62)) mat = 1;
+        }
+        if (mat !== 0) this._paintVertex(gx, gz, mat);
+      }
+    }
+    this._rebuildDirtyMeshes();
+    // Wet biomes come with water poured at the lowest point.
+    if (biome === 'swamp' && minH < -0.3) {
+      this.addLake({ x: minAt.x, z: minAt.z, level: Math.min(-0.15, minH + 0.4) });
+    } else if (biome === 'coast' && minH < -0.6) {
+      this.addLake({ x: minAt.x, z: minAt.z, level: -0.3, maxRadius: 160 });
+    }
+    this.refreshWater();
+  }
 
   // Ramp: blend heights linearly from (x0,z0,h0) to (x1,z1,h1) along the segment,
   // over a band `halfWidth` wide with smooth falloff at the edges.

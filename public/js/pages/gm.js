@@ -75,6 +75,19 @@ let hexGridGroup = null;
 let boundsRect = null;              // pocket boundary rectangle
 let pendingPortal = null;           // portal placement waiting for 'pocket-created'
 
+// Biome tags on hex layers: color the hexes and seed new tactical maps below.
+const BIOMES = {
+    plains:    { color: 0x8bc34a, label: 'Plains' },
+    forest:    { color: 0x2e7d32, label: 'Forest' },
+    mountains: { color: 0x8d8d93, label: 'Mountains' },
+    desert:    { color: 0xd7b26a, label: 'Desert' },
+    swamp:     { color: 0x4e5f3a, label: 'Swamp' },
+    coast:     { color: 0x4aa3c7, label: 'Coast' }
+};
+let currentBiome = 'plains';
+let hexTags = {};                   // "q,r" -> { biome } for the current map
+let hexFillGroup = null;            // colored hex fill overlay
+
 const SQRT3 = Math.sqrt(3);
 const HEX_SIZE = 2;            // world units (circumradius) used to draw hexes
 const HEX_MAP_RADIUS = 6;      // hex field radius, in hexes
@@ -153,6 +166,36 @@ function showLayerGrid(key) {
     }
 }
 
+// Colored fills for biome-tagged hexes (hex layers only).
+function rebuildHexFills() {
+    if (hexFillGroup) {
+        scene.remove(hexFillGroup);
+        hexFillGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+        hexFillGroup = null;
+    }
+    if (!isHexLayer()) return;
+    hexFillGroup = new THREE.Group();
+    for (const hk of Object.keys(hexTags)) {
+        const biome = BIOMES[hexTags[hk].biome];
+        if (!biome) continue;
+        const [q, r] = hk.split(',').map(Number);
+        const { x, z } = hexToWorld(q, r);
+        const shape = new THREE.Shape();
+        for (let i = 0; i < 6; i++) {
+            const c = hexCorner(x, z, i);
+            if (i === 0) shape.moveTo(c.x, c.z); else shape.lineTo(c.x, c.z);
+        }
+        const geo = new THREE.ShapeGeometry(shape);
+        geo.rotateX(Math.PI / 2); // shape XY -> ground XZ
+        const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+            color: biome.color, transparent: true, opacity: 0.35, side: THREE.DoubleSide
+        }));
+        mesh.position.y = 0.012; // under the grid lines
+        hexFillGroup.add(mesh);
+    }
+    scene.add(hexFillGroup);
+}
+
 // --- Layer-aware snapping & measurement ---
 function snapToCurrentGrid(point) {
     if (isHexLayer()) {
@@ -202,7 +245,9 @@ function enterMap(key) {
     objects = [];
     ruler.removeSegments();
     showLayerGrid(key);
-    // Pocket metadata + bounds arrive with map-state; clear the old ones now.
+    // Hex tags + pocket metadata arrive with map-state; clear the old ones now.
+    hexTags = {};
+    rebuildHexFills();
     currentMapMeta = null;
     if (boundsRect) { scene.remove(boundsRect); boundsRect.geometry.dispose(); boundsRect = null; }
     // Hide terrain + its panel off the tactical leaf; map-state will repopulate it.
@@ -321,6 +366,10 @@ function initSocket() {
         data.objects.forEach(objData => createObjectFromData(objData.id, objData));
         data.rulers.forEach(rulerData => ruler.addFromData(rulerData.id, rulerData));
 
+        // Biome tags for this map's hexes (hex layers only render them).
+        hexTags = data.hexes || {};
+        rebuildHexFills();
+
         // Pocket metadata: name/dimensions drive the breadcrumb + boundary rect.
         currentMapMeta = data.meta || null;
         if (boundsRect) { scene.remove(boundsRect); boundsRect.geometry.dispose(); boundsRect = null; }
@@ -349,6 +398,21 @@ function initSocket() {
                     console.log('[terrain] migrated legacy terrain to chunked format v2');
                 }
             }
+            // Fresh tactical map under a tagged hex: seed starting terrain from
+            // the inherited biome and upload it like hand-sculpted chunks.
+            const noChunks = !data.terrain ||
+                Object.keys(data.terrain.chunks || {}).length === 0;
+            const noWater = !data.terrain || !data.terrain.water ||
+                !(data.terrain.water.bodies && data.terrain.water.bodies.length);
+            if (data.biome && noChunks && noWater &&
+                isTacticalKey(currentMapKey) && !isPocket(currentMapKey)) {
+                terrain.seedFromBiome(data.biome, currentMapKey);
+                terrain.collectDirtyPayload(); // drain; full batches follow
+                for (const batch of terrain.fullPayloadBatches()) {
+                    socket.emit('update-terrain', batch);
+                }
+                console.log('[terrain] seeded new tactical map from biome:', data.biome);
+            }
             const tactical = isTacticalKey(currentMapKey);
             terrain.group.visible = tactical;
             // On tactical maps the plane stays visible as the implicit flat
@@ -362,6 +426,13 @@ function initSocket() {
     // Live terrain edits (echo to other GM tabs; players handle this too).
     socket.on('terrain-updated', (data) => {
         if (terrain) { terrain.applyData(data); syncWaterControls(); }
+    });
+
+    // Live hex tag edits (echo to this and other GM tabs in the room).
+    socket.on('hex-updated', ({ hex, biome }) => {
+        if (biome) hexTags[hex] = { biome };
+        else delete hexTags[hex];
+        rebuildHexFills();
     });
 
     // A pocket map we requested is ready: drop its entry portal where the GM clicked.
@@ -543,6 +614,11 @@ function init() {
     const flattenBtn = document.getElementById('flatten-target');
     if (flattenBtn) flattenBtn.addEventListener('click', clearFlattenTarget);
 
+    // Biome palette (hex layers).
+    document.querySelectorAll('#biome-panel .biome-swatch').forEach(btn => {
+        btn.addEventListener('click', () => setBiome(btn.dataset.biome));
+    });
+
     const upBtn = document.getElementById('btn-up');
     if (upBtn) upBtn.addEventListener('click', goUp);
     updateHintBar();
@@ -570,6 +646,17 @@ function onPointerDown(event) {
     if (isDraggingHeight) {
         isDraggingHeight = false;
         deselectObject();
+        return;
+    }
+
+    // Terrain tool on a hex layer = biome painting (Alt+click clears the tag).
+    if (currentTool === 'terrain' && isHexLayer()) {
+        castFromPointer(event, { renderer, camera, raycaster, mouse });
+        const hit = raycaster.intersectObject(plane)[0];
+        if (!hit) return;
+        const h = worldToHex(hit.point.x, hit.point.z);
+        if (!hexInField(h.q, h.r)) return;
+        socket.emit('update-hex', { q: h.q, r: h.r, biome: event.altKey ? null : currentBiome });
         return;
     }
 
@@ -1102,11 +1189,16 @@ function updateTerrainPanel() {
     const panel = document.getElementById('terrain-panel');
     const show = currentTool === 'terrain' && isTacticalKey();
     panel.classList.toggle('hidden', !show);
+    // On hex layers the same tool paints biomes instead.
+    const biomePanel = document.getElementById('biome-panel');
+    if (biomePanel) biomePanel.classList.toggle('hidden', !(currentTool === 'terrain' && isHexLayer()));
     if (terrain) terrain.setBrush({ visible: false });
-    if (currentTool === 'terrain' && !isTacticalKey()) {
-        console.warn('Terrain editing is only available on tactical/pocket maps (double-click down to one).');
-    }
     updateHintBar();
+}
+function setBiome(key) {
+    currentBiome = key;
+    document.querySelectorAll('#biome-panel .biome-swatch').forEach(b =>
+        b.classList.toggle('active', b.dataset.biome === key));
 }
 function setBrushMode(mode) {
     if (mode !== 'river') cancelRiverDraft();
@@ -1243,7 +1335,7 @@ function updateHintBar() {
             hint = `Terrain · ${mode} — ${verb} · Shift invert · Alt+click sample · [ ] size · 1-0 modes · Ctrl+Z undo · ${cam}`;
         }
     } else if (currentTool === 'terrain') {
-        hint = `Terrain — only on tactical maps: double-click a hex to descend · ${cam}`;
+        hint = `Biomes — LMB paint hex · Alt+click clear · tagged hexes seed new tactical maps · ${cam}`;
     } else if (currentTool === 'move') {
         hint = `Move — LMB select, LMB ground to drop · Del delete · ${cam}`;
     } else if (currentTool === 'ruler') {

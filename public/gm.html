@@ -120,6 +120,20 @@
         <button id="terrain-reset" class="tp-reset">Reset terrain</button>
     </div>
 
+    <!-- --- Biome palette (terrain tool on hex layers: paint hexes) --- -->
+    <div id="biome-panel" class="hidden">
+        <h3>Biomes</h3>
+        <div class="tp-row">
+            <button class="biome-swatch active" data-biome="plains" style="--swatch:#8bc34a" title="Plains">Plains</button>
+            <button class="biome-swatch" data-biome="forest" style="--swatch:#2e7d32" title="Forest">Forest</button>
+            <button class="biome-swatch" data-biome="mountains" style="--swatch:#8d8d93" title="Mountains">Mountains</button>
+            <button class="biome-swatch" data-biome="desert" style="--swatch:#d7b26a" title="Desert">Desert</button>
+            <button class="biome-swatch" data-biome="swamp" style="--swatch:#4e5f3a" title="Swamp">Swamp</button>
+            <button class="biome-swatch" data-biome="coast" style="--swatch:#4aa3c7" title="Coast">Coast</button>
+        </div>
+        <div class="tp-hint">Click a hex to tag it; Alt+click clears. New tactical maps under a tagged hex start with matching terrain (deepest tag wins).</div>
+    </div>
+
     <!-- --- Layer navigation (breadcrumb, top-center) --- -->
     <div id="layer-nav">
         <button id="btn-up" title="Up a level">▲ Up</button>
