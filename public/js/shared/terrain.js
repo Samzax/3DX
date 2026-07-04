@@ -78,7 +78,12 @@ function sharedIndex() {
 export class Terrain {
   constructor() {
     this.chunks = new Map();               // "cx,cz" -> { heights, splat, mesh }
-    this.water = { enabled: false, level: 0 };
+    // Water v2 (docs/water-v2-design.md): authored bodies, physically settled
+    // footprints. Footprints are recomputed from the shared quantized heights,
+    // never synced.
+    this.water = { bodies: [] };
+    this._footprints = new Map();          // body id -> { cells:Set<"cx,cz">, level }
+    this._waterMeshes = new Map();         // body id -> THREE.Mesh
 
     this._dirtyData = new Map();           // "cx,cz" -> { heights: bool, splat: bool } (needs sync)
     this._dirtyMesh = new Set();           // "cx,cz" (needs rebuild)
@@ -125,18 +130,86 @@ export class Terrain {
     this.chunkGroup = new THREE.Group();   // chunk meshes only (raycast target)
     this.chunkGroup.name = 'terrain-chunks';
 
-    const wmat = new THREE.MeshStandardMaterial({
-      color: 0x2f6ea5, transparent: true, opacity: 0.62,
-      metalness: 0.1, roughness: 0.3, depthWrite: false, side: THREE.DoubleSide
+    // One stylized shader for every water mesh: depth tint, animated foam
+    // contact line, sun glints, fresnel. All noise is procedural (no textures).
+    this.waterMaterial = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uTime:      { value: 0 },
+        uShallow:   { value: new THREE.Color(0x66d9d0) },
+        uDeep:      { value: new THREE.Color(0x1a4f8a) },
+        uFoamColor: { value: new THREE.Color(0xf2fbff) },
+        uFoamWidth: { value: 0.35 },
+        uBands:     { value: 0 }    // 0 = smooth; 3-4 = Wind-Waker banding
+      },
+      vertexShader: [
+        'attribute float aDepth;',
+        'varying float vDepth;',
+        'varying vec3 vWorld;',
+        'void main() {',
+        '  vDepth = aDepth;',
+        '  vec4 w = modelMatrix * vec4(position, 1.0);',
+        '  vWorld = w.xyz;',
+        '  gl_Position = projectionMatrix * viewMatrix * w;',
+        '}'
+      ].join('\n'),
+      fragmentShader: [
+        'uniform float uTime;',
+        'uniform vec3 uShallow;',
+        'uniform vec3 uDeep;',
+        'uniform vec3 uFoamColor;',
+        'uniform float uFoamWidth;',
+        'uniform float uBands;',
+        'varying float vDepth;',
+        'varying vec3 vWorld;',
+        'float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
+        'float vnoise(vec2 p) {',
+        '  vec2 i = floor(p), f = fract(p);',
+        '  f = f * f * (3.0 - 2.0 * f);',
+        '  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),',
+        '             mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);',
+        '}',
+        'void main() {',
+        '  float d = max(vDepth, 0.0);',
+        // 1. depth tint (optionally quantized into stylized bands)
+        '  float t = 1.0 - exp(-d * 0.45);',
+        '  if (uBands > 0.5) t = (floor(t * uBands) + 0.5) / uBands;',
+        '  vec3 col = mix(uShallow, uDeep, t);',
+        // 3. surface motion: scrolling noise perturbs a fake normal -> sun glints
+        '  vec2 p1 = vWorld.xz * 0.8 + vec2(uTime * 0.06, uTime * 0.045);',
+        '  vec2 p2 = vWorld.xz * 2.3 - vec2(uTime * 0.11, uTime * 0.08);',
+        '  float n = vnoise(p1) * 0.65 + vnoise(p2) * 0.35;',
+        '  vec3 N = normalize(vec3((n - 0.5) * 0.6, 1.0, (vnoise(p1.yx) - 0.5) * 0.6));',
+        '  float glint = pow(max(dot(N, normalize(vec3(0.35, 0.8, 0.25))), 0.0), 40.0);',
+        // 2. foam contact line where water meets terrain, edge wobbled by noise
+        '  float foamEdge = uFoamWidth * (0.75 + 0.5 * vnoise(vWorld.xz * 1.7 + uTime * 0.25));',
+        '  float foam = 1.0 - smoothstep(foamEdge * 0.6, foamEdge, d);',
+        // 4. fresnel-ish rim: opaque at grazing angles, clear from above
+        '  vec3 V = normalize(cameraPosition - vWorld);',
+        '  float fres = pow(1.0 - max(dot(V, vec3(0.0, 1.0, 0.0)), 0.0), 2.0);',
+        '  float alpha = mix(0.45, 0.85, t) + fres * 0.15;',
+        '  col += glint * 0.35 + fres * 0.08;',
+        '  col = mix(col, uFoamColor, foam * 0.85);',
+        '  alpha = max(alpha, foam * 0.9);',
+        '  gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.95));',
+        '}'
+      ].join('\n')
     });
-    this.waterMesh = new THREE.Mesh(new THREE.BufferGeometry(), wmat);
-    this.waterMesh.visible = false;
-    this.waterMesh.renderOrder = 1;
-    this.waterMesh.name = 'water';
+
+    this.waterGroup = new THREE.Group();
+    this.waterGroup.name = 'water';
+    this.waterGroup.renderOrder = 1;
 
     this.group = new THREE.Group();
     this.group.add(this.chunkGroup);
-    this.group.add(this.waterMesh);
+    this.group.add(this.waterGroup);
+  }
+
+  // Advance the water animation (call once per frame from the render loop).
+  tick(nowSeconds) {
+    this.waterMaterial.uniforms.uTime.value = nowSeconds;
   }
 
   // ===== global lattice access (vertex coords gx,gz; world = g * VSPACE) =====
@@ -345,7 +418,7 @@ export class Terrain {
       this._markChunkDirtyAll(k);
     }
     this._rebuildDirtyMeshes();
-    this._rebuildWater();
+    this.refreshWater();
     return inverse;
   }
 
@@ -432,40 +505,200 @@ export class Terrain {
     }
   }
 
-  // ===== water (interim: global level per map; replaced by water v2) =====
+  // ===== water v2: authored bodies with physically settled footprints =====
+  // (docs/water-v2-design.md) Lakes "pour" at a seed point: a priority-flood
+  // fills exactly the connected basin under the click, clamped to the basin's
+  // spill point and to maxRadius. Deterministic on the shared quantized heights.
 
-  _rebuildWater() {
-    const geo = this.waterMesh.geometry;
-    if (!this.water.enabled) { this.waterMesh.visible = false; return; }
-    const level = this.water.level, pos = [];
-    // Cover each existing chunk's cells whose corners dip below the level.
-    for (const k of this.chunks.keys()) {
+  // Cell height for flood connectivity: max of the cell's 4 corner verts, so
+  // thin ridges block water (conservative — no leaking through corners).
+  _cellFloodHeight(cx, cz) {
+    const gx = cx * 2, gz = cz * 2; // 1-unit cells; lattice is 0.5 u
+    return Math.max(this.getH(gx, gz), this.getH(gx + 2, gz),
+                    this.getH(gx, gz + 2), this.getH(gx + 2, gz + 2));
+  }
+
+  // Pour at world (x,z) up to `level`: returns { cells:Set<"cx,cz">, level }.
+  // The returned level may be lower than requested (basin spill / radius clamp).
+  _computeLakeFootprint(seedX, seedZ, level, maxRadius = 96) {
+    const seedCx = Math.floor(seedX), seedCz = Math.floor(seedZ);
+    const maxCells = 80000; // hard safety cap
+    // Binary min-heap of [floodHeight, cx, cz]
+    const heap = [];
+    const push = (e) => {
+      heap.push(e);
+      let i = heap.length - 1;
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (heap[p][0] <= heap[i][0]) break;
+        [heap[p], heap[i]] = [heap[i], heap[p]]; i = p;
+      }
+    };
+    const pop = () => {
+      const top = heap[0], last = heap.pop();
+      if (heap.length) {
+        heap[0] = last;
+        let i = 0;
+        for (;;) {
+          const l = 2 * i + 1, r = l + 1;
+          let m = i;
+          if (l < heap.length && heap[l][0] < heap[m][0]) m = l;
+          if (r < heap.length && heap[r][0] < heap[m][0]) m = r;
+          if (m === i) break;
+          [heap[m], heap[i]] = [heap[i], heap[m]]; i = m;
+        }
+      }
+      return top;
+    };
+
+    const flood = new Map();   // "cx,cz" -> flood height needed to reach it
+    const seen = new Set();
+    let finalLevel = level;
+    push([this._cellFloodHeight(seedCx, seedCz), seedCx, seedCz]);
+    seen.add(seedCx + ',' + seedCz);
+    let spill = -Infinity;
+    while (heap.length && flood.size < maxCells) {
+      const [h, cx, cz] = pop();
+      spill = Math.max(spill, h);
+      if (spill > level) break; // basin holds the requested level: done
+      if (Math.max(Math.abs(cx - seedCx), Math.abs(cz - seedCz)) >= maxRadius) {
+        // Basin leaks past containment: clamp the level to just under the leak.
+        finalLevel = Math.min(finalLevel, spill - 0.01);
+        break;
+      }
+      flood.set(cx + ',' + cz, spill);
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const nk = (cx + dx) + ',' + (cz + dz);
+        if (seen.has(nk)) continue;
+        seen.add(nk);
+        push([this._cellFloodHeight(cx + dx, cz + dz), cx + dx, cz + dz]);
+      }
+    }
+    const cells = new Set();
+    for (const [k, h] of flood) if (h <= finalLevel) cells.add(k);
+    return { cells, level: finalLevel };
+  }
+
+  _clearWaterMesh(id) {
+    const mesh = this._waterMeshes.get(id);
+    if (mesh) {
+      this.waterGroup.remove(mesh);
+      mesh.geometry.dispose();
+      this._waterMeshes.delete(id);
+    }
+  }
+
+  // Rebuild one lake's surface mesh from its footprint: 1-unit quads at the
+  // water level, with per-vertex aDepth (level - corner height) for the shader.
+  // Terrain depth-clips the quads, so the shoreline follows the ground exactly.
+  _buildLakeMesh(body) {
+    this._clearWaterMesh(body.id);
+    const fp = this._footprints.get(body.id);
+    if (!fp || fp.cells.size === 0) return;
+    const level = fp.level;
+    const pos = [], depth = [];
+    const corner = (cx, cz) => level - this.getH(cx * 2, cz * 2);
+    for (const k of fp.cells) {
       const [cx, cz] = k.split(',').map(Number);
-      const gox = cx * CHUNK_VERTS, goz = cz * CHUNK_VERTS;
-      for (let lz = 0; lz < CHUNK_VERTS; lz += 2) {       // 1 cell = 2 lattice steps
-        for (let lx = 0; lx < CHUNK_VERTS; lx += 2) {
-          const gx = gox + lx, gz = goz + lz;
-          const a = this.getH(gx, gz), b = this.getH(gx + 2, gz);
-          const c2 = this.getH(gx, gz + 2), d = this.getH(gx + 2, gz + 2);
-          if (Math.min(a, b, c2, d) >= level) continue;
-          const x0 = gx * VSPACE, x1 = x0 + 1, z0 = gz * VSPACE, z1 = z0 + 1;
-          pos.push(x0, level, z0, x1, level, z0, x1, level, z1,
-                   x0, level, z0, x1, level, z1, x0, level, z1);
+      const d00 = corner(cx, cz), d10 = corner(cx + 1, cz);
+      const d01 = corner(cx, cz + 1), d11 = corner(cx + 1, cz + 1);
+      pos.push(cx, level, cz,  cx + 1, level, cz,  cx + 1, level, cz + 1,
+               cx, level, cz,  cx + 1, level, cz + 1,  cx, level, cz + 1);
+      depth.push(d00, d10, d11, d00, d11, d01);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depth, 1));
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, this.waterMaterial);
+    mesh.renderOrder = 1;
+    mesh.name = 'water';
+    this._waterMeshes.set(body.id, mesh);
+    this.waterGroup.add(mesh);
+  }
+
+  _recomputeBody(body) {
+    if (body.kind !== 'lake') return; // rivers arrive in W2
+    this._footprints.set(body.id,
+      this._computeLakeFootprint(body.seed.x, body.seed.z, body.level, body.maxRadius || 96));
+    this._buildLakeMesh(body);
+  }
+
+  // Re-settle every body against the current terrain (stroke end, undo, remote
+  // chunk updates). Cheap: a few ms per body, and body counts are small.
+  refreshWater() {
+    const liveIds = new Set(this.water.bodies.map(b => b.id));
+    for (const id of [...this._waterMeshes.keys()]) {
+      if (!liveIds.has(id)) { this._clearWaterMesh(id); this._footprints.delete(id); }
+    }
+    for (const body of this.water.bodies) this._recomputeBody(body);
+  }
+
+  // --- body management (GM tools) ---
+  addLake({ x, z, level, maxRadius = 96 }) {
+    const body = {
+      id: 'w' + Math.random().toString(36).slice(2, 8),
+      kind: 'lake', seed: { x, z }, level, maxRadius
+    };
+    this.water.bodies.push(body);
+    this._recomputeBody(body);
+    return body;
+  }
+  updateLake(id, { level }) {
+    const body = this.water.bodies.find(b => b.id === id);
+    if (!body) return;
+    if (level != null) body.level = level;
+    this._recomputeBody(body);
+  }
+  removeBody(id) {
+    this.water.bodies = this.water.bodies.filter(b => b.id !== id);
+    this._clearWaterMesh(id);
+    this._footprints.delete(id);
+  }
+  // Which lake footprint contains world (x,z)? Used for click-select/delete.
+  findLakeAt(x, z) {
+    const k = Math.floor(x) + ',' + Math.floor(z);
+    for (const body of this.water.bodies) {
+      const fp = this._footprints.get(body.id);
+      if (fp && fp.cells.has(k)) return body;
+    }
+    return null;
+  }
+
+  // --- water sync (bodies only; footprints are always recomputed locally) ---
+  getWaterData() {
+    return { bodies: this.water.bodies.map(b => ({ ...b, seed: { ...b.seed } })) };
+  }
+  setWaterData(data) {
+    if (!data || typeof data !== 'object') return;
+    if (Array.isArray(data.bodies)) {
+      this.water.bodies = data.bodies
+        .filter(b => b && b.kind === 'lake' && b.seed && isFinite(b.level))
+        .map(b => ({ id: String(b.id), kind: 'lake',
+                     seed: { x: +b.seed.x, z: +b.seed.z },
+                     level: +b.level, maxRadius: +b.maxRadius || 96 }));
+    } else if (data.enabled != null) {
+      // Legacy global sheet: convert to one lake seeded at the lowest vertex.
+      this.water.bodies = [];
+      if (data.enabled && this.chunks.size) {
+        let best = null;
+        for (const [k, c] of this.chunks) {
+          const [cx, cz] = k.split(',').map(Number);
+          for (let i = 0; i < c.heights.length; i++) {
+            if (!best || c.heights[i] < best.h) {
+              best = { h: c.heights[i],
+                       x: (cx * CHUNK_VERTS + (i % CHUNK_VERTS)) * VSPACE,
+                       z: (cz * CHUNK_VERTS + ((i / CHUNK_VERTS) | 0)) * VSPACE };
+            }
+          }
+        }
+        if (best && best.h < (Number(data.level) || 0)) {
+          this.addLake({ x: best.x, z: best.z, level: Number(data.level) || 0 });
+          return; // addLake already recomputed
         }
       }
     }
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geo.deleteAttribute('normal');
-    geo.computeVertexNormals();
-    geo.computeBoundingSphere();
-    this.waterMesh.visible = pos.length > 0;
-  }
-  refreshWater() { this._rebuildWater(); }
-
-  setWater({ enabled, level }) {
-    if (enabled != null) this.water.enabled = enabled;
-    if (level != null) this.water.level = level;
-    this._rebuildWater();
+    this.refreshWater();
   }
 
   // Clear everything (map switch or GM reset). Local only; the caller syncs.
@@ -480,8 +713,8 @@ export class Terrain {
     this._dirtyData.clear();
     this._dirtyMesh.clear();
     this._windowCenter = null;
-    this.water = { enabled: false, level: 0 };
-    this._rebuildWater();
+    this.water = { bodies: [] };
+    this.refreshWater();
   }
 
   // ===== serialization / sync =====
@@ -542,7 +775,7 @@ export class Terrain {
     for (let i = 0; i < keys.length; i += batchSize) {
       batches.push(this.payloadForKeys(keys.slice(i, i + batchSize)));
     }
-    if (batches.length > 0) batches[0].water = { ...this.water };
+    if (batches.length > 0) batches[0].water = this.getWaterData();
     return batches;
   }
 
@@ -571,8 +804,8 @@ export class Terrain {
       changed = true; migrated = true;
     }
     this._rebuildDirtyMeshes();
-    if (data.water) this.setWater(data.water);
-    else if (changed) this._rebuildWater();
+    if (data.water) this.setWaterData(data.water);
+    else if (changed) this.refreshWater(); // terrain moved: lakes re-settle
     return { changed, migrated };
   }
 
@@ -613,13 +846,14 @@ export class Terrain {
         }
       }
     }
-    if (data.water) this.water = { enabled: !!data.water.enabled, level: Number(data.water.level) || 0 };
+    // Legacy water ({enabled, level}) is handled by setWaterData's fallback
+    // in applyData, after the resampled chunks exist.
   }
 
   dispose() {
     for (const k of [...this.chunks.keys()]) this._disposeChunkMesh(k);
     this.material.dispose();
-    this.waterMesh.geometry.dispose();
-    this.waterMesh.material.dispose();
+    for (const id of [...this._waterMeshes.keys()]) this._clearWaterMesh(id);
+    this.waterMaterial.dispose();
   }
 }

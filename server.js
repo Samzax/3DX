@@ -455,7 +455,7 @@ io.on('connection', (socket) => {
     if (!t || t.format !== 2) {
       t = map.terrain = {
         format: 2, chunkCells: 32, vertexSpacing: 0.5,
-        water: (t && t.water) ? t.water : { enabled: false, level: 0 },
+        water: (t && t.water) ? t.water : { bodies: [] },
         chunks: {}
       };
     }
@@ -472,10 +472,17 @@ io.on('connection', (socket) => {
       }
     }
     if (data.water && typeof data.water === 'object') {
-      t.water = {
-        enabled: !!data.water.enabled,
-        level: Math.max(-50, Math.min(50, Number(data.water.level) || 0))
-      };
+      if (Array.isArray(data.water.bodies)) {
+        // Water v2: authored bodies (lakes/rivers); footprints are computed
+        // client-side from the terrain, so this stays small and opaque.
+        t.water = { bodies: data.water.bodies.slice(0, 64).filter(b => b && typeof b === 'object') };
+      } else {
+        // Legacy global sheet (old clients); new clients migrate it on load.
+        t.water = {
+          enabled: !!data.water.enabled,
+          level: Math.max(-50, Math.min(50, Number(data.water.level) || 0))
+        };
+      }
     }
     saveMaps();
     socket.to(key).emit('terrain-updated', data);

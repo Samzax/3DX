@@ -141,8 +141,11 @@ function init() {
 
     startRenderLoop({
         renderer, scene, camera, controls,
-        // Streaming window: keep chunk meshes only near the camera target.
-        onTick: () => { if (terrain && terrain.group.visible) terrain.updateWindow(controls.target); }
+        onTick: () => {
+            if (!terrain) return;
+            terrain.tick(performance.now() / 1000);                       // water animation
+            if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming
+        }
     });
     // The map arrives from the server once the player logs in (see initSocket).
 }

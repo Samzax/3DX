@@ -133,5 +133,6 @@
   font-size: 12px; cursor: pointer; transition: background-color 0.15s;
 }
 #terrain-panel .tp-chip:hover { background: var(--btn-bg-hover); }
+#terrain-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin: 4px 0 2px; }
 #terrain-panel .tp-reset { width: 100%; margin-top: 10px; padding: 7px; background: #5d2f2f; color: var(--text); border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; }
 #terrain-panel .tp-reset:hover { background: #733a3a; }
