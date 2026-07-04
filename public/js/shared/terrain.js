@@ -102,6 +102,12 @@ function sharedIndex() {
 export class Terrain {
   constructor() {
     this.chunks = new Map();               // "cx,cz" -> { heights, splat, mesh }
+    // Floating origin (docs/unified-world-design.md §5): game logic uses TRUE
+    // world coordinates everywhere; rendering subtracts worldOrigin so mesh
+    // transforms (and thus GPU matrices) stay near zero even when content sits
+    // hundreds of thousands of units out. Chunk/water geometry is built LOCAL to
+    // its own anchor so vertex buffers never hold large float32 values.
+    this.worldOrigin = { x: 0, z: 0 };
     // Water v2 (docs/water-v2-design.md): authored bodies, physically settled
     // footprints. Footprints are recomputed from the shared quantized heights,
     // never synced.
@@ -441,6 +447,32 @@ export class Terrain {
   // sculpt()/paint() dabs (ramp/applyPatch/applyData flush themselves).
   flushMeshes() { this._rebuildDirtyMeshes(); }
 
+  // Scene-space position of a chunk mesh's local origin (its (gx=cx*CHUNK_VERTS)
+  // corner) = true world corner minus the floating origin.
+  _chunkScenePos(cx, cz) {
+    return {
+      x: cx * CHUNK_VERTS * VSPACE - this.worldOrigin.x,
+      z: cz * CHUNK_VERTS * VSPACE - this.worldOrigin.z
+    };
+  }
+
+  // Rebase the floating origin: shift every live mesh so game-logic world coords
+  // stay unchanged but rendered transforms return near zero. Water/river meshes
+  // carry their anchor in userData so they reposition without a rebuild.
+  setWorldOrigin(x, z) {
+    this.worldOrigin.x = x; this.worldOrigin.z = z;
+    for (const [k, c] of this.chunks) {
+      if (!c.mesh) continue;
+      const [cx, cz] = k.split(',').map(Number);
+      const p = this._chunkScenePos(cx, cz);
+      c.mesh.position.set(p.x, 0, p.z);
+    }
+    for (const obj of this._waterMeshes.values()) {
+      const a = obj.userData.anchor;
+      if (a) obj.position.set(a.x - x, 0, a.z - z);
+    }
+  }
+
   // Hard-set one vertex's material channel (used by seeding, not brushes).
   _paintVertex(gx, gz, mat) {
     const { c, k, cx, cz, lx, lz } = this._chunkForWrite(gx, gz);
@@ -611,6 +643,10 @@ export class Terrain {
     }
     const [cx, cz] = k.split(',').map(Number);
     const gox = cx * CHUNK_VERTS, goz = cz * CHUNK_VERTS;
+    // Geometry is chunk-LOCAL (verts run 0..CHUNK_SIZE); the chunk's world
+    // position lives on the mesh transform, offset by the floating origin.
+    const sp = this._chunkScenePos(cx, cz);
+    c.mesh.position.set(sp.x, 0, sp.z);
     const pos = c.mesh.geometry.attributes.position;
     const nor = c.mesh.geometry.attributes.normal;
     const col = c.mesh.geometry.attributes.color;
@@ -621,7 +657,7 @@ export class Terrain {
         const i = lz * MESH_VERTS + lx;
         const gx = gox + lx, gz = goz + lz;
         const h = this.getH(gx, gz);
-        pos.setXYZ(i, gx * VSPACE, h, gz * VSPACE);
+        pos.setXYZ(i, lx * VSPACE, h, lz * VSPACE);
         // Central-difference normal over the global lattice (seamless).
         const nx = (this.getH(gx - 1, gz) - this.getH(gx + 1, gz)) / (2 * VSPACE);
         const nz = (this.getH(gx, gz - 1) - this.getH(gx, gz + 1)) / (2 * VSPACE);
@@ -752,14 +788,18 @@ export class Terrain {
     const fp = this._footprints.get(body.id);
     if (!fp || fp.cells.size === 0) return;
     const level = fp.level;
+    // Anchor-local geometry (floating-origin safe): cell verts are relative to
+    // the lake's seed cell; the mesh transform carries the world position.
+    const ax = Math.round(body.seed.x), az = Math.round(body.seed.z);
     const pos = [], depth = [];
     const corner = (cx, cz) => level - this.getH(cx * 2, cz * 2);
     for (const k of fp.cells) {
       const [cx, cz] = k.split(',').map(Number);
       const d00 = corner(cx, cz), d10 = corner(cx + 1, cz);
       const d01 = corner(cx, cz + 1), d11 = corner(cx + 1, cz + 1);
-      pos.push(cx, level, cz,  cx + 1, level, cz,  cx + 1, level, cz + 1,
-               cx, level, cz,  cx + 1, level, cz + 1,  cx, level, cz + 1);
+      const x0 = cx - ax, x1 = cx + 1 - ax, z0 = cz - az, z1 = cz + 1 - az;
+      pos.push(x0, level, z0,  x1, level, z0,  x1, level, z1,
+               x0, level, z0,  x1, level, z1,  x0, level, z1);
       depth.push(d00, d10, d11, d00, d11, d01);
     }
     const geo = new THREE.BufferGeometry();
@@ -773,6 +813,8 @@ export class Terrain {
     const mesh = new THREE.Mesh(geo, this.waterMaterial);
     mesh.renderOrder = 1;
     mesh.name = 'water';
+    mesh.position.set(ax - this.worldOrigin.x, 0, az - this.worldOrigin.z);
+    mesh.userData.anchor = { x: ax, z: az };
     this._waterMeshes.set(body.id, mesh);
     this.waterGroup.add(mesh);
   }
@@ -837,6 +879,9 @@ export class Terrain {
     blendToLake(samples.length - 1, -1);
 
     const half = body.width / 2;
+    // Anchor-local geometry (floating-origin safe): verts are relative to the
+    // river's first sample; the group transform carries the world position.
+    const ax = samples[0].x, az = samples[0].z;
     const pos = [], depth = [], flow = [], fspd = [], idx = [];
     const mistBases = [];
     let arc = 0;
@@ -849,10 +894,11 @@ export class Terrain {
       const px = -tz, pz = tx; // path-perpendicular in XZ
       if (i > 0) arc += Math.hypot(s.x - samples[i - 1].x, s.z - samples[i - 1].z);
       const fall = i > 0 && (hs[i - 1] - hs[i]) > 1.2; // steep drop = waterfall
-      if (fall) mistBases.push({ x: s.x, y: hs[i], z: s.z });
+      if (fall) mistBases.push({ x: s.x - ax, y: hs[i], z: s.z - az });
       const y = hs[i] + 0.06;
       const dEdge = fall ? 0.02 : 0.06, dMid = fall ? 0.05 : 0.5; // shallow = foamy
-      pos.push(s.x - px * half, y, s.z - pz * half, s.x, y, s.z, s.x + px * half, y, s.z + pz * half);
+      const lx = s.x - ax, lz = s.z - az;
+      pos.push(lx - px * half, y, lz - pz * half, lx, y, lz, lx + px * half, y, lz + pz * half);
       depth.push(dEdge, dMid, dEdge);
       flow.push(arc, -1, arc, 0, arc, 1);
       fspd.push(body.speed, body.speed, body.speed);
@@ -870,13 +916,15 @@ export class Terrain {
     geo.computeBoundingSphere();
     const group = new THREE.Group();
     group.name = 'water';
+    group.position.set(ax - this.worldOrigin.x, 0, az - this.worldOrigin.z);
+    group.userData.anchor = { x: ax, z: az };
     const ribbon = new THREE.Mesh(geo, this.waterMaterial);
     ribbon.renderOrder = 1;
     group.add(ribbon);
     for (const m of mistBases) {
       const disc = new THREE.Mesh(new THREE.CircleGeometry(half * 1.5, 20), this.mistMaterial);
       disc.rotation.x = -Math.PI / 2;
-      disc.position.set(m.x, m.y + 0.14, m.z);
+      disc.position.set(m.x, m.y + 0.14, m.z); // already anchor-local
       disc.renderOrder = 2;
       group.add(disc);
     }
