@@ -73,6 +73,77 @@ function saveMaps() {
   saveJSON('map_state.json', { maps });
 }
 
+// ===== Unified continuous world (docs/unified-world-design.md) =====
+// All tactical content lives in ONE store (WORLD_KEY) in world coordinates, so
+// adjacent provinces are continuous instead of separate islands. Hex tiers are
+// zoom lenses over this one ground; a tactical join is routed to WORLD_KEY.
+const WORLD_KEY = '@world';                 // reserved; not a valid hex path
+const CHUNK_CELLS = 32;                     // must match client terrain CHUNK_VERTS/2
+// Hex pitch (flat-to-flat, world cells) per tier: Province 1mi=1056, Kingdom 6mi, Continent 60mi.
+const TIER_WIDTH = [63360, 6336, 1056];     // depth 0,1,2 (continent, kingdom, province)
+const SQRT3 = Math.sqrt(3);
+// Pointy-top axial hex center (world cells) for a hex (q,r) at a given tier depth.
+function hexCenterAtTier(depth, q, r) {
+  const R = TIER_WIDTH[depth] / SQRT3;      // circumradius from flat-to-flat width
+  return { x: R * SQRT3 * (q + r / 2), z: R * 1.5 * r };
+}
+// World center (cells) of a tactical province path "world/qc,rc/qk,rk/qp,rp".
+function provinceWorldCenter(key) {
+  const segs = key.split('/');
+  let x = 0, z = 0;
+  for (let d = 1; d < segs.length && d <= 3; d++) {
+    const [q, r] = segs[d].split(',').map(Number);
+    const c = hexCenterAtTier(d - 1, q, r);
+    x += c.x; z += c.z;
+  }
+  return { x, z };
+}
+function isTacticalPath(key) { return /^world(\/-?\d+,-?\d+){3}$/.test(key); }
+
+// One-time migration: fold legacy per-province tactical islands into WORLD_KEY at
+// their composed world position (chunk-aligned), so the tactical layer becomes one
+// continuous world. Each island's chunk keys are relabeled by its chunk offset and
+// its objects shifted by the same amount; the old per-key terrain is then dropped.
+function migrateTacticalToWorld() {
+  const legacy = Object.keys(maps).filter(k => isTacticalPath(k) && maps[k] && maps[k].terrain &&
+    maps[k].terrain.chunks && Object.keys(maps[k].terrain.chunks).length);
+  if (!legacy.length) return;
+  const world = maps[WORLD_KEY] || (maps[WORLD_KEY] = {
+    objects: {}, rulers: {}, meta: { kind: 'world' },
+    terrain: { format: 2, chunkCells: CHUNK_CELLS, vertexSpacing: 0.5, water: { bodies: [] }, chunks: {} }
+  });
+  const wt = world.terrain;
+  for (const key of legacy) {
+    const center = provinceWorldCenter(key);
+    const offX = Math.round(center.x / CHUNK_CELLS), offZ = Math.round(center.z / CHUNK_CELLS);
+    const src = maps[key].terrain;
+    for (const ck of Object.keys(src.chunks || {})) {
+      const [cx, cz] = ck.split(',').map(Number);
+      wt.chunks[(cx + offX) + ',' + (cz + offZ)] = src.chunks[ck];
+    }
+    // Water bodies shift by the world offset (cells).
+    const ox = offX * CHUNK_CELLS, oz = offZ * CHUNK_CELLS;
+    if (src.water && Array.isArray(src.water.bodies)) {
+      for (const b of src.water.bodies) {
+        if (b.kind === 'lake' && b.seed) { b.seed.x += ox; b.seed.z += oz; }
+        if (b.kind === 'river' && Array.isArray(b.points)) b.points.forEach(p => { p.x += ox; p.z += oz; });
+        wt.water.bodies.push(b);
+      }
+    }
+    // Objects move into the world at the offset position.
+    for (const oid of Object.keys(maps[key].objects || {})) {
+      const o = maps[key].objects[oid];
+      if (o.position) { o.position.x += ox; o.position.z += oz; }
+      world.objects[oid] = o;
+    }
+    delete maps[key].terrain;
+    maps[key].objects = {};
+  }
+  saveMaps();
+  console.log(`[MIGRATE] Folded ${legacy.length} tactical island(s) into the unified world (${WORLD_KEY}).`);
+}
+migrateTacticalToWorld();
+
 // One-time migration: the hex ladder gained a layer (Continent 60mi > Kingdom 6mi
 // > Province 1mi > Tactical). Old depth-2 tactical maps (world/q,r/q,r) become
 // Province hex layers, so their content moves to the center sub-hex (.../0,0).
@@ -353,16 +424,35 @@ io.on('connection', (socket) => {
     return biome;
   }
 
-  function sendMapState(key) {
-    const m = getMap(key);
+  // Ensure the unified world store has a terrain scaffold.
+  function ensureWorld() {
+    const w = getMap(WORLD_KEY);
+    if (!w.terrain) w.terrain = { format: 2, chunkCells: CHUNK_CELLS, vertexSpacing: 0.5, water: { bodies: [] }, chunks: {} };
+    if (!w.meta) w.meta = { kind: 'world' };
+    return w;
+  }
+
+  // Send a room's state. For the unified world the emitted `key` is the province
+  // path the client asked for (so its own map-state guard accepts it) while the
+  // payload carries the shared world terrain/objects + where to fly (worldCenter).
+  function sendMapState(roomKey, contextKey) {
+    const m = getMap(roomKey);
+    const ctx = contextKey || roomKey;
+    const extra = {};
+    if (roomKey === WORLD_KEY) {
+      ensureWorld();
+      extra.worldCenter = provinceWorldCenter(ctx);
+      extra.unified = true;
+    }
     socket.emit('map-state', {
-      key,
+      key: ctx,
       objects: Object.values(m.objects),
       rulers: Object.values(m.rulers),
       terrain: m.terrain || null,
       meta: m.meta || null,
       hexes: m.hexes || {},
-      biome: resolveBiome(key)
+      biome: resolveBiome(ctx),
+      ...extra
     });
   }
 
@@ -371,17 +461,21 @@ io.on('connection', (socket) => {
   socket.join(DEFAULT_MAP_KEY);
   sendMapState(DEFAULT_MAP_KEY);
 
-  // Switch this socket to a different map (drill-down navigation)
+  // Switch this socket to a different map. Tactical paths are routed to the one
+  // continuous world (WORLD_KEY) so provinces share terrain; hex tiers and
+  // pockets keep their own rooms.
   socket.on('join-map', (payload) => {
-    const key = (payload && payload.key) ? String(payload.key) : DEFAULT_MAP_KEY;
-    if (socket.currentMapKey && socket.currentMapKey !== key) {
+    const reqKey = (payload && payload.key) ? String(payload.key) : DEFAULT_MAP_KEY;
+    const roomKey = isTacticalPath(reqKey) ? WORLD_KEY : reqKey;
+    if (socket.currentMapKey && socket.currentMapKey !== roomKey) {
       socket.leave(socket.currentMapKey);
     }
-    socket.currentMapKey = key;
-    socket.join(key);
-    getMap(key);
-    console.log(`[MAP] ${socket.username || socket.id} -> ${key}`);
-    sendMapState(key);
+    socket.currentMapKey = roomKey;
+    socket.join(roomKey);
+    getMap(roomKey);
+    if (roomKey === WORLD_KEY) ensureWorld();
+    console.log(`[MAP] ${socket.username || socket.id} -> ${reqKey}${roomKey !== reqKey ? ' [' + roomKey + ']' : ''}`);
+    sendMapState(roomKey, reqKey);
   });
 
   // Tag a hex on the current (hex-layer) map with a biome; null clears the tag.
@@ -494,7 +588,9 @@ io.on('connection', (socket) => {
         chunks: {}
       };
     }
-    if (data.clear) t.chunks = {};
+    // Guard: never let a "reset" wipe the entire shared world (the button was
+    // written for per-province islands). Region-scoped reset is a later brick.
+    if (data.clear && key !== WORLD_KEY) t.chunks = {};
     if (data.chunks && typeof data.chunks === 'object') {
       for (const k of Object.keys(data.chunks)) {
         if (!CHUNK_KEY_RE.test(k)) continue;

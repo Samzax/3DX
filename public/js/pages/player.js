@@ -41,6 +41,7 @@ let rulerSnapSubMenuButtons = {};
 let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
 let boundsRect = null;   // pocket-map boundary rectangle
 let currentMapKey = 'world'; // players travel between maps via portals
+let terrainIsUnified = false; // is the loaded terrain the shared continuous world?
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -623,14 +624,30 @@ function initSocket(username) {
             scene.add(boundsRect);
         }
 
-        // Terrain: rebuild from the map's stored chunks, or flatten + hide if none.
+        // Terrain.
         if (terrain) {
-            terrain.reset();
-            const hasTerrain = !!data.terrain;
-            if (hasTerrain) terrain.applyData(data.terrain);
-            terrain.group.visible = hasTerrain;
-            // The plane stays visible as the implicit flat ground around chunks.
-            styleGroundForTerrain(plane, hasTerrain);
+            if (data.unified) {
+                // One continuous world: load once, then fly between provinces.
+                if (!terrainIsUnified) {
+                    terrain.reset();
+                    if (data.terrain) terrain.applyData(data.terrain);
+                    terrainIsUnified = true;
+                }
+                terrain.group.visible = true;
+                styleGroundForTerrain(plane, true);
+                if (data.worldCenter) {
+                    const c = data.worldCenter;
+                    controls.target.set(c.x, 0, c.z);
+                    camera.position.set(c.x + 20, 30, c.z + 20);
+                }
+            } else {
+                terrainIsUnified = false;
+                terrain.reset();
+                const hasTerrain = !!data.terrain;
+                if (hasTerrain) terrain.applyData(data.terrain);
+                terrain.group.visible = hasTerrain;
+                styleGroundForTerrain(plane, hasTerrain);
+            }
         }
     });
 
