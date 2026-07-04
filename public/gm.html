@@ -91,6 +91,7 @@
             <button class="brush-mode" data-mode="terrace" title="Step heights — strength sets step size (6)">Terrace</button>
             <button class="brush-mode" data-mode="ramp" title="Drag a line to blend a ramp between two heights (7)">Ramp</button>
             <button class="brush-mode" data-mode="paint" title="Paint materials (8)">Paint</button>
+            <button class="brush-mode" data-mode="lake" title="Pour a lake: click fills the basin, drag up/down sets level, Alt+click deletes (9)">Lake</button>
         </div>
         <div class="tp-slider">
             <label>Flatten target <button id="flatten-target" class="tp-chip" title="Alt+click terrain to sample · click to reset">auto</button></label>
@@ -110,11 +111,8 @@
             <label>Strength <span id="brush-strength-val">0.35</span></label>
             <input type="range" id="brush-strength" min="0.02" max="1" step="0.01" value="0.35">
         </div>
-        <div class="tp-label">Water</div>
-        <div class="tp-slider">
-            <label><input type="checkbox" id="water-toggle"> Enabled · level <span id="water-level-val">0.0</span></label>
-            <input type="range" id="water-level" min="-10" max="20" step="0.1" value="0">
-        </div>
+        <div class="tp-label">Water · <span id="water-body-count">0</span> bodies</div>
+        <div class="tp-hint">Lake brush: click pours into the basin, drag up/down sets the level, Alt+click deletes. Water re-settles when you sculpt.</div>
         <button id="terrain-reset" class="tp-reset">Reset terrain</button>
     </div>
 

@@ -28,8 +28,13 @@ let rampPreview = null;
 // Brush cursor tint per mode (paint uses the selected material's color).
 const BRUSH_COLORS = {
     raise: 0x7cdf70, lower: 0xff6b5e, smooth: 0x6ec6ff,
-    flatten: 0xc79bff, noise: 0xffb74d, terrace: 0xffe97a, ramp: 0xff9ff3, paint: 0xffffff
+    flatten: 0xc79bff, noise: 0xffb74d, terrace: 0xffe97a, ramp: 0xff9ff3,
+    paint: 0xffffff, lake: 0x4dc3ff
 };
+
+// Lake gesture: pointerdown pours (or grabs) a lake; vertical drag sets its
+// level live; release commits + syncs. { id, startLevel, startClientY, before }
+let lakeDrag = null;
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
 
@@ -202,6 +207,7 @@ function enterMap(key) {
     isSculpting = false;
     lastDab = null;
     rampStart = null;
+    lakeDrag = null;
     if (rampPreview) rampPreview.visible = false;
     if (terrain) terrain.setBrush({ visible: false });
     updateTerrainPanel();
@@ -501,23 +507,19 @@ function init() {
     const strengthInput = document.getElementById('brush-strength');
     radiusInput.addEventListener('input', e => setBrushRadius(+e.target.value));
     strengthInput.addEventListener('input', e => { terrainBrush.strength = +e.target.value; document.getElementById('brush-strength-val').textContent = (+e.target.value).toFixed(2); });
-    const waterToggle = document.getElementById('water-toggle');
-    const waterLevel = document.getElementById('water-level');
-    waterToggle.addEventListener('change', e => { terrain.setWater({ enabled: e.target.checked }); emitWater(); });
-    waterLevel.addEventListener('input', e => { terrain.setWater({ level: +e.target.value }); document.getElementById('water-level-val').textContent = (+e.target.value).toFixed(1); });
-    waterLevel.addEventListener('change', () => emitWater());
     document.getElementById('terrain-reset').addEventListener('click', () => {
-        if (!confirm('Reset all terrain on this tactical map?')) return;
+        if (!confirm('Reset all terrain and water on this tactical map?')) return;
+        const waterBefore = terrain.getWaterData().bodies;
         terrain.beginStroke();
         terrain.reset();
         const patch = terrain.endStroke();
-        if (patch) {
-            undoStack.push(patch);
-            if (undoStack.length > UNDO_LIMIT) undoStack.shift();
-            redoStack.length = 0;
-        }
-        waterToggle.checked = false; waterLevel.value = 0; document.getElementById('water-level-val').textContent = '0.0';
-        if (socket) socket.emit('update-terrain', { clear: true, water: { ...terrain.water } });
+        // Two undo entries (water first, chunks second): Ctrl+Z restores the
+        // terrain, a second Ctrl+Z restores the water bodies.
+        if (waterBefore.length) undoStack.push({ kind: 'water', before: waterBefore, after: [] });
+        if (patch) undoStack.push({ kind: 'chunks', patch });
+        while (undoStack.length > UNDO_LIMIT) undoStack.shift();
+        redoStack.length = 0;
+        if (socket) socket.emit('update-terrain', { clear: true, water: terrain.getWaterData() });
     });
 
     const flattenBtn = document.getElementById('flatten-target');
@@ -534,8 +536,11 @@ function init() {
 
     startRenderLoop({
         renderer, scene, camera, controls,
-        // Streaming window: keep chunk meshes only near the camera target.
-        onTick: () => { if (terrain && terrain.group.visible) terrain.updateWindow(controls.target); }
+        onTick: () => {
+            if (!terrain) return;
+            terrain.tick(performance.now() / 1000);                       // water animation
+            if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming
+        }
     });
     initSocket();
 }
@@ -553,6 +558,10 @@ function onPointerDown(event) {
     if (terrainActive()) {
         const p = pointerToGround(event);
         if (!p) return;
+        if (terrainBrush.mode === 'lake') {
+            beginLakeGesture(p, event);
+            return;
+        }
         // Alt+click: eyedropper. Samples the height as the flatten target
         // (and the dominant material when painting) instead of stroking.
         if (event.altKey) {
@@ -641,6 +650,12 @@ function onPointerMove(event) {
     // Terrain tool: stroke along the drag (fixed-spacing dabs so intensity doesn't
     // depend on mouse speed), or just move the brush cursor while hovering.
     if (terrainActive()) {
+        // Lake level drag: vertical mouse motion, independent of the ground pick.
+        if (lakeDrag) {
+            const level = lakeDrag.startLevel + (lakeDrag.startClientY - event.clientY) * 0.05;
+            terrain.updateLake(lakeDrag.id, { level });
+            return;
+        }
         const p = pointerToGround(event);
         if (p) {
             if (isSculpting) { strokeTo(p); terrain.flushMeshes(); }
@@ -682,6 +697,14 @@ function onPointerMove(event) {
 function onPointerUp(event) {
     if (event.button !== 0) return;
 
+    // Lake gesture: commit the poured/re-leveled lake.
+    if (lakeDrag) {
+        pushWaterUndo(lakeDrag.before);
+        emitWater();
+        lakeDrag = null;
+        return;
+    }
+
     // Ramp gesture: apply on release.
     if (rampStart) {
         const p = pointerToGround(event);
@@ -709,15 +732,44 @@ function onPointerUp(event) {
 function finishTerrainStroke() {
     const patch = terrain.endStroke();
     if (patch) {
-        undoStack.push(patch);
+        undoStack.push({ kind: 'chunks', patch });
         if (undoStack.length > UNDO_LIMIT) undoStack.shift();
         redoStack.length = 0;
     }
     const payload = terrain.collectDirtyPayload();
     if (payload) {
-        if (payload.heightsChanged) terrain.refreshWater(); // pools settle into the new shape
+        if (payload.heightsChanged) terrain.refreshWater(); // lakes re-settle into the new shape
         if (socket) socket.emit('update-terrain', { chunks: payload.chunks });
     }
+}
+
+// --- Lake gesture (water v2): pour / re-level / delete ---
+function beginLakeGesture(p, event) {
+    const before = terrain.getWaterData().bodies;
+    const existing = terrain.findLakeAt(p.x, p.z);
+    if (event.altKey) {
+        if (existing) {
+            terrain.removeBody(existing.id);
+            pushWaterUndo(before);
+            emitWater();
+        }
+        return;
+    }
+    let id, startLevel;
+    if (existing) {
+        id = existing.id;
+        startLevel = existing.level;
+    } else {
+        const body = terrain.addLake({ x: p.x, z: p.z, level: terrain.sampleHeight(p.x, p.z) + 1 });
+        id = body.id;
+        startLevel = body.level;
+    }
+    lakeDrag = { id, startLevel, startClientY: event.clientY, before };
+}
+function pushWaterUndo(beforeBodies) {
+    undoStack.push({ kind: 'water', before: beforeBodies, after: terrain.getWaterData().bodies });
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack.length = 0;
 }
 
 function onContextMenu(event) {
@@ -731,7 +783,7 @@ function onContextMenu(event) {
     }
 }
 
-const BRUSH_MODE_KEYS = { '1': 'raise', '2': 'lower', '3': 'smooth', '4': 'flatten', '5': 'noise', '6': 'terrace', '7': 'ramp', '8': 'paint' };
+const BRUSH_MODE_KEYS = { '1': 'raise', '2': 'lower', '3': 'smooth', '4': 'flatten', '5': 'noise', '6': 'terrace', '7': 'ramp', '8': 'paint', '9': 'lake' };
 
 function onKeyDown(event) {
     if (event.key === 'Shift') shiftDown = true;
@@ -767,7 +819,10 @@ function onKeyDown(event) {
         }
     }
     if (event.key === "Escape") {
-        if (rampStart) {
+        if (lakeDrag) {
+            terrain.setWaterData({ bodies: lakeDrag.before }); // cancel: restore pre-gesture
+            lakeDrag = null;
+        } else if (rampStart) {
             rampStart = null;
             rampPreview.visible = false;
         } else if (currentTool === 'ruler' && ruler.points.length > 0) {
@@ -985,7 +1040,8 @@ function setBrushRadius(r) {
     terrain.setBrush({ radius: terrainBrush.radius });
 }
 function emitWater() {
-    if (socket) socket.emit('update-terrain', { water: { ...terrain.water } });
+    if (socket) socket.emit('update-terrain', { water: terrain.getWaterData() });
+    syncWaterControls();
 }
 // Pick against the actual terrain chunks on tactical maps (fall back to the flat
 // plane elsewhere) so the brush lands where the cursor visually touches the ground.
@@ -1056,20 +1112,32 @@ function updateRampPreview(p) {
     rampPreview.geometry.setFromPoints(pts);
     rampPreview.visible = true;
 }
-// --- Undo/redo (terrain strokes only; syncs the affected chunks) ---
+// --- Undo/redo (terrain strokes + water body edits; syncs what changed) ---
 function undoTerrain() {
     if (!undoStack.length || !terrain) return;
-    const patch = undoStack.pop();
-    redoStack.push(terrain.applyPatch(patch));      // applyPatch returns the inverse
+    const entry = undoStack.pop();
+    if (entry.kind === 'water') {
+        terrain.setWaterData({ bodies: entry.before });
+        emitWater();
+        redoStack.push(entry); // redo re-applies entry.after
+        return;
+    }
+    redoStack.push({ kind: 'chunks', patch: terrain.applyPatch(entry.patch) }); // inverse
     terrain.collectDirtyPayload();                  // drain; we encode the keys directly
-    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(patch)));
+    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(entry.patch)));
 }
 function redoTerrain() {
     if (!redoStack.length || !terrain) return;
-    const patch = redoStack.pop();
-    undoStack.push(terrain.applyPatch(patch));
+    const entry = redoStack.pop();
+    if (entry.kind === 'water') {
+        terrain.setWaterData({ bodies: entry.after });
+        emitWater();
+        undoStack.push(entry);
+        return;
+    }
+    undoStack.push({ kind: 'chunks', patch: terrain.applyPatch(entry.patch) });
     terrain.collectDirtyPayload();
-    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(patch)));
+    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(entry.patch)));
 }
 // --- Status hint bar: always tell the user what the mouse does right now ---
 function updateHintBar() {
@@ -1079,8 +1147,12 @@ function updateHintBar() {
     let hint;
     if (terrainActive()) {
         const mode = terrainBrush.mode;
-        const verb = mode === 'ramp' ? 'LMB drag ramp line' : mode === 'paint' ? 'LMB paint' : 'LMB sculpt';
-        hint = `Terrain · ${mode} — ${verb} · Shift invert · Alt+click sample · [ ] size · 1-8 modes · Ctrl+Z undo · ${cam}`;
+        if (mode === 'lake') {
+            hint = `Water · lake — LMB pour · drag up/down = level · Alt+click delete · Ctrl+Z undo · ${cam}`;
+        } else {
+            const verb = mode === 'ramp' ? 'LMB drag ramp line' : mode === 'paint' ? 'LMB paint' : 'LMB sculpt';
+            hint = `Terrain · ${mode} — ${verb} · Shift invert · Alt+click sample · [ ] size · 1-9 modes · Ctrl+Z undo · ${cam}`;
+        }
     } else if (currentTool === 'terrain') {
         hint = `Terrain — only on tactical maps: double-click a hex to descend · ${cam}`;
     } else if (currentTool === 'move') {
@@ -1099,14 +1171,11 @@ function groundY(x, z, halfHeight) {
     const base = (terrain && isTacticalKey()) ? terrain.sampleHeight(x, z) : 0;
     return base + halfHeight;
 }
+// Reflect the current water bodies in the panel (count readout).
 function syncWaterControls() {
     if (!terrain) return;
-    const t = document.getElementById('water-toggle');
-    const l = document.getElementById('water-level');
-    const v = document.getElementById('water-level-val');
-    if (t) t.checked = terrain.water.enabled;
-    if (l) l.value = terrain.water.level;
-    if (v) v.textContent = (+terrain.water.level).toFixed(1);
+    const el = document.getElementById('water-body-count');
+    if (el) el.textContent = String(terrain.water.bodies.length);
 }
 
 // --- Move Tool ---
