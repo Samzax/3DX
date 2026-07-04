@@ -339,6 +339,20 @@ io.on('connection', (socket) => {
   // --- Map synchronization (per-map, scoped by Socket.IO rooms) ---
   const DEFAULT_MAP_KEY = 'world';
 
+  // A tactical map inherits its biome from the nearest tagged ancestor hex:
+  // province tag beats kingdom tag beats continent tag.
+  function resolveBiome(key) {
+    const segs = key.split('/');
+    if (segs[0] !== 'world') return null;
+    let biome = null;
+    for (let d = 1; d < segs.length; d++) {
+      const parent = maps[segs.slice(0, d).join('/')];
+      const tag = parent && parent.hexes && parent.hexes[segs[d]];
+      if (tag && tag.biome) biome = tag.biome;
+    }
+    return biome;
+  }
+
   function sendMapState(key) {
     const m = getMap(key);
     socket.emit('map-state', {
@@ -346,7 +360,9 @@ io.on('connection', (socket) => {
       objects: Object.values(m.objects),
       rulers: Object.values(m.rulers),
       terrain: m.terrain || null,
-      meta: m.meta || null
+      meta: m.meta || null,
+      hexes: m.hexes || {},
+      biome: resolveBiome(key)
     });
   }
 
@@ -366,6 +382,25 @@ io.on('connection', (socket) => {
     getMap(key);
     console.log(`[MAP] ${socket.username || socket.id} -> ${key}`);
     sendMapState(key);
+  });
+
+  // Tag a hex on the current (hex-layer) map with a biome; null clears the tag.
+  // Tags color the hex on the GM screen and seed new tactical maps beneath it.
+  const BIOME_KEYS = ['plains', 'forest', 'mountains', 'desert', 'swamp', 'coast'];
+  socket.on('update-hex', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const q = Math.round(Number(payload && payload.q)), r = Math.round(Number(payload && payload.r));
+    if (!isFinite(q) || !isFinite(r) || Math.abs(q) > 64 || Math.abs(r) > 64) return;
+    const biome = payload.biome == null ? null : String(payload.biome);
+    if (biome !== null && !BIOME_KEYS.includes(biome)) return;
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
+    map.hexes = map.hexes || {};
+    const hk = q + ',' + r;
+    if (biome === null) delete map.hexes[hk];
+    else map.hexes[hk] = { biome };
+    saveMaps();
+    io.to(key).emit('hex-updated', { hex: hk, biome });
   });
 
   // Create a pocket map (dungeon/cave/room): its own map key outside the hex tree,

@@ -134,5 +134,27 @@
 }
 #terrain-panel .tp-chip:hover { background: var(--btn-bg-hover); }
 #terrain-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin: 4px 0 2px; }
+
+/* --- Biome palette (hex layers) --- */
+#biome-panel {
+  position: absolute; left: 78px; top: 10px; width: 230px; z-index: 30;
+  background: var(--panel-bg); border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  padding: 12px; color: var(--text);
+}
+#biome-panel.hidden { display: none; }
+#biome-panel h3 { margin: 0 0 10px; font-size: 15px; color: var(--accent-warm); }
+#biome-panel .tp-row { display: flex; flex-wrap: wrap; gap: 5px; }
+#biome-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin-top: 10px; }
+#biome-panel .biome-swatch {
+  flex: 1 1 30%; padding: 6px 4px; font-size: 12px;
+  background: var(--btn-bg); color: var(--text);
+  border: 1px solid var(--panel-border); border-left: 5px solid var(--swatch);
+  border-radius: var(--btn-radius); cursor: pointer;
+  transition: background-color 0.15s;
+}
+#biome-panel .biome-swatch:hover { background: var(--btn-bg-hover); }
+#biome-panel .biome-swatch.active { background: var(--swatch); color: #101014; font-weight: 700; }
+#biome-panel .biome-swatch:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 #terrain-panel .tp-reset { width: 100%; margin-top: 10px; padding: 7px; background: #5d2f2f; color: var(--text); border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; }
 #terrain-panel .tp-reset:hover { background: #733a3a; }
