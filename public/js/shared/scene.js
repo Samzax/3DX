@@ -48,6 +48,10 @@ export function createTabletopScene(container) {
     dirLight.shadow.mapSize.width = 2048;
     dirLight.shadow.mapSize.height = 2048;
     scene.add(dirLight);
+    // The light + its shadow camera follow the view (updateWorldFollow), so
+    // shadows work anywhere on the unbounded world, not just near the origin.
+    dirLight.target.position.set(0, 0, 0);
+    scene.add(dirLight.target);
 
     const plane = new THREE.Mesh(
         new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE),
@@ -73,7 +77,21 @@ export function createTabletopScene(container) {
         renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    return { scene, camera, renderer, controls, plane, grid, raycaster, mouse };
+    return { scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight };
+}
+
+// Make the ground plane, grid, and sun light follow the camera target so the
+// world feels unbounded: the fixed-size plane/grid are recentered (snapped to
+// whole cells so lines stay put) around wherever you're looking, and the light
+// recenters so shadows render everywhere. Call each frame from onTick.
+export function updateWorldFollow({ plane, grid, dirLight }, center) {
+    const sx = Math.round(center.x), sz = Math.round(center.z);
+    if (grid && grid.visible) grid.position.set(sx, grid.position.y, sz);
+    if (plane && plane.visible) plane.position.set(sx, plane.position.y, sz);
+    if (dirLight) {
+        dirLight.position.set(center.x + 10, 20, center.z + 5);
+        dirLight.target.position.set(center.x, 0, center.z);
+    }
 }
 
 export function startRenderLoop({ renderer, scene, camera, controls, onTick }) {

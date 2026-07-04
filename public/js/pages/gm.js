@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, GRID_CELL_SIZE } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -42,7 +42,7 @@ let riverPreview = null; // polyline following the draft + cursor
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
 
-let scene, camera, renderer, controls, plane, grid, raycaster, mouse;
+let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight;
 let ruler;
 let objects = [];
 let selectedObject = null;
@@ -483,7 +483,7 @@ function initSocket() {
 }
 
 function init() {
-    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse } =
+    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight } =
         createTabletopScene(document.getElementById('scene-container')));
 
     // Tactical terrain (heightmap + material paint + water). Hidden off-tactical.
@@ -631,6 +631,7 @@ function init() {
     startRenderLoop({
         renderer, scene, camera, controls,
         onTick: () => {
+            updateWorldFollow({ plane, grid, dirLight }, controls.target); // unbounded ground/shadows
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming
