@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -22,7 +22,7 @@ let activeCharId = null;
 const hpState = {}; // charId -> current HP (mirrors the server, kept in sync)
 const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-let scene, camera, renderer, controls, plane, grid, raycaster, mouse;
+let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight;
 let ruler;
 let objects = [];
 let selectedObject = null;
@@ -45,7 +45,7 @@ let currentMapKey = 'world'; // players travel between maps via portals
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
 function init() {
-    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse } =
+    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight } =
         createTabletopScene(document.getElementById('scene-container')));
 
     // Tactical terrain (GM-authored heightmap + water); hidden until a terrain arrives.
@@ -142,6 +142,7 @@ function init() {
     startRenderLoop({
         renderer, scene, camera, controls,
         onTick: () => {
+            updateWorldFollow({ plane, grid, dirLight }, controls.target); // unbounded ground/shadows
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming
