@@ -29,12 +29,16 @@ let rampPreview = null;
 const BRUSH_COLORS = {
     raise: 0x7cdf70, lower: 0xff6b5e, smooth: 0x6ec6ff,
     flatten: 0xc79bff, noise: 0xffb74d, terrace: 0xffe97a, ramp: 0xff9ff3,
-    paint: 0xffffff, lake: 0x4dc3ff
+    paint: 0xffffff, lake: 0x4dc3ff, river: 0x7ad7ff
 };
 
 // Lake gesture: pointerdown pours (or grabs) a lake; vertical drag sets its
 // level live; release commits + syncs. { id, startLevel, startClientY, before }
 let lakeDrag = null;
+
+// River draft: clicked waypoints awaiting Enter/double-click commit.
+let riverDraft = null;   // { points: [{x,z}] }
+let riverPreview = null; // polyline following the draft + cursor
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
 
@@ -208,6 +212,7 @@ function enterMap(key) {
     lastDab = null;
     rampStart = null;
     lakeDrag = null;
+    cancelRiverDraft();
     if (rampPreview) rampPreview.visible = false;
     if (terrain) terrain.setBrush({ visible: false });
     updateTerrainPanel();
@@ -249,6 +254,11 @@ function updateBreadcrumb() {
     if (up) up.disabled = (depth === 0);
 }
 function onDoubleClick(event) {
+    // Double-click finishes a river draft.
+    if (terrainActive() && terrainBrush.mode === 'river' && riverDraft && riverDraft.points.length >= 2) {
+        commitRiver();
+        return;
+    }
     if (currentTool === 'add' || currentTool === 'move' || currentTool === 'ruler') return;
     castFromPointer(event, { renderer, camera, raycaster, mouse });
 
@@ -419,6 +429,14 @@ function init() {
     rampPreview.visible = false;
     scene.add(rampPreview);
 
+    // River draft preview: waypoints + cursor as a light-blue polyline.
+    riverPreview = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+        new THREE.LineBasicMaterial({ color: 0x7ad7ff, transparent: true, opacity: 0.9 })
+    );
+    riverPreview.visible = false;
+    scene.add(riverPreview);
+
     wasRightDrag = trackRightDrag(renderer.domElement);
 
     ruler = new RulerTool({
@@ -562,6 +580,22 @@ function onPointerDown(event) {
             beginLakeGesture(p, event);
             return;
         }
+        if (terrainBrush.mode === 'river') {
+            if (event.altKey) {
+                const r = terrain.findRiverAt(p.x, p.z);
+                if (r) {
+                    const before = terrain.getWaterData().bodies;
+                    terrain.removeBody(r.id);
+                    pushWaterUndo(before);
+                    emitWater();
+                }
+                return;
+            }
+            if (!riverDraft) riverDraft = { points: [] };
+            riverDraft.points.push({ x: p.x, z: p.z });
+            updateRiverPreview(p);
+            return;
+        }
         // Alt+click: eyedropper. Samples the height as the flatten target
         // (and the dominant material when painting) instead of stroking.
         if (event.altKey) {
@@ -660,6 +694,7 @@ function onPointerMove(event) {
         if (p) {
             if (isSculpting) { strokeTo(p); terrain.flushMeshes(); }
             if (rampStart) updateRampPreview(p);
+            if (riverDraft && riverDraft.points.length) updateRiverPreview(p);
             updateBrushCursor(p);
         }
         if (isSculpting || rampStart) return;
@@ -772,6 +807,51 @@ function pushWaterUndo(beforeBodies) {
     redoStack.length = 0;
 }
 
+// --- River draft (water v2 W2): click waypoints, Enter/double-click commits ---
+function updateRiverPreview(cursor) {
+    if (!riverDraft || !riverDraft.points.length) return;
+    const pts = [...riverDraft.points, cursor].map(p =>
+        new THREE.Vector3(p.x, terrain.sampleHeight(p.x, p.z) + 0.15, p.z));
+    riverPreview.geometry.setFromPoints(pts);
+    riverPreview.visible = true;
+}
+function cancelRiverDraft() {
+    riverDraft = null;
+    if (riverPreview) riverPreview.visible = false;
+}
+function commitRiver() {
+    if (!riverDraft) return;
+    // Drop duplicate clicks (a committing double-click adds two nearby points).
+    const pts = [];
+    for (const p of riverDraft.points) {
+        const last = pts[pts.length - 1];
+        if (!last || Math.hypot(p.x - last.x, p.z - last.z) > 0.6) pts.push(p);
+    }
+    cancelRiverDraft();
+    if (pts.length < 2) return;
+    const width = Math.max(1, Math.min(12, terrainBrush.radius * 0.5));
+    const before = terrain.getWaterData().bodies;
+    // Carve the bed first (normal undoable+synced chunk edits), then drape the river.
+    const carveBox = document.getElementById('river-carve');
+    if (!carveBox || carveBox.checked) {
+        terrain.beginStroke();
+        terrain.carveRiverBed(pts, width / 2 + 0.5, 0.6);
+        terrain.flushMeshes();
+        const patch = terrain.endStroke();
+        if (patch) {
+            undoStack.push({ kind: 'chunks', patch });
+            while (undoStack.length > UNDO_LIMIT) undoStack.shift();
+            redoStack.length = 0;
+        }
+        const payload = terrain.collectDirtyPayload();
+        if (payload && socket) socket.emit('update-terrain', { chunks: payload.chunks });
+    }
+    terrain.addRiver({ points: pts, width, speed: 1 });
+    terrain.refreshWater(); // carve may have re-settled lakes too
+    pushWaterUndo(before);
+    emitWater();
+}
+
 function onContextMenu(event) {
     event.preventDefault();
     if (wasRightDrag && wasRightDrag(event)) return; // right-drag = camera orbit, not a click
@@ -783,7 +863,7 @@ function onContextMenu(event) {
     }
 }
 
-const BRUSH_MODE_KEYS = { '1': 'raise', '2': 'lower', '3': 'smooth', '4': 'flatten', '5': 'noise', '6': 'terrace', '7': 'ramp', '8': 'paint', '9': 'lake' };
+const BRUSH_MODE_KEYS = { '1': 'raise', '2': 'lower', '3': 'smooth', '4': 'flatten', '5': 'noise', '6': 'terrace', '7': 'ramp', '8': 'paint', '9': 'lake', '0': 'river' };
 
 function onKeyDown(event) {
     if (event.key === 'Shift') shiftDown = true;
@@ -818,8 +898,14 @@ function onKeyDown(event) {
             deselectObject();
         }
     }
+    if (event.key === "Enter" && riverDraft && riverDraft.points.length >= 2) {
+        commitRiver();
+        return;
+    }
     if (event.key === "Escape") {
-        if (lakeDrag) {
+        if (riverDraft) {
+            cancelRiverDraft();
+        } else if (lakeDrag) {
             terrain.setWaterData({ bodies: lakeDrag.before }); // cancel: restore pre-gesture
             lakeDrag = null;
         } else if (rampStart) {
@@ -1023,6 +1109,7 @@ function updateTerrainPanel() {
     updateHintBar();
 }
 function setBrushMode(mode) {
+    if (mode !== 'river') cancelRiverDraft();
     terrainBrush.mode = mode;
     document.querySelectorAll('#terrain-panel .brush-mode').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
     updateHintBar();
@@ -1149,9 +1236,11 @@ function updateHintBar() {
         const mode = terrainBrush.mode;
         if (mode === 'lake') {
             hint = `Water · lake — LMB pour · drag up/down = level · Alt+click delete · Ctrl+Z undo · ${cam}`;
+        } else if (mode === 'river') {
+            hint = `Water · river — LMB add waypoint · Enter/double-click finish · Esc cancel · Alt+click delete · ${cam}`;
         } else {
             const verb = mode === 'ramp' ? 'LMB drag ramp line' : mode === 'paint' ? 'LMB paint' : 'LMB sculpt';
-            hint = `Terrain · ${mode} — ${verb} · Shift invert · Alt+click sample · [ ] size · 1-9 modes · Ctrl+Z undo · ${cam}`;
+            hint = `Terrain · ${mode} — ${verb} · Shift invert · Alt+click sample · [ ] size · 1-0 modes · Ctrl+Z undo · ${cam}`;
         }
     } else if (currentTool === 'terrain') {
         hint = `Terrain — only on tactical maps: double-click a hex to descend · ${cam}`;
