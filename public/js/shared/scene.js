@@ -4,16 +4,24 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-export const GRID_SIZE = 1000;
-export const GRID_DIVISIONS = 1000;
+export const GRID_SIZE = 2000;            // ground/grid patch extent (cells)
+export const GRID_DIVISIONS = 2000;       // 1-cell grid squares (GRID_CELL_SIZE = 1)
 export const GRID_CELL_SIZE = GRID_SIZE / GRID_DIVISIONS;
 export const FEET_PER_GRID_CELL = 5;
+// Zoom bounds + fog distances. Fog fades the ground/grid patch into the
+// background before its edge is reached (no hard edge), and maxDistance keeps
+// zoom-out inside the fog / far plane so you can never get stuck in the void.
+const MIN_ZOOM = 3, MAX_ZOOM = 1500;
+const FOG_NEAR = 350, FOG_FAR = 1400;
 
 // Build the standard tabletop scene. The ground plane is named "tabletop" — pointer
 // handlers rely on that name to tell ground clicks from object clicks.
 export function createTabletopScene(container) {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x2d2d2d);
+    // Fog color MUST match the background so distant ground/grid fade seamlessly
+    // into it instead of showing a hard patch edge.
+    scene.fog = new THREE.Fog(0x2d2d2d, FOG_NEAR, FOG_FAR);
 
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
     camera.position.set(20, 30, 20);
@@ -28,6 +36,8 @@ export function createTabletopScene(container) {
     controls.enableDamping = true;
     controls.dampingFactor = 0.1;
     controls.maxPolarAngle = Math.PI / 2.1;
+    controls.minDistance = MIN_ZOOM;   // can't zoom into the ground
+    controls.maxDistance = MAX_ZOOM;   // can't zoom out into the void / get stuck
     controls.target.set(0, 0, 0);
     // Editor-style input split: the left button always belongs to the active tool,
     // the camera lives on the right/middle buttons + wheel, and is never disabled.
