@@ -34,6 +34,13 @@ export const MATERIALS = [
 ];
 const MAT_COLORS = MATERIALS.map(m => new THREE.Color(m.color));
 
+// U3 world-summary (LOD) map colors per generated biome.
+const SUMMARY_COLORS = {
+  plains: 0x6a9b4a, forest: 0x2e5e2a, mountains: 0x8a8a90,
+  desert: 0xcbb26a, coast: 0x9ec9a0, swamp: 0x4e5f3a
+};
+const SUMMARY_SEA = 0x2f6ea5;
+
 // --- base64 <-> typed array (browser btoa/atob; server stores these opaquely) ---
 function u8ToB64(u8) {
   let s = ''; const chunk = 0x8000;
@@ -288,9 +295,17 @@ export class Terrain {
     this.waterGroup.name = 'water';
     this.waterGroup.renderOrder = 1;
 
+    // U3: coarse world-summary (LOD) mesh, shown by the page when zoomed out.
+    this.summaryGroup = new THREE.Group();
+    this.summaryGroup.name = 'summary';
+    this.summaryGroup.visible = false;
+    this.summaryMesh = null;
+    this._sum = null; // last-built {scx,scz,radius,cell}
+
     this.group = new THREE.Group();
     this.group.add(this.chunkGroup);
     this.group.add(this.waterGroup);
+    this.group.add(this.summaryGroup);
   }
 
   // Advance the water animation (call once per frame from the render loop).
@@ -361,6 +376,65 @@ export class Terrain {
       }
     }
   }
+
+  // ===== U3: coarse world summary / LOD (docs/unified-world-design.md) =====
+  // A single low-res mesh sampling the generator over a large radius — zoom out
+  // and see the world's landscape/biomes ("n+1 is a resume of n") instead of
+  // void. The page shows it when the camera is far and hides the detailed chunks.
+  // v1 is generator-based; edited terrain isn't aggregated into the summary yet.
+  _summaryColor(wx, wz, h, out) {
+    if (h < -0.6) { out.set(SUMMARY_SEA); return out; }   // sea in low basins
+    const c = SUMMARY_COLORS[this.genBiomeAt(wx, wz)] || SUMMARY_COLORS.plains;
+    const shade = 0.7 + Math.max(-0.2, Math.min(0.4, h * 0.02)); // fake relief shading
+    out.setRGB(((c >> 16) & 255) / 255 * shade, ((c >> 8) & 255) / 255 * shade, (c & 255) / 255 * shade);
+    return out;
+  }
+
+  // Rebuild the summary mesh centered near (cx,cz) if it moved by a cell step.
+  updateSummary(cx, cz, radius, cell) {
+    const step = cell * 4; // recenter coarsely so we don't rebuild every frame
+    const scx = Math.round(cx / step) * step, scz = Math.round(cz / step) * step;
+    if (this._sum && this._sum.scx === scx && this._sum.scz === scz &&
+        this._sum.radius === radius && this._sum.cell === cell) return;
+    const resize = !this._sum || this._sum.radius !== radius || this._sum.cell !== cell;
+    this._sum = { scx, scz, radius, cell };
+    const n = Math.floor((radius * 2) / cell) + 1;
+    const pos = new Float32Array(n * n * 3), col = new Float32Array(n * n * 3);
+    const tmp = new THREE.Color();
+    for (let j = 0; j < n; j++) {
+      for (let i = 0; i < n; i++) {
+        const wx = scx - radius + i * cell, wz = scz - radius + j * cell;
+        const h = this.genHeightAt(wx, wz);
+        const k = j * n + i;
+        pos[k * 3] = wx; pos[k * 3 + 1] = h; pos[k * 3 + 2] = wz;
+        this._summaryColor(wx, wz, h, tmp);
+        col[k * 3] = tmp.r; col[k * 3 + 1] = tmp.g; col[k * 3 + 2] = tmp.b;
+      }
+    }
+    let geo;
+    if (!this.summaryMesh) {
+      geo = new THREE.BufferGeometry();
+      this.summaryMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true }));
+      this.summaryMesh.name = 'summary';
+      this.summaryGroup.add(this.summaryMesh);
+    } else {
+      geo = this.summaryMesh.geometry;
+    }
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    if (resize || !geo.index) {
+      const idx = new Uint32Array((n - 1) * (n - 1) * 6);
+      let o = 0;
+      for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
+        const a = j * n + i, b = a + 1, d = a + n, e = d + 1;
+        idx[o++] = a; idx[o++] = d; idx[o++] = b; idx[o++] = b; idx[o++] = d; idx[o++] = e;
+      }
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    }
+    geo.computeBoundingSphere();
+  }
+
+  setSummaryVisible(v) { if (this.summaryGroup) this.summaryGroup.visible = v; }
 
   // ===== global lattice access (vertex coords gx,gz; world = g * VSPACE) =====
 
@@ -1316,5 +1390,6 @@ export class Terrain {
     this.material.dispose();
     for (const id of [...this._waterMeshes.keys()]) this._clearWaterMesh(id);
     this.waterMaterial.dispose();
+    if (this.summaryMesh) { this.summaryMesh.geometry.dispose(); this.summaryMesh.material.dispose(); }
   }
 }

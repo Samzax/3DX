@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, GRID_CELL_SIZE } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR, SUMMARY_THRESH, SUMMARY_RADIUS, SUMMARY_CELL, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -624,10 +624,10 @@ function init() {
     startRenderLoop({
         renderer, scene, camera, controls,
         onTick: () => {
-            updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // unbounded ground/shadows
+            updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
-            if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming
+            if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary
         }
     });
     initSocket();
@@ -1345,6 +1345,26 @@ function updateHintBar() {
 function groundY(x, z, halfHeight) {
     const base = (terrain && isTacticalKey()) ? terrain.sampleHeight(x, z) : 0;
     return base + halfHeight;
+}
+
+// LOD switch (U3): up close, stream detailed chunks; zoomed out on the unified
+// world, hide them and show the coarse world-summary map, pushing fog out so it
+// reads to the horizon. Pockets (not unified) always stay detailed.
+function updateTerrainLOD() {
+    const dist = camera.position.distanceTo(controls.target);
+    const summaryMode = terrainIsUnified && dist > SUMMARY_THRESH;
+    terrain.setSummaryVisible(summaryMode);
+    terrain.chunkGroup.visible = !summaryMode;
+    terrain.waterGroup.visible = !summaryMode;
+    if (summaryMode) {
+        terrain.updateSummary(controls.target.x, controls.target.z, SUMMARY_RADIUS, SUMMARY_CELL);
+        scene.fog.near = dist * 0.8;
+        scene.fog.far = dist * 4.5;
+    } else {
+        terrain.updateWindow(controls.target);
+        scene.fog.near = FOG_NEAR;
+        scene.fog.far = FOG_FAR;
+    }
 }
 // Reflect the current water bodies in the panel (count readout).
 function syncWaterControls() {

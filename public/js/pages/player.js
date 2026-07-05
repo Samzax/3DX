@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR, SUMMARY_THRESH, SUMMARY_RADIUS, SUMMARY_CELL } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -143,13 +143,32 @@ function init() {
     startRenderLoop({
         renderer, scene, camera, controls,
         onTick: () => {
-            updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // unbounded ground/shadows
+            updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
-            if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming
+            if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary
         }
     });
     // The map arrives from the server once the player logs in (see initSocket).
+}
+
+// LOD switch (U3): detailed chunks up close, coarse world-summary map when
+// zoomed out on the unified world (pockets stay detailed). Mirrors gm.js.
+function updateTerrainLOD() {
+    const dist = camera.position.distanceTo(controls.target);
+    const summaryMode = terrainIsUnified && dist > SUMMARY_THRESH;
+    terrain.setSummaryVisible(summaryMode);
+    terrain.chunkGroup.visible = !summaryMode;
+    terrain.waterGroup.visible = !summaryMode;
+    if (summaryMode) {
+        terrain.updateSummary(controls.target.x, controls.target.z, SUMMARY_RADIUS, SUMMARY_CELL);
+        scene.fog.near = dist * 0.8;
+        scene.fog.far = dist * 4.5;
+    } else {
+        terrain.updateWindow(controls.target);
+        scene.fog.near = FOG_NEAR;
+        scene.fog.far = FOG_FAR;
+    }
 }
 
 function onPointerDown(event) {
