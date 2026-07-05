@@ -8,11 +8,15 @@ export const GRID_SIZE = 2000;            // ground/grid patch extent (cells)
 export const GRID_DIVISIONS = 2000;       // 1-cell grid squares (GRID_CELL_SIZE = 1)
 export const GRID_CELL_SIZE = GRID_SIZE / GRID_DIVISIONS;
 export const FEET_PER_GRID_CELL = 5;
-// Zoom bounds + fog distances. Fog fades the ground/grid patch into the
-// background before its edge is reached (no hard edge), and maxDistance keeps
-// zoom-out inside the fog / far plane so you can never get stuck in the void.
-const MIN_ZOOM = 3, MAX_ZOOM = 1500;
-const FOG_NEAR = 350, FOG_FAR = 1400;
+// Zoom bounds + default (zoomed-in) fog distances. maxDistance keeps zoom inside
+// the far plane; the page pushes fog out and shows the U3 summary LOD past
+// SUMMARY_THRESH so far zoom-out shows the world map instead of void.
+const MIN_ZOOM = 3, MAX_ZOOM = 6000;
+export const FOG_NEAR = 350, FOG_FAR = 1400;
+// U3 summary LOD tuning (shared by the pages' onTick).
+export const SUMMARY_THRESH = 200;    // camera distance above which the LOD shows
+export const SUMMARY_RADIUS = 14000;  // world units the LOD mesh spans (half)
+export const SUMMARY_CELL = 110;      // LOD sample spacing (coarse)
 
 // Build the standard tabletop scene. The ground plane is named "tabletop" — pointer
 // handlers rely on that name to tell ground clicks from object clicks.
@@ -23,7 +27,7 @@ export function createTabletopScene(container) {
     // into it instead of showing a hard patch edge.
     scene.fog = new THREE.Fog(0x2d2d2d, FOG_NEAR, FOG_FAR);
 
-    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 40000);
     camera.position.set(20, 30, 20);
     camera.lookAt(0, 0, 0);
 
