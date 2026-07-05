@@ -80,30 +80,15 @@ export function createTabletopScene(container) {
     return { scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight };
 }
 
-// Make the ground plane, grid, and sun light follow the camera target so the
-// world feels unbounded. The plane is recentered AND scaled to cover the view at
-// any zoom (so there's no fixed ground edge); the grid recenters but hides once
-// zoomed far enough that its cells are noise; the light recenters so shadows
-// render everywhere. Call each frame from onTick with the camera included.
-// `grid.userData.wanted === false` keeps the grid off regardless of zoom (set by
-// the page for layers that shouldn't show a square grid).
-export function updateWorldFollow({ plane, grid, dirLight, camera }, center) {
+// Recenter the ground plane, grid, and sun light on the camera target each frame
+// so they follow the view. The generated terrain (Terrain.updateWindow) is what
+// actually fills the world with ground; the plane is just a thin backdrop under
+// it. Call each frame from onTick. `grid.userData.wanted === false` keeps the
+// grid off for layers that shouldn't show a square grid.
+export function updateWorldFollow({ plane, grid, dirLight }, center) {
     const sx = Math.round(center.x), sz = Math.round(center.z);
-    const dist = camera
-        ? Math.hypot(camera.position.x - center.x, camera.position.y - center.y, camera.position.z - center.z)
-        : 150;
-    if (plane) {
-        plane.position.set(sx, plane.position.y, sz);
-        // Base quad is GRID_SIZE wide; scale it to span the view (capped by the
-        // camera far plane, which gives the natural "unrender when way out").
-        const cover = Math.max(GRID_SIZE, dist * 4) / GRID_SIZE;
-        plane.scale.set(cover, cover, 1);
-    }
-    if (grid) {
-        const wanted = grid.userData.wanted !== false;
-        grid.visible = wanted && dist < 220;   // cells become sub-pixel noise past this
-        if (grid.visible) grid.position.set(sx, grid.position.y, sz);
-    }
+    if (grid && grid.visible) grid.position.set(sx, grid.position.y, sz);
+    if (plane && plane.visible) plane.position.set(sx, plane.position.y, sz);
     if (dirLight) {
         dirLight.position.set(center.x + 10, 20, center.z + 5);
         dirLight.target.position.set(center.x, 0, center.z);

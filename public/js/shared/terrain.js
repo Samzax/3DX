@@ -108,6 +108,7 @@ export class Terrain {
     // hundreds of thousands of units out. Chunk/water geometry is built LOCAL to
     // its own anchor so vertex buffers never hold large float32 values.
     this.worldOrigin = { x: 0, z: 0 };
+    this.genSeed = 1337;                    // U2: world generation seed (see genHeightAt)
     // Water v2 (docs/water-v2-design.md): authored bodies, physically settled
     // footprints. Footprints are recomputed from the shared quantized heights,
     // never synced.
@@ -298,6 +299,69 @@ export class Terrain {
     this.mistMaterial.uniforms.uTime.value = nowSeconds;
   }
 
+  // ===== U2: implicit generated ground (docs/unified-world-design.md) =====
+  // Untouched world isn't flat void — it's real terrain generated on demand from
+  // continuous world-position noise, so ground exists everywhere and is editable.
+  // All functions are pure/deterministic (same result on every client), so a
+  // generated chunk never needs syncing; only GM edits are stored/synced and they
+  // override the generation.
+
+  // Continuous elevation field 0..1 (broad continents), seam-free by construction.
+  _genElev(wx, wz) { return fbm(this.genSeed, wx * 0.0035, wz * 0.0035, 4); }
+  // Ground height at a world point. One continuous formula (no piecewise cliffs):
+  // a broad elevation base plus hill/detail octaves whose amplitude smoothly
+  // rises in high country, so plains are gentle and mountains are tall.
+  genHeightAt(wx, wz) {
+    const e = this._genElev(wx, wz);
+    const hills = fbm(this.genSeed + 50, wx * 0.02, wz * 0.02, 4) - 0.5;
+    const detail = fbm(this.genSeed + 99, wx * 0.09, wz * 0.09, 3) - 0.5;
+    const m = smooth(Math.max(0, Math.min(1, (e - 0.55) / 0.25))); // 0 plains .. 1 mountains
+    const base = (e - 0.5) * 14;                     // broad lowlands/highlands
+    return base + hills * (1.2 + m * 7.0) + detail * (0.8 + m * 1.6);
+  }
+  // Procedural biome at a world point (elevation + moisture), for material choice.
+  genBiomeAt(wx, wz) {
+    const e = this._genElev(wx, wz);
+    if (e > 0.7) return 'mountains';
+    if (e < 0.4) return 'coast';
+    const mo = fbm(this.genSeed + 200, wx * 0.005, wz * 0.005, 4);
+    if (mo < 0.38) return 'desert';
+    if (mo > 0.62) return 'forest';
+    return 'plains';
+  }
+  // Material channel (0 grass,1 dirt,2 rock,3 sand) for generated ground.
+  genMaterialAt(wx, wz, h) {
+    const b = this.genBiomeAt(wx, wz);
+    const n = fbm(this.genSeed + 300, wx * 0.05, wz * 0.05, 2);
+    if (b === 'mountains') return h > 4 || n > 0.55 ? 2 : (n > 0.35 ? 1 : 0);
+    if (b === 'desert') return 3;
+    if (b === 'coast') return h < 0.3 ? 3 : 0;
+    if (b === 'forest') return n > 0.6 ? 1 : 0;
+    return n > 0.72 ? 1 : 0; // plains
+  }
+
+  // Allocate a chunk filled from the generator (not synced/saved; regenerated on
+  // demand). Marked `generated` so edit/sync paths treat it as disposable.
+  _makeGeneratedChunk(cx, cz) {
+    const c = { heights: new Float32Array(CHUNK_VERTS * CHUNK_VERTS), splat: new Uint8Array(CHUNK_VERTS * CHUNK_VERTS * 4), mesh: null, generated: true };
+    this._fillFromGen(c, cx, cz);
+    return c;
+  }
+  _fillFromGen(c, cx, cz) {
+    const gox = cx * CHUNK_VERTS, goz = cz * CHUNK_VERTS;
+    for (let lz = 0; lz < CHUNK_VERTS; lz++) {
+      for (let lx = 0; lx < CHUNK_VERTS; lx++) {
+        const i = lz * CHUNK_VERTS + lx;
+        const wx = (gox + lx) * VSPACE, wz = (goz + lz) * VSPACE;
+        const h = this.genHeightAt(wx, wz);
+        c.heights[i] = h;
+        const m = this.genMaterialAt(wx, wz, h);
+        c.splat[i * 4] = 0; c.splat[i * 4 + 1] = 0; c.splat[i * 4 + 2] = 0; c.splat[i * 4 + 3] = 0;
+        c.splat[i * 4 + m] = 255;
+      }
+    }
+  }
+
   // ===== global lattice access (vertex coords gx,gz; world = g * VSPACE) =====
 
   _chunkOf(gx, gz) {
@@ -308,27 +372,40 @@ export class Terrain {
   getH(gx, gz) {
     const { cx, cz, lx, lz } = this._chunkOf(gx, gz);
     const c = this.chunks.get(ckey(cx, cz));
-    return c ? c.heights[lz * CHUNK_VERTS + lx] : 0;
+    // Edited/generated chunk in memory, else generate on the fly (U2).
+    if (c) return c.heights[lz * CHUNK_VERTS + lx];
+    return this.genHeightAt(gx * VSPACE, gz * VSPACE);
   }
 
   _getSplat(gx, gz, out) {
     const { cx, cz, lx, lz } = this._chunkOf(gx, gz);
     const c = this.chunks.get(ckey(cx, cz));
-    if (!c) { out[0] = 255; out[1] = 0; out[2] = 0; out[3] = 0; return out; }
-    const i = (lz * CHUNK_VERTS + lx) * 4;
-    out[0] = c.splat[i]; out[1] = c.splat[i + 1]; out[2] = c.splat[i + 2]; out[3] = c.splat[i + 3];
+    if (c) {
+      const i = (lz * CHUNK_VERTS + lx) * 4;
+      out[0] = c.splat[i]; out[1] = c.splat[i + 1]; out[2] = c.splat[i + 2]; out[3] = c.splat[i + 3];
+      return out;
+    }
+    // Generate on the fly (U2).
+    out[0] = 0; out[1] = 0; out[2] = 0; out[3] = 0;
+    out[this.genMaterialAt(gx * VSPACE, gz * VSPACE, this.genHeightAt(gx * VSPACE, gz * VSPACE))] = 255;
     return out;
   }
 
-  // Fetch-or-create the chunk owning (gx,gz), with copy-on-write for undo.
+  // Fetch-or-create the chunk owning (gx,gz) as an EDITED chunk, copy-on-write
+  // for undo. A brand-new chunk is seeded from the generator (so sculpting
+  // untouched ground blends with the terrain that was there); a generated chunk
+  // is promoted to edited (its generated data becomes the edit baseline).
   _chunkForWrite(gx, gz) {
     const { cx, cz, lx, lz } = this._chunkOf(gx, gz);
     const k = ckey(cx, cz);
     let c = this.chunks.get(k);
     if (this._strokePatch && !this._strokePatch.has(k)) {
-      this._strokePatch.set(k, c ? { heights: c.heights.slice(), splat: c.splat.slice() } : null);
+      // A generated chunk had no persisted state before this edit -> patch is null
+      // (undo removes it back to generated).
+      this._strokePatch.set(k, (c && !c.generated) ? { heights: c.heights.slice(), splat: c.splat.slice() } : null);
     }
-    if (!c) { c = newChunk(); this.chunks.set(k, c); }
+    if (!c) { c = this._makeGeneratedChunk(cx, cz); this.chunks.set(k, c); }
+    c.generated = false; // now authored: it will sync and persist
     return { c, k, cx, cz, lx, lz };
   }
 
@@ -606,6 +683,9 @@ export class Terrain {
     }
     this._rebuildDirtyMeshes();
     this.refreshWater();
+    // A deleted chunk may sit inside the window; re-evaluate it so the hole
+    // regenerates as ground instead of staying empty until the camera moves.
+    this._windowCenter = null;
     return inverse;
   }
 
@@ -674,25 +754,47 @@ export class Terrain {
     c.mesh.geometry.computeBoundingSphere();
   }
 
+  // Rebuild dirty meshes that are actually on screen (or would be): rebuild any
+  // chunk that already has a mesh, or a newly-edited chunk inside the window.
+  // Off-window chunks are left for updateWindow to build when panned to — so a
+  // large world doesn't build thousands of meshes at once on load.
   _rebuildDirtyMeshes() {
+    const wc = this._windowCenter, r = this.windowRadius;
     for (const k of this._dirtyMesh) {
-      if (this.chunks.has(k)) this._buildChunkMesh(k);
+      const c = this.chunks.get(k);
+      if (!c) continue;
+      let build = c.mesh != null;
+      if (!build && wc) {
+        const [kx, kz] = k.split(',').map(Number);
+        build = Math.max(Math.abs(kx - wc.cx), Math.abs(kz - wc.cz)) <= r;
+      }
+      if (build) this._buildChunkMesh(k);
     }
     this._dirtyMesh.clear();
   }
 
-  // Streaming window: keep meshes only for chunks near the camera target.
-  // Data always stays in memory (it's small); only GPU meshes come and go.
+  // Streaming window: generate + mesh the chunks around the camera (U2 — ground
+  // exists everywhere), and drop meshes (and disposable generated data) outside
+  // it. Edited chunks keep their data when out of window; only their mesh is freed.
   updateWindow(center) {
     const cx = Math.floor(center.x / CHUNK_SIZE), cz = Math.floor(center.z / CHUNK_SIZE);
     if (this._windowCenter && this._windowCenter.cx === cx && this._windowCenter.cz === cz) return;
     this._windowCenter = { cx, cz };
     const r = this.windowRadius;
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const kx = cx + dx, kz = cz + dz, k = ckey(kx, kz);
+        let c = this.chunks.get(k);
+        if (!c) { c = this._makeGeneratedChunk(kx, kz); this.chunks.set(k, c); }
+        if (!c.mesh) this._buildChunkMesh(k);
+      }
+    }
     for (const [k, c] of this.chunks) {
       const [kx, kz] = k.split(',').map(Number);
-      const dist = Math.max(Math.abs(kx - cx), Math.abs(kz - cz));
-      if (dist <= r && !c.mesh) this._buildChunkMesh(k);
-      else if (dist > r + 1 && c.mesh) this._disposeChunkMesh(k); // +1 hysteresis
+      if (Math.max(Math.abs(kx - cx), Math.abs(kz - cz)) > r + 1) {
+        if (c.mesh) this._disposeChunkMesh(k);
+        if (c.generated) this.chunks.delete(k); // regenerated deterministically on return
+      }
     }
   }
 
@@ -1059,6 +1161,7 @@ export class Terrain {
   reset() {
     if (this._strokePatch) {
       for (const [k, c] of this.chunks) {
+        if (c.generated) continue; // generated ground regenerates; not part of undo
         if (!this._strokePatch.has(k)) this._strokePatch.set(k, { heights: c.heights.slice(), splat: c.splat.slice() });
       }
     }
@@ -1112,19 +1215,20 @@ export class Terrain {
     return { chunks, heightsChanged };
   }
 
-  // Encode specific chunks (after undo/redo); missing chunks encode as null (delete).
+  // Encode specific chunks (after undo/redo); missing OR generated chunks encode
+  // as null (generated ground is never persisted — it regenerates deterministically).
   payloadForKeys(keys) {
     const chunks = {};
     for (const k of keys) {
       const c = this.chunks.get(k);
-      chunks[k] = c ? this._encodeChunk(c, { heights: true, splat: true }) : null;
+      chunks[k] = (c && !c.generated) ? this._encodeChunk(c, { heights: true, splat: true }) : null;
     }
     return { chunks };
   }
 
-  // All chunks, split into batches that stay well under the socket buffer.
+  // All EDITED chunks, split into batches that stay well under the socket buffer.
   fullPayloadBatches(batchSize = 8) {
-    const keys = [...this.chunks.keys()];
+    const keys = [...this.chunks.keys()].filter(k => !this.chunks.get(k).generated);
     const batches = [];
     for (let i = 0; i < keys.length; i += batchSize) {
       batches.push(this.payloadForKeys(keys.slice(i, i + batchSize)));
@@ -1136,7 +1240,7 @@ export class Terrain {
   // Apply a v2 payload or a legacy v1 blob. Returns { changed, migrated }.
   applyData(data) {
     if (!data) return { changed: false, migrated: false };
-    let changed = false, migrated = false;
+    let changed = false, migrated = false, deleted = false;
     if (data.format === 2 || data.chunks) {
       for (const k of Object.keys(data.chunks || {})) {
         if (!/^-?\d+,-?\d+$/.test(k)) continue;
@@ -1144,10 +1248,12 @@ export class Terrain {
         if (v === null) {
           this._disposeChunkMesh(k);
           this.chunks.delete(k);
+          deleted = true;
         } else {
           let c = this.chunks.get(k);
           if (!c) { c = newChunk(); this.chunks.set(k, c); }
           this._decodeInto(c, v);
+          c.generated = false; // authoritative server/GM data overrides generation
         }
         const [cx, cz] = k.split(',').map(Number);
         for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) this._dirtyMesh.add(ckey(cx + dx, cz + dz));
@@ -1158,6 +1264,7 @@ export class Terrain {
       changed = true; migrated = true;
     }
     this._rebuildDirtyMeshes();
+    if (deleted) this._windowCenter = null; // regenerate any deleted-but-in-window holes
     if (data.water) this.setWaterData(data.water);
     else if (changed) this.refreshWater(); // terrain moved: lakes re-settle
     return { changed, migrated };
