@@ -155,7 +155,9 @@ function buildHexGrid() {
     return group;
 }
 function showLayerGrid(key) {
-    if (grid) grid.visible = isTacticalKey(key);    // square grid on tactical + pockets
+    // Square grid on tactical + pockets; updateWorldFollow further hides it when
+    // zoomed far out (grid.userData.wanted is the per-layer intent).
+    if (grid) { grid.userData.wanted = isTacticalKey(key); grid.visible = grid.userData.wanted; }
     if (hexGridGroup) {
         scene.remove(hexGridGroup);
         hexGridGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
@@ -622,7 +624,7 @@ function init() {
     startRenderLoop({
         renderer, scene, camera, controls,
         onTick: () => {
-            updateWorldFollow({ plane, grid, dirLight }, controls.target); // unbounded ground/shadows
+            updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // unbounded ground/shadows
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming

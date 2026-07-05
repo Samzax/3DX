@@ -143,7 +143,7 @@ function init() {
     startRenderLoop({
         renderer, scene, camera, controls,
         onTick: () => {
-            updateWorldFollow({ plane, grid, dirLight }, controls.target); // unbounded ground/shadows
+            updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // unbounded ground/shadows
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) terrain.updateWindow(controls.target); // chunk streaming

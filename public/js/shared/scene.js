@@ -81,13 +81,29 @@ export function createTabletopScene(container) {
 }
 
 // Make the ground plane, grid, and sun light follow the camera target so the
-// world feels unbounded: the fixed-size plane/grid are recentered (snapped to
-// whole cells so lines stay put) around wherever you're looking, and the light
-// recenters so shadows render everywhere. Call each frame from onTick.
-export function updateWorldFollow({ plane, grid, dirLight }, center) {
+// world feels unbounded. The plane is recentered AND scaled to cover the view at
+// any zoom (so there's no fixed ground edge); the grid recenters but hides once
+// zoomed far enough that its cells are noise; the light recenters so shadows
+// render everywhere. Call each frame from onTick with the camera included.
+// `grid.userData.wanted === false` keeps the grid off regardless of zoom (set by
+// the page for layers that shouldn't show a square grid).
+export function updateWorldFollow({ plane, grid, dirLight, camera }, center) {
     const sx = Math.round(center.x), sz = Math.round(center.z);
-    if (grid && grid.visible) grid.position.set(sx, grid.position.y, sz);
-    if (plane && plane.visible) plane.position.set(sx, plane.position.y, sz);
+    const dist = camera
+        ? Math.hypot(camera.position.x - center.x, camera.position.y - center.y, camera.position.z - center.z)
+        : 150;
+    if (plane) {
+        plane.position.set(sx, plane.position.y, sz);
+        // Base quad is GRID_SIZE wide; scale it to span the view (capped by the
+        // camera far plane, which gives the natural "unrender when way out").
+        const cover = Math.max(GRID_SIZE, dist * 4) / GRID_SIZE;
+        plane.scale.set(cover, cover, 1);
+    }
+    if (grid) {
+        const wanted = grid.userData.wanted !== false;
+        grid.visible = wanted && dist < 220;   // cells become sub-pixel noise past this
+        if (grid.visible) grid.position.set(sx, grid.position.y, sz);
+    }
     if (dirLight) {
         dirLight.position.set(center.x + 10, 20, center.z + 5);
         dirLight.target.position.set(center.x, 0, center.z);
