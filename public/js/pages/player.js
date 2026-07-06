@@ -156,6 +156,7 @@ function init() {
 // zoomed out on the unified world (pockets stay detailed). Mirrors gm.js.
 function updateTerrainLOD() {
     const dist = camera.position.distanceTo(controls.target);
+    terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
     const summaryMode = terrainIsUnified && dist > SUMMARY_THRESH;
     terrain.setSummaryVisible(summaryMode);
     terrain.chunkGroup.visible = !summaryMode;
