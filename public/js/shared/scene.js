@@ -76,10 +76,14 @@ export function createTabletopScene(container) {
     plane.name = "tabletop";
     scene.add(plane);
 
+    // Kept for API compat but hidden: the grid is now drawn in the terrain
+    // shader (Terrain material) so it drapes on the 3D surface instead of being
+    // a flat sheet that moirés and slices through hills.
     const grid = new THREE.GridHelper(GRID_SIZE, GRID_DIVISIONS, 0x888888, 0x888888);
     grid.material.opacity = 0.5;
     grid.material.transparent = true;
     grid.position.y = 0.01;
+    grid.visible = false;
     scene.add(grid);
 
     const raycaster = new THREE.Raycaster();
