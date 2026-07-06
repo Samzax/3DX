@@ -300,7 +300,8 @@ export class Terrain {
     this.summaryGroup.name = 'summary';
     this.summaryGroup.visible = false;
     this.summaryMesh = null;
-    this._sum = null; // last-built {scx,scz,radius,cell}
+    this._sum = null;        // last-built {scx,scz,radius,cell}
+    this._sumDirty = false;  // an edit changed terrain -> summary needs a rebuild
 
     this.group = new THREE.Group();
     this.group.add(this.chunkGroup);
@@ -382,32 +383,47 @@ export class Terrain {
   // and see the world's landscape/biomes ("n+1 is a resume of n") instead of
   // void. The page shows it when the camera is far and hides the detailed chunks.
   // v1 is generator-based; edited terrain isn't aggregated into the summary yet.
-  _summaryColor(wx, wz, h, out) {
-    if (h < -0.6) { out.set(SUMMARY_SEA); return out; }   // sea in low basins
-    const c = SUMMARY_COLORS[this.genBiomeAt(wx, wz)] || SUMMARY_COLORS.plains;
+  // Sample the summary at a world point: height + color, using EDITED terrain
+  // where it exists (edited chunks stay in memory even off-window) and the
+  // generator elsewhere — so the map is a true resume of what's actually built.
+  _summarySample(wx, wz, out) {
+    const gx = Math.round(wx / VSPACE), gz = Math.round(wz / VSPACE);
+    const { cx, cz, lx, lz } = this._chunkOf(gx, gz);
+    const c = this.chunks.get(ckey(cx, cz));
+    const idx = lz * CHUNK_VERTS + lx;
+    const h = c ? c.heights[idx] : this.genHeightAt(wx, wz);
+    if (h < -0.6) { out.set(SUMMARY_SEA); return h; } // sea in low basins
+    let hex;
+    if (c && !c.generated) {                          // edited: dominant painted material
+      const si = idx * 4; let best = 0;
+      for (let m = 1; m < 4; m++) if (c.splat[si + m] > c.splat[si + best]) best = m;
+      hex = MATERIALS[best].color;
+    } else {                                          // generated: biome map color
+      hex = SUMMARY_COLORS[this.genBiomeAt(wx, wz)] || SUMMARY_COLORS.plains;
+    }
     const shade = 0.7 + Math.max(-0.2, Math.min(0.4, h * 0.02)); // fake relief shading
-    out.setRGB(((c >> 16) & 255) / 255 * shade, ((c >> 8) & 255) / 255 * shade, (c & 255) / 255 * shade);
-    return out;
+    out.setRGB(((hex >> 16) & 255) / 255 * shade, ((hex >> 8) & 255) / 255 * shade, (hex & 255) / 255 * shade);
+    return h;
   }
 
-  // Rebuild the summary mesh centered near (cx,cz) if it moved by a cell step.
+  // Rebuild the summary mesh when it recenters by a cell step OR an edit dirtied it.
   updateSummary(cx, cz, radius, cell) {
     const step = cell * 4; // recenter coarsely so we don't rebuild every frame
     const scx = Math.round(cx / step) * step, scz = Math.round(cz / step) * step;
-    if (this._sum && this._sum.scx === scx && this._sum.scz === scz &&
+    if (!this._sumDirty && this._sum && this._sum.scx === scx && this._sum.scz === scz &&
         this._sum.radius === radius && this._sum.cell === cell) return;
     const resize = !this._sum || this._sum.radius !== radius || this._sum.cell !== cell;
     this._sum = { scx, scz, radius, cell };
+    this._sumDirty = false;
     const n = Math.floor((radius * 2) / cell) + 1;
     const pos = new Float32Array(n * n * 3), col = new Float32Array(n * n * 3);
     const tmp = new THREE.Color();
     for (let j = 0; j < n; j++) {
       for (let i = 0; i < n; i++) {
         const wx = scx - radius + i * cell, wz = scz - radius + j * cell;
-        const h = this.genHeightAt(wx, wz);
         const k = j * n + i;
+        const h = this._summarySample(wx, wz, tmp);
         pos[k * 3] = wx; pos[k * 3 + 1] = h; pos[k * 3 + 2] = wz;
-        this._summaryColor(wx, wz, h, tmp);
         col[k * 3] = tmp.r; col[k * 3 + 1] = tmp.g; col[k * 3 + 2] = tmp.b;
       }
     }
@@ -488,6 +504,7 @@ export class Terrain {
     if (!d) { d = { heights: false, splat: false }; this._dirtyData.set(k, d); }
     d[layer] = true;
     this._dirtyMesh.add(k);
+    this._sumDirty = true; // this edit should show in the zoomed-out summary
     // A border vertex is read by neighbor meshes (position apron at low edges,
     // normals at both edges) — mark them for rebuild too.
     if (lx === 0) this._dirtyMesh.add(ckey(cx - 1, cz));
@@ -1244,6 +1261,7 @@ export class Terrain {
     this._dirtyData.clear();
     this._dirtyMesh.clear();
     this._windowCenter = null;
+    this._sumDirty = true; // rebuild the summary for the new map on next zoom-out
     this.water = { bodies: [] };
     this.refreshWater();
   }
