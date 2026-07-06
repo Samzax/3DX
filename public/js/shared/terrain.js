@@ -163,14 +163,14 @@ export class Terrain {
           // Grid on the surface (world XZ). Cell size steps through powers of 5
           // (1u=5ft, then 5u, 25u...) as you zoom out so line density on screen
           // stays constant — no moiré — and each line is anti-aliased via fwidth.
-          'if (uGridOn > 0.5) {',
+          'if (uGridOn > 0.001) {',                       // uGridOn is a 0..1 zoom fade
           '  vec2 gc = vBrushWorld.xz;',
           '  float lw = max(fwidth(gc.x), fwidth(gc.y));',
           '  float cell = pow(5.0, max(0.0, floor(log(lw * 50.0) / log(5.0))));',
           '  vec2 cc = gc / cell;',
           '  vec2 gr = abs(fract(cc - 0.5) - 0.5) / fwidth(cc);',
           '  float ln = 1.0 - min(min(gr.x, gr.y), 1.0);',
-          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, uGridColor, ln * 0.35);',
+          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, uGridColor, ln * 0.35 * uGridOn);',
           '}',
           'if (uBrushVisible > 0.5) {',
           '  float d = distance(vBrushWorld.xz, uBrushPos);',
@@ -568,6 +568,10 @@ export class Terrain {
     if (color != null) u.uBrushColor.value.set(color);
     if (visible != null) u.uBrushVisible.value = visible ? 1 : 0;
   }
+
+  // Grid opacity fade (0..1): the page drives this by camera distance so the
+  // tactical grid is crisp up close and gone when surveying the world.
+  setGridFade(v) { this._brushUniforms.uGridOn.value = Math.max(0, Math.min(1, v)); }
 
   // ===== editing (world-space coords; chunks auto-created as touched) =====
 

@@ -1351,6 +1351,9 @@ function groundY(x, z, halfHeight) {
 // reads to the horizon. Pockets (not unified) always stay detailed.
 function updateTerrainLOD() {
     const dist = camera.position.distanceTo(controls.target);
+    // Grid is a close-up tactical tool: full only when near enough to place
+    // tokens, gone by the time you're surveying (the default landing view).
+    terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
     const summaryMode = terrainIsUnified && dist > SUMMARY_THRESH;
     terrain.setSummaryVisible(summaryMode);
     terrain.chunkGroup.visible = !summaryMode;
