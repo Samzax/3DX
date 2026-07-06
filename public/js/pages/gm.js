@@ -155,9 +155,8 @@ function buildHexGrid() {
     return group;
 }
 function showLayerGrid(key) {
-    // Square grid on tactical + pockets; updateWorldFollow further hides it when
-    // zoomed far out (grid.userData.wanted is the per-layer intent).
-    if (grid) { grid.userData.wanted = isTacticalKey(key); grid.visible = grid.userData.wanted; }
+    // The square grid is drawn in the terrain shader now; keep the old mesh off.
+    if (grid) grid.visible = false;
     if (hexGridGroup) {
         scene.remove(hexGridGroup);
         hexGridGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });

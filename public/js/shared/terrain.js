@@ -129,14 +129,19 @@ export class Terrain {
     this._windowCenter = null;             // last streaming-window center chunk
     this.windowRadius = 5;                 // chunks kept meshed around the camera target
 
-    // One material shared by every chunk mesh; carries the shader brush cursor.
+    // One material shared by every chunk mesh; carries the shader brush cursor
+    // AND the grid, both drawn on the terrain surface so they drape over 3D
+    // relief (a flat GridHelper couldn't).
     this._brushUniforms = {
       uBrushPos:     { value: new THREE.Vector2(0, 0) },
       uBrushRadius:  { value: 6 },
       uBrushColor:   { value: new THREE.Color(0xffdd55) },
-      uBrushVisible: { value: 0 }
+      uBrushVisible: { value: 0 },
+      uGridOn:       { value: 1 },
+      uGridColor:    { value: new THREE.Color(0x1c1c1c) }
     };
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    this.material.extensions = { derivatives: true }; // fwidth() for the AA grid (WebGL1 safety)
     this.material.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, this._brushUniforms);
       shader.vertexShader = shader.vertexShader
@@ -150,9 +155,23 @@ export class Terrain {
           'uniform vec2 uBrushPos;',
           'uniform float uBrushRadius;',
           'uniform vec3 uBrushColor;',
-          'uniform float uBrushVisible;'
+          'uniform float uBrushVisible;',
+          'uniform float uGridOn;',
+          'uniform vec3 uGridColor;'
         ].join('\n'))
         .replace('#include <dithering_fragment>', [
+          // Grid on the surface (world XZ). Cell size steps through powers of 5
+          // (1u=5ft, then 5u, 25u...) as you zoom out so line density on screen
+          // stays constant — no moiré — and each line is anti-aliased via fwidth.
+          'if (uGridOn > 0.5) {',
+          '  vec2 gc = vBrushWorld.xz;',
+          '  float lw = max(fwidth(gc.x), fwidth(gc.y));',
+          '  float cell = pow(5.0, max(0.0, floor(log(lw * 50.0) / log(5.0))));',
+          '  vec2 cc = gc / cell;',
+          '  vec2 gr = abs(fract(cc - 0.5) - 0.5) / fwidth(cc);',
+          '  float ln = 1.0 - min(min(gr.x, gr.y), 1.0);',
+          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, uGridColor, ln * 0.35);',
+          '}',
           'if (uBrushVisible > 0.5) {',
           '  float d = distance(vBrushWorld.xz, uBrushPos);',
           '  float edgeW = max(uBrushRadius * 0.05, 0.06);',
