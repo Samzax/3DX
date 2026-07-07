@@ -13,10 +13,6 @@ export const FEET_PER_GRID_CELL = 5;
 // SUMMARY_THRESH so far zoom-out shows the world map instead of void.
 const MIN_ZOOM = 3, MAX_ZOOM = 6000;
 export const FOG_NEAR = 350, FOG_FAR = 1400;
-// U3 summary LOD tuning (shared by the pages' onTick).
-export const SUMMARY_THRESH = 200;    // camera distance above which the LOD shows
-export const SUMMARY_RADIUS = 14000;  // world units the LOD mesh spans (half)
-export const SUMMARY_CELL = 110;      // LOD sample spacing (coarse)
 
 // Build the standard tabletop scene. The ground plane is named "tabletop" — pointer
 // handlers rely on that name to tell ground clicks from object clicks.
@@ -51,8 +47,10 @@ export function createTabletopScene(container) {
         RIGHT: THREE.MOUSE.ROTATE
     };
 
-    scene.add(new THREE.AmbientLight(0xaaaaaa, 1.5));
-    const dirLight = new THREE.DirectionalLight(0xffffff, 3);
+    // Keep total illumination ~1.0: over-lighting saturates colors toward
+    // white/yellow (dark green ground was rendering as cream).
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const dirLight = new THREE.DirectionalLight(0xfff2dd, 0.85);
     dirLight.position.set(10, 20, 5);
     dirLight.castShadow = true;
     dirLight.shadow.camera.top = 500;
@@ -61,6 +59,11 @@ export function createTabletopScene(container) {
     dirLight.shadow.camera.right = 500;
     dirLight.shadow.mapSize.width = 2048;
     dirLight.shadow.mapSize.height = 2048;
+    // Bias against self-shadow acne (contour-band artifacts on rolling terrain:
+    // the shadow map texel is ~0.5u over a +-500u camera, so unbiased depth
+    // comparisons stripe every slope).
+    dirLight.shadow.bias = -0.0008;
+    dirLight.shadow.normalBias = 1.5;
     scene.add(dirLight);
     // The light + its shadow camera follow the view (updateWorldFollow), so
     // shadows work anywhere on the unbounded world, not just near the origin.
@@ -106,7 +109,9 @@ export function createTabletopScene(container) {
 export function updateWorldFollow({ plane, grid, dirLight }, center) {
     const sx = Math.round(center.x), sz = Math.round(center.z);
     if (grid && grid.visible) grid.position.set(sx, grid.position.y, sz);
-    if (plane && plane.visible) plane.position.set(sx, plane.position.y, sz);
+    // Move the plane even while invisible: it stays the raycast anchor for
+    // ground picks when the LOD rings are the visible ground.
+    if (plane) plane.position.set(sx, plane.position.y, sz);
     if (dirLight) {
         dirLight.position.set(center.x + 10, 20, center.z + 5);
         dirLight.target.position.set(center.x, 0, center.z);

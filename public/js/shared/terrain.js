@@ -314,18 +314,36 @@ export class Terrain {
     this.waterGroup.name = 'water';
     this.waterGroup.renderOrder = 1;
 
-    // U3: coarse world-summary (LOD) mesh, shown by the page when zoomed out.
-    this.summaryGroup = new THREE.Group();
-    this.summaryGroup.name = 'summary';
-    this.summaryGroup.visible = false;
-    this.summaryMesh = null;
-    this._sum = null;        // last-built {scx,scz,radius,cell}
-    this._sumDirty = false;  // an edit changed terrain -> summary needs a rebuild
+    // U3 rework: nested 3D LOD rings — lit low-res terrain from the same
+    // generator, always rendered UNDER the fine chunks, coarsening outward.
+    // Zooming out just reveals more world in 3D; no summary blob, no mode pop.
+    // Constant vertex density per ring (clipmap-style): n = (half*2/cell)+1.
+    this.lodGroup = new THREE.Group();
+    this.lodGroup.name = 'lod-rings';
+    // One material per ring with increasing polygonOffset: where levels overlap
+    // at (nearly) the same height, the finer level reliably wins in the depth
+    // buffer — no z-fight striping, no geometric y-offset steps.
+    // holeCells: quads skipped around the center where the next-finer ring
+    // covers (clipmap hole) — coarser rings can't poke through finer ones.
+    this.lodRings = [
+      { cell: 4,  half: 384,  lod: 1, holeCells: 24, mesh: null, center: null }, // hole under the fine-chunk window
+      { cell: 16, half: 1536, lod: 2, holeCells: 18, mesh: null, center: null },
+      { cell: 64, half: 6144, lod: 3, holeCells: 18, mesh: null, center: null }
+    ];
+    for (const ring of this.lodRings) {
+      ring.material = new THREE.MeshLambertMaterial({
+        vertexColors: true,
+        polygonOffset: true,
+        polygonOffsetFactor: ring.lod * 2,
+        polygonOffsetUnits: ring.lod * 2
+      });
+    }
+    this._lodDirty = false;  // an edit changed terrain -> rings resample it
 
     this.group = new THREE.Group();
+    this.group.add(this.lodGroup);
     this.group.add(this.chunkGroup);
     this.group.add(this.waterGroup);
-    this.group.add(this.summaryGroup);
   }
 
   // Advance the water animation (call once per frame from the render loop).
@@ -346,13 +364,19 @@ export class Terrain {
   // Ground height at a world point. One continuous formula (no piecewise cliffs):
   // a broad elevation base plus hill/detail octaves whose amplitude smoothly
   // rises in high country, so plains are gentle and mountains are tall.
-  genHeightAt(wx, wz) {
+  // `lod` drops the high-frequency octaves — a spectral downsample for the far
+  // LOD rings (coarse sampling of full-detail noise would alias; this doesn't).
+  genHeightAt(wx, wz, lod = 0) {
     const e = this._genElev(wx, wz);
-    const hills = fbm(this.genSeed + 50, wx * 0.02, wz * 0.02, 4) - 0.5;
-    const detail = fbm(this.genSeed + 99, wx * 0.09, wz * 0.09, 3) - 0.5;
+    const hills = fbm(this.genSeed + 50, wx * 0.02, wz * 0.02, Math.max(1, 4 - lod)) - 0.5;
     const m = smooth(Math.max(0, Math.min(1, (e - 0.55) / 0.25))); // 0 plains .. 1 mountains
     const base = (e - 0.5) * 14;                     // broad lowlands/highlands
-    return base + hills * (1.2 + m * 7.0) + detail * (0.8 + m * 1.6);
+    let h = base + hills * (1.2 + m * 7.0);
+    if (lod < 2) {
+      const detail = fbm(this.genSeed + 99, wx * 0.09, wz * 0.09, Math.max(1, 3 - lod)) - 0.5;
+      h += detail * (0.8 + m * 1.6);
+    }
+    return h;
   }
   // Procedural biome at a world point (elevation + moisture), for material choice.
   genBiomeAt(wx, wz) {
@@ -397,79 +421,93 @@ export class Terrain {
     }
   }
 
-  // ===== U3: coarse world summary / LOD (docs/unified-world-design.md) =====
-  // A single low-res mesh sampling the generator over a large radius — zoom out
-  // and see the world's landscape/biomes ("n+1 is a resume of n") instead of
-  // void. The page shows it when the camera is far and hides the detailed chunks.
-  // v1 is generator-based; edited terrain isn't aggregated into the summary yet.
-  // Sample the summary at a world point: height + color, using EDITED terrain
-  // where it exists (edited chunks stay in memory even off-window) and the
-  // generator elsewhere — so the map is a true resume of what's actually built.
-  _summarySample(wx, wz, out) {
+  // ===== U3 rework: nested 3D LOD rings (docs/unified-world-design.md) =====
+  // Lit, low-res 3D terrain from the same world data, always under the fine
+  // chunks, coarsening outward — "n+1 is a resume of n" as actual 3D relief.
+
+  // Height + color for a LOD vertex: edited chunks sample the real data (so
+  // your sculpts/paints show at distance); elsewhere the generator at reduced
+  // octaves (spectral downsample, no aliasing). Sea tints blue in low basins.
+  _lodSample(wx, wz, lod, out) {
     const gx = Math.round(wx / VSPACE), gz = Math.round(wz / VSPACE);
     const { cx, cz, lx, lz } = this._chunkOf(gx, gz);
     const c = this.chunks.get(ckey(cx, cz));
     const idx = lz * CHUNK_VERTS + lx;
-    const h = c ? c.heights[idx] : this.genHeightAt(wx, wz);
-    if (h < -0.6) { out.set(SUMMARY_SEA); return h; } // sea in low basins
+    const edited = c && !c.generated;
+    const h = edited ? c.heights[idx] : this.genHeightAt(wx, wz, lod);
+    if (h < -0.6) { out.set(SUMMARY_SEA); return h; }
     let hex;
-    if (c && !c.generated) {                          // edited: dominant painted material
+    if (edited) {                                     // dominant painted material
       const si = idx * 4; let best = 0;
       for (let m = 1; m < 4; m++) if (c.splat[si + m] > c.splat[si + best]) best = m;
       hex = MATERIALS[best].color;
-    } else {                                          // generated: biome map color
-      hex = SUMMARY_COLORS[this.genBiomeAt(wx, wz)] || SUMMARY_COLORS.plains;
+    } else {
+      // Same material function the fine chunks use, so ring and chunk colors
+      // match and the window boundary doesn't show as a palette seam.
+      hex = MATERIALS[this.genMaterialAt(wx, wz, h)].color;
     }
-    const shade = 0.7 + Math.max(-0.2, Math.min(0.4, h * 0.02)); // fake relief shading
-    out.setRGB(((hex >> 16) & 255) / 255 * shade, ((hex >> 8) & 255) / 255 * shade, (hex & 255) / 255 * shade);
+    out.set(hex); // lit material: real lighting provides the relief shading
     return h;
   }
 
-  // Rebuild the summary mesh when it recenters by a cell step OR an edit dirtied it.
-  updateSummary(cx, cz, radius, cell) {
-    const step = cell * 4; // recenter coarsely so we don't rebuild every frame
-    const scx = Math.round(cx / step) * step, scz = Math.round(cz / step) * step;
-    if (!this._sumDirty && this._sum && this._sum.scx === scx && this._sum.scz === scz &&
-        this._sum.radius === radius && this._sum.cell === cell) return;
-    const resize = !this._sum || this._sum.radius !== radius || this._sum.cell !== cell;
-    this._sum = { scx, scz, radius, cell };
-    this._sumDirty = false;
-    const n = Math.floor((radius * 2) / cell) + 1;
-    const pos = new Float32Array(n * n * 3), col = new Float32Array(n * n * 3);
-    const tmp = new THREE.Color();
-    for (let j = 0; j < n; j++) {
-      for (let i = 0; i < n; i++) {
-        const wx = scx - radius + i * cell, wz = scz - radius + j * cell;
-        const k = j * n + i;
-        const h = this._summarySample(wx, wz, tmp);
-        pos[k * 3] = wx; pos[k * 3 + 1] = h; pos[k * 3 + 2] = wz;
-        col[k * 3] = tmp.r; col[k * 3 + 1] = tmp.g; col[k * 3 + 2] = tmp.b;
+  // Rebuild rings that recentered by a threshold or were dirtied by an edit.
+  // Geometry is anchor-local (floating-origin safe); each ring sits slightly
+  // lower than the finer one so near detail always wins where they overlap.
+  updateLODRings(center) {
+    for (const ring of this.lodRings) {
+      const snap = ring.cell * 4;
+      const scx = Math.round(center.x / snap) * snap, scz = Math.round(center.z / snap) * snap;
+      if (!this._lodDirty && ring.center && ring.center.x === scx && ring.center.z === scz) continue;
+      ring.center = { x: scx, z: scz };
+      const n = Math.floor((ring.half * 2) / ring.cell) + 1;
+      const mid = (n - 1) / 2;
+      let geo;
+      if (!ring.mesh) {
+        geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
+        const idx = [];
+        for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
+          // Clipmap hole: skip quads the next-finer ring is guaranteed to cover.
+          if (ring.holeCells > 0 &&
+              Math.abs(i - mid + 0.5) < ring.holeCells && Math.abs(j - mid + 0.5) < ring.holeCells) continue;
+          const a = j * n + i, b = a + 1, d = a + n, e = d + 1;
+          idx.push(a, d, b, b, d, e);
+        }
+        geo.setIndex(idx);
+        ring.mesh = new THREE.Mesh(geo, ring.material);
+        ring.mesh.name = 'lod-ring';
+        this.lodGroup.add(ring.mesh);
+      } else {
+        geo = ring.mesh.geometry;
       }
-    }
-    let geo;
-    if (!this.summaryMesh) {
-      geo = new THREE.BufferGeometry();
-      this.summaryMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true }));
-      this.summaryMesh.name = 'summary';
-      this.summaryGroup.add(this.summaryMesh);
-    } else {
-      geo = this.summaryMesh.geometry;
-    }
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    if (resize || !geo.index) {
-      const idx = new Uint32Array((n - 1) * (n - 1) * 6);
-      let o = 0;
-      for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
-        const a = j * n + i, b = a + 1, d = a + n, e = d + 1;
-        idx[o++] = a; idx[o++] = d; idx[o++] = b; idx[o++] = b; idx[o++] = d; idx[o++] = e;
+      const pos = geo.attributes.position, col = geo.attributes.color;
+      const tmp = new THREE.Color();
+      for (let j = 0; j < n; j++) {
+        for (let i = 0; i < n; i++) {
+          const wx = scx - ring.half + i * ring.cell, wz = scz - ring.half + j * ring.cell;
+          const k = j * n + i;
+          const h = this._lodSample(wx, wz, ring.lod, tmp);
+          // Skirt: dip the ring down near its hole so the finer ring covering
+          // that band always renders on top (no interpenetration contours).
+          let dip = 0.05;
+          if (ring.holeCells > 0) {
+            const cheb = Math.max(Math.abs(i - mid), Math.abs(j - mid));
+            if (cheb < ring.holeCells + 5) dip += (ring.holeCells + 5 - cheb) * 0.5;
+          }
+          pos.setXYZ(k, wx - scx, h - dip, wz - scz); // anchor-local verts
+          col.setXYZ(k, tmp.r, tmp.g, tmp.b);
+        }
       }
-      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+      pos.needsUpdate = true; col.needsUpdate = true;
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+      ring.mesh.position.set(scx - this.worldOrigin.x, 0, scz - this.worldOrigin.z);
     }
-    geo.computeBoundingSphere();
+    this._lodDirty = false;
   }
 
-  setSummaryVisible(v) { if (this.summaryGroup) this.summaryGroup.visible = v; }
+  setLODVisible(v) { if (this.lodGroup) this.lodGroup.visible = v; }
 
   // ===== global lattice access (vertex coords gx,gz; world = g * VSPACE) =====
 
@@ -523,7 +561,7 @@ export class Terrain {
     if (!d) { d = { heights: false, splat: false }; this._dirtyData.set(k, d); }
     d[layer] = true;
     this._dirtyMesh.add(k);
-    this._sumDirty = true; // this edit should show in the zoomed-out summary
+    this._lodDirty = true; // this edit should show in the far LOD rings too
     // A border vertex is read by neighbor meshes (position apron at low edges,
     // normals at both edges) — mark them for rebuild too.
     if (lx === 0) this._dirtyMesh.add(ckey(cx - 1, cz));
@@ -661,6 +699,9 @@ export class Terrain {
     for (const obj of this._waterMeshes.values()) {
       const a = obj.userData.anchor;
       if (a) obj.position.set(a.x - x, 0, a.z - z);
+    }
+    for (const ring of this.lodRings) {
+      if (ring.mesh && ring.center) ring.mesh.position.set(ring.center.x - x, 0, ring.center.z - z);
     }
   }
 
@@ -1284,7 +1325,7 @@ export class Terrain {
     this._dirtyData.clear();
     this._dirtyMesh.clear();
     this._windowCenter = null;
-    this._sumDirty = true; // rebuild the summary for the new map on next zoom-out
+    this._lodDirty = true; // resample the LOD rings for the new map
     this.water = { bodies: [] };
     this.refreshWater();
   }
@@ -1431,6 +1472,9 @@ export class Terrain {
     this.material.dispose();
     for (const id of [...this._waterMeshes.keys()]) this._clearWaterMesh(id);
     this.waterMaterial.dispose();
-    if (this.summaryMesh) { this.summaryMesh.geometry.dispose(); this.summaryMesh.material.dispose(); }
+    for (const ring of this.lodRings) {
+      if (ring.mesh) ring.mesh.geometry.dispose();
+      if (ring.material) ring.material.dispose();
+    }
   }
 }
