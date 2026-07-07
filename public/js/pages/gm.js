@@ -1359,14 +1359,14 @@ function updateTerrainLOD() {
     terrain.updateWindow(controls.target);
     if (terrainIsUnified) {
         terrain.setLODVisible(true);
+        terrain.setOceanEnabled(true);
         terrain.updateLODRings(controls.target);
-        terrain.waterGroup.visible = dist < 600;  // local water is sub-pixel far out
         plane.visible = false;                    // rings are the ground everywhere
         scene.fog.near = Math.max(FOG_NEAR, dist * 1.5);
         scene.fog.far = Math.max(FOG_FAR, dist * 6);
     } else {
         terrain.setLODVisible(false);
-        terrain.waterGroup.visible = true;
+        terrain.setOceanEnabled(false);           // pockets dig below sea level dry
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }

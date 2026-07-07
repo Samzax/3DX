@@ -160,14 +160,14 @@ function updateTerrainLOD() {
     terrain.updateWindow(controls.target);
     if (terrainIsUnified) {
         terrain.setLODVisible(true);
+        terrain.setOceanEnabled(true);
         terrain.updateLODRings(controls.target);
-        terrain.waterGroup.visible = dist < 600;
         plane.visible = false;
         scene.fog.near = Math.max(FOG_NEAR, dist * 1.5);
         scene.fog.far = Math.max(FOG_FAR, dist * 6);
     } else {
         terrain.setLODVisible(false);
-        terrain.waterGroup.visible = true;
+        terrain.setOceanEnabled(false);
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }
