@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR, SUMMARY_THRESH, SUMMARY_RADIUS, SUMMARY_CELL } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -152,21 +152,22 @@ function init() {
     // The map arrives from the server once the player logs in (see initSocket).
 }
 
-// LOD switch (U3): detailed chunks up close, coarse world-summary map when
-// zoomed out on the unified world (pockets stay detailed). Mirrors gm.js.
+// LOD (U3): nested lit 3D rings under the fine chunks on the unified world;
+// zooming out reveals more 3D world. Mirrors gm.js.
 function updateTerrainLOD() {
     const dist = camera.position.distanceTo(controls.target);
     terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
-    const summaryMode = terrainIsUnified && dist > SUMMARY_THRESH;
-    terrain.setSummaryVisible(summaryMode);
-    terrain.chunkGroup.visible = !summaryMode;
-    terrain.waterGroup.visible = !summaryMode;
-    if (summaryMode) {
-        terrain.updateSummary(controls.target.x, controls.target.z, SUMMARY_RADIUS, SUMMARY_CELL);
-        scene.fog.near = dist * 0.8;
-        scene.fog.far = dist * 4.5;
+    terrain.updateWindow(controls.target);
+    if (terrainIsUnified) {
+        terrain.setLODVisible(true);
+        terrain.updateLODRings(controls.target);
+        terrain.waterGroup.visible = dist < 600;
+        plane.visible = false;
+        scene.fog.near = Math.max(FOG_NEAR, dist * 1.5);
+        scene.fog.far = Math.max(FOG_FAR, dist * 6);
     } else {
-        terrain.updateWindow(controls.target);
+        terrain.setLODVisible(false);
+        terrain.waterGroup.visible = true;
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }

@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR, SUMMARY_THRESH, SUMMARY_RADIUS, SUMMARY_CELL, GRID_CELL_SIZE } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -629,6 +629,8 @@ function init() {
             if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary
         }
     });
+    // Debug handle for console/tooling inspection (visual bisection etc).
+    window.__dbg = { terrain, scene, camera, controls, plane, grid };
     initSocket();
 }
 
@@ -1346,24 +1348,25 @@ function groundY(x, z, halfHeight) {
     return base + halfHeight;
 }
 
-// LOD switch (U3): up close, stream detailed chunks; zoomed out on the unified
-// world, hide them and show the coarse world-summary map, pushing fog out so it
-// reads to the horizon. Pockets (not unified) always stay detailed.
+// LOD (U3): on the unified world, nested lit 3D rings render UNDER the fine
+// chunks and coarsen outward — zooming out just reveals more 3D world, no mode
+// switch. Fog scales with zoom for depth cueing. Pockets stay detail-only.
 function updateTerrainLOD() {
     const dist = camera.position.distanceTo(controls.target);
     // Grid is a close-up tactical tool: full only when near enough to place
     // tokens, gone by the time you're surveying (the default landing view).
     terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
-    const summaryMode = terrainIsUnified && dist > SUMMARY_THRESH;
-    terrain.setSummaryVisible(summaryMode);
-    terrain.chunkGroup.visible = !summaryMode;
-    terrain.waterGroup.visible = !summaryMode;
-    if (summaryMode) {
-        terrain.updateSummary(controls.target.x, controls.target.z, SUMMARY_RADIUS, SUMMARY_CELL);
-        scene.fog.near = dist * 0.8;
-        scene.fog.far = dist * 4.5;
+    terrain.updateWindow(controls.target);
+    if (terrainIsUnified) {
+        terrain.setLODVisible(true);
+        terrain.updateLODRings(controls.target);
+        terrain.waterGroup.visible = dist < 600;  // local water is sub-pixel far out
+        plane.visible = false;                    // rings are the ground everywhere
+        scene.fog.near = Math.max(FOG_NEAR, dist * 1.5);
+        scene.fog.far = Math.max(FOG_FAR, dist * 6);
     } else {
-        terrain.updateWindow(controls.target);
+        terrain.setLODVisible(false);
+        terrain.waterGroup.visible = true;
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }
