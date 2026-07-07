@@ -19,6 +19,9 @@
 import * as THREE from 'three';
 
 export const VSPACE = 0.5;                       // world units between lattice verts
+// World sea level: real ocean water renders here, LOD rings paint blue below it,
+// and beaches form just above it. One constant so every representation agrees.
+export const SEA_LEVEL = -0.6;
 export const CHUNK_VERTS = 64;                   // unique verts per chunk side
 export const CHUNK_SIZE = CHUNK_VERTS * VSPACE;  // 32 world units per chunk side
 const MESH_VERTS = CHUNK_VERTS + 1;              // 65: owned verts + 1 apron row/col
@@ -83,7 +86,8 @@ function newChunk() {
   const c = {
     heights: new Float32Array(CHUNK_VERTS * CHUNK_VERTS),
     splat: new Uint8Array(CHUNK_VERTS * CHUNK_VERTS * 4),
-    mesh: null
+    mesh: null,
+    minH: 0 // lowest vertex; lets the ocean builder skip all-land chunks fast
   };
   for (let i = 0; i < CHUNK_VERTS * CHUNK_VERTS; i++) c.splat[i * 4] = 255; // all grass
   return c;
@@ -122,6 +126,10 @@ export class Terrain {
     this.water = { bodies: [] };
     this._footprints = new Map();          // body id -> { cells:Set<"cx,cz">, level }
     this._waterMeshes = new Map();         // body id -> THREE.Mesh
+    // Real ocean at SEA_LEVEL: quads over submerged cells in the streaming
+    // window (animated water shader up close; LOD rings paint blue beyond).
+    this.oceanEnabled = false;             // pages enable it on the unified world only
+    this.oceanMesh = null;
 
     this._dirtyData = new Map();           // "cx,cz" -> { heights: bool, splat: bool } (needs sync)
     this._dirtyMesh = new Set();           // "cx,cz" (needs rebuild)
@@ -361,20 +369,37 @@ export class Terrain {
 
   // Continuous elevation field 0..1 (broad continents), seam-free by construction.
   _genElev(wx, wz) { return fbm(this.genSeed, wx * 0.0035, wz * 0.0035, 4); }
-  // Ground height at a world point. One continuous formula (no piecewise cliffs):
-  // a broad elevation base plus hill/detail octaves whose amplitude smoothly
-  // rises in high country, so plains are gentle and mountains are tall.
+  // Moisture field 0..1 — shared by heights and biome selection so terrain
+  // character and biome color always agree (dry = dunes, wet = rolling hills).
+  _genMoisture(wx, wz) { return fbm(this.genSeed + 200, wx * 0.005, wz * 0.005, 4); }
+  // Ground height at a world point. Continuous (no cliffs at biome borders) but
+  // strongly biome-differentiated via smooth masks over the same fields the
+  // biome picker uses: plains lie nearly flat, forests roll, deserts ripple
+  // with dunes, and mountain country rises into tall ridged peaks.
   // `lod` drops the high-frequency octaves — a spectral downsample for the far
   // LOD rings (coarse sampling of full-detail noise would alias; this doesn't).
   genHeightAt(wx, wz, lod = 0) {
     const e = this._genElev(wx, wz);
+    const mo = this._genMoisture(wx, wz);
+    // Mountain mask rises just below the mountain-biome threshold (e>0.7) so
+    // foothills stay modest instead of full ridges bleeding into other biomes.
+    const m = smooth(Math.max(0, Math.min(1, (e - 0.62) / 0.18)));
+    const wet = smooth(Math.max(0, Math.min(1, (mo - 0.38) / 0.24))); // 0 desert .. 1 forest
+    const base = (e - 0.5) * 16;                     // broad lowlands/highlands
+    // Rolling hills: amplitude grows with moisture (plains ~0.8, forest ~3.4).
     const hills = fbm(this.genSeed + 50, wx * 0.02, wz * 0.02, Math.max(1, 4 - lod)) - 0.5;
-    const m = smooth(Math.max(0, Math.min(1, (e - 0.55) / 0.25))); // 0 plains .. 1 mountains
-    const base = (e - 0.5) * 14;                     // broad lowlands/highlands
-    let h = base + hills * (1.2 + m * 7.0);
+    let h = base + hills * (0.8 + wet * 2.6) * (1 - m * 0.6);
+    // Mountains: tall ridged peaks where the elevation field runs high.
+    const ridge = Math.pow(1 - Math.abs(2 * fbm(this.genSeed + 500, wx * 0.013, wz * 0.013, Math.max(1, 5 - lod)) - 1), 2);
+    h += ridge * m * 22;
+    // Deserts: banded dunes (anisotropic ripple) on dry, non-mountain land.
+    if (lod < 3) {
+      const dune = fbm(this.genSeed + 300, wx * 0.05, wz * 0.014, Math.max(1, 3 - lod)) - 0.5;
+      h += dune * (1 - wet) * (1 - m) * 2.2;
+    }
     if (lod < 2) {
       const detail = fbm(this.genSeed + 99, wx * 0.09, wz * 0.09, Math.max(1, 3 - lod)) - 0.5;
-      h += detail * (0.8 + m * 1.6);
+      h += detail * (0.6 + m * 2.0);
     }
     return h;
   }
@@ -383,16 +408,17 @@ export class Terrain {
     const e = this._genElev(wx, wz);
     if (e > 0.7) return 'mountains';
     if (e < 0.4) return 'coast';
-    const mo = fbm(this.genSeed + 200, wx * 0.005, wz * 0.005, 4);
+    const mo = this._genMoisture(wx, wz);
     if (mo < 0.38) return 'desert';
     if (mo > 0.62) return 'forest';
     return 'plains';
   }
   // Material channel (0 grass,1 dirt,2 rock,3 sand) for generated ground.
   genMaterialAt(wx, wz, h) {
+    if (h < SEA_LEVEL + 1.0) return 3;               // beaches ring every shore
     const b = this.genBiomeAt(wx, wz);
     const n = fbm(this.genSeed + 300, wx * 0.05, wz * 0.05, 2);
-    if (b === 'mountains') return h > 4 || n > 0.55 ? 2 : (n > 0.35 ? 1 : 0);
+    if (b === 'mountains') return h > 9 || n > 0.55 ? 2 : (n > 0.35 ? 1 : 0);
     if (b === 'desert') return 3;
     if (b === 'coast') return h < 0.3 ? 3 : 0;
     if (b === 'forest') return n > 0.6 ? 1 : 0;
@@ -408,17 +434,20 @@ export class Terrain {
   }
   _fillFromGen(c, cx, cz) {
     const gox = cx * CHUNK_VERTS, goz = cz * CHUNK_VERTS;
+    let minH = Infinity;
     for (let lz = 0; lz < CHUNK_VERTS; lz++) {
       for (let lx = 0; lx < CHUNK_VERTS; lx++) {
         const i = lz * CHUNK_VERTS + lx;
         const wx = (gox + lx) * VSPACE, wz = (goz + lz) * VSPACE;
         const h = this.genHeightAt(wx, wz);
         c.heights[i] = h;
+        if (h < minH) minH = h;
         const m = this.genMaterialAt(wx, wz, h);
         c.splat[i * 4] = 0; c.splat[i * 4 + 1] = 0; c.splat[i * 4 + 2] = 0; c.splat[i * 4 + 3] = 0;
         c.splat[i * 4 + m] = 255;
       }
     }
+    c.minH = minH;
   }
 
   // ===== U3 rework: nested 3D LOD rings (docs/unified-world-design.md) =====
@@ -435,7 +464,7 @@ export class Terrain {
     const idx = lz * CHUNK_VERTS + lx;
     const edited = c && !c.generated;
     const h = edited ? c.heights[idx] : this.genHeightAt(wx, wz, lod);
-    if (h < -0.6) { out.set(SUMMARY_SEA); return h; }
+    if (h < SEA_LEVEL) { out.set(SUMMARY_SEA); return h; }
     let hex;
     if (edited) {                                     // dominant painted material
       const si = idx * 4; let best = 0;
@@ -576,7 +605,9 @@ export class Terrain {
 
   setH(gx, gz, v) {
     const { c, k, cx, cz, lx, lz } = this._chunkForWrite(gx, gz);
-    c.heights[lz * CHUNK_VERTS + lx] = Math.max(-HEIGHT_LIMIT, Math.min(HEIGHT_LIMIT, v));
+    const clamped = Math.max(-HEIGHT_LIMIT, Math.min(HEIGHT_LIMIT, v));
+    c.heights[lz * CHUNK_VERTS + lx] = clamped;
+    if (clamped < c.minH) c.minH = clamped; // stale-high minH is harmless (extra scan only)
     this._markDirty(k, cx, cz, lx, lz, 'heights');
   }
 
@@ -702,6 +733,10 @@ export class Terrain {
     }
     for (const ring of this.lodRings) {
       if (ring.mesh && ring.center) ring.mesh.position.set(ring.center.x - x, 0, ring.center.z - z);
+    }
+    if (this.oceanMesh && this.oceanMesh.userData.anchor) {
+      const a = this.oceanMesh.userData.anchor;
+      this.oceanMesh.position.set(a.x - x, 0, a.z - z);
     }
   }
 
@@ -951,6 +986,64 @@ export class Terrain {
         if (c.generated) this.chunks.delete(k); // regenerated deterministically on return
       }
     }
+    this._rebuildOcean(); // coastline follows the window
+  }
+
+  // Enable/disable the world ocean (unified world only; pockets dig below
+  // SEA_LEVEL without flooding).
+  setOceanEnabled(v) {
+    if (this.oceanEnabled === !!v) return;
+    this.oceanEnabled = !!v;
+    if (this.oceanMesh) this.oceanMesh.visible = false;
+    this._windowCenter = null; // rebuild window + ocean on next tick
+  }
+
+  // Ocean surface: 1-unit quads at SEA_LEVEL over every submerged cell in the
+  // window, with per-vertex depth for the water shader (foam along every
+  // coastline for free). Anchor-local geometry, floating-origin safe.
+  _rebuildOcean() {
+    if (!this.oceanMesh) {
+      this.oceanMesh = new THREE.Mesh(new THREE.BufferGeometry(), this.waterMaterial);
+      this.oceanMesh.renderOrder = 1;
+      this.oceanMesh.name = 'ocean';
+      this.oceanMesh.visible = false;
+      this.group.add(this.oceanMesh);
+    }
+    if (!this.oceanEnabled || !this._windowCenter) { this.oceanMesh.visible = false; return; }
+    const { cx, cz } = this._windowCenter;
+    const r = this.windowRadius;
+    const ax = cx * CHUNK_SIZE, az = cz * CHUNK_SIZE; // anchor (world units)
+    const pos = [], depth = [];
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const c = this.chunks.get(ckey(cx + dx, cz + dz));
+        if (!c || c.minH >= SEA_LEVEL) continue;    // all-land chunk: skip fast
+        const gox = (cx + dx) * CHUNK_VERTS, goz = (cz + dz) * CHUNK_VERTS;
+        for (let lz = 0; lz < CHUNK_VERTS; lz += 2) {     // 1 cell = 2 lattice steps
+          for (let lx = 0; lx < CHUNK_VERTS; lx += 2) {
+            const gx = gox + lx, gz = goz + lz;
+            const a = this.getH(gx, gz), b = this.getH(gx + 2, gz);
+            const c2 = this.getH(gx, gz + 2), d = this.getH(gx + 2, gz + 2);
+            if (Math.min(a, b, c2, d) >= SEA_LEVEL) continue;
+            const x0 = gx * VSPACE - ax, z0 = gz * VSPACE - az, x1 = x0 + 1, z1 = z0 + 1;
+            pos.push(x0, SEA_LEVEL, z0, x1, SEA_LEVEL, z0, x1, SEA_LEVEL, z1,
+                     x0, SEA_LEVEL, z0, x1, SEA_LEVEL, z1, x0, SEA_LEVEL, z1);
+            depth.push(SEA_LEVEL - a, SEA_LEVEL - b, SEA_LEVEL - d,
+                       SEA_LEVEL - a, SEA_LEVEL - d, SEA_LEVEL - c2);
+          }
+        }
+      }
+    }
+    const geo = this.oceanMesh.geometry;
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depth, 1));
+    const vcount = pos.length / 3;
+    geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(new Float32Array(vcount * 2), 2));
+    geo.setAttribute('aFlowSpeed', new THREE.Float32BufferAttribute(new Float32Array(vcount), 1));
+    geo.computeBoundingSphere();
+    this.oceanMesh.position.set(ax - this.worldOrigin.x, 0, az - this.worldOrigin.z);
+    this.oceanMesh.userData.anchor = { x: ax, z: az };
+    this.oceanMesh.visible = pos.length > 0;
   }
 
   // ===== water v2: authored bodies with physically settled footprints =====
@@ -1209,6 +1302,7 @@ export class Terrain {
       if (!liveIds.has(id)) { this._clearWaterMesh(id); this._footprints.delete(id); }
     }
     for (const body of this.water.bodies) this._recomputeBody(body);
+    this._rebuildOcean(); // shoreline may have moved with the terrain
   }
 
   // --- body management (GM tools) ---
@@ -1348,7 +1442,9 @@ export class Terrain {
       const u8 = b64ToU8(data.heights);
       const q = new Int16Array(u8.buffer, u8.byteOffset, Math.floor(u8.byteLength / 2));
       const n = Math.min(q.length, CHUNK_VERTS * CHUNK_VERTS);
-      for (let i = 0; i < n; i++) c.heights[i] = q[i] * HEIGHT_QUANT;
+      let minH = Infinity;
+      for (let i = 0; i < n; i++) { c.heights[i] = q[i] * HEIGHT_QUANT; if (c.heights[i] < minH) minH = c.heights[i]; }
+      c.minH = minH;
     }
     if (typeof data.splat === 'string') {
       const u8 = b64ToU8(data.splat);
@@ -1476,5 +1572,6 @@ export class Terrain {
       if (ring.mesh) ring.mesh.geometry.dispose();
       if (ring.material) ring.material.dispose();
     }
+    if (this.oceanMesh) this.oceanMesh.geometry.dispose();
   }
 }
