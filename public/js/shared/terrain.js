@@ -333,10 +333,14 @@ export class Terrain {
     // buffer — no z-fight striping, no geometric y-offset steps.
     // holeCells: quads skipped around the center where the next-finer ring
     // covers (clipmap hole) — coarser rings can't poke through finer ones.
+    // skirtCells/skirtRate: how wide/steeply a ring dips under the finer level
+    // near its hole. L1 dips deep across the whole fine-chunk overlap band so
+    // its coarser surface can't poke above true ground (worst at shorelines,
+    // where it would surface through the water as sand stripes).
     this.lodRings = [
-      { cell: 4,  half: 384,  lod: 1, holeCells: 24, mesh: null, center: null }, // hole under the fine-chunk window
-      { cell: 16, half: 1536, lod: 2, holeCells: 18, mesh: null, center: null },
-      { cell: 64, half: 6144, lod: 3, holeCells: 18, mesh: null, center: null }
+      { cell: 4,  half: 384,  lod: 1, holeCells: 24, skirtCells: 10, skirtRate: 0.6, mesh: null, center: null },
+      { cell: 16, half: 1536, lod: 2, holeCells: 18, skirtCells: 5,  skirtRate: 0.5, mesh: null, center: null },
+      { cell: 64, half: 6144, lod: 3, holeCells: 18, skirtCells: 5,  skirtRate: 0.5, mesh: null, center: null }
     ];
     for (const ring of this.lodRings) {
       ring.material = new THREE.MeshLambertMaterial({
@@ -392,14 +396,18 @@ export class Terrain {
     // Mountains: tall ridged peaks where the elevation field runs high.
     const ridge = Math.pow(1 - Math.abs(2 * fbm(this.genSeed + 500, wx * 0.013, wz * 0.013, Math.max(1, 5 - lod)) - 1), 2);
     h += ridge * m * 22;
+    // Coastal shelf: damp high-frequency relief near the waterline so shores
+    // are clean beaches with one surf line — otherwise dune/detail troughs dip
+    // under SEA_LEVEL and the coast becomes a picket fence of water slivers.
+    const shore = smooth(Math.min(1, Math.abs(h - SEA_LEVEL) / 2.5));
     // Deserts: banded dunes (anisotropic ripple) on dry, non-mountain land.
     if (lod < 3) {
       const dune = fbm(this.genSeed + 300, wx * 0.05, wz * 0.014, Math.max(1, 3 - lod)) - 0.5;
-      h += dune * (1 - wet) * (1 - m) * 2.2;
+      h += dune * (1 - wet) * (1 - m) * 2.2 * shore;
     }
     if (lod < 2) {
       const detail = fbm(this.genSeed + 99, wx * 0.09, wz * 0.09, Math.max(1, 3 - lod)) - 0.5;
-      h += detail * (0.6 + m * 2.0);
+      h += detail * (0.6 + m * 2.0) * (0.25 + 0.75 * shore);
     }
     return h;
   }
@@ -517,12 +525,13 @@ export class Terrain {
           const wx = scx - ring.half + i * ring.cell, wz = scz - ring.half + j * ring.cell;
           const k = j * n + i;
           const h = this._lodSample(wx, wz, ring.lod, tmp);
-          // Skirt: dip the ring down near its hole so the finer ring covering
+          // Skirt: dip the ring down near its hole so the finer level covering
           // that band always renders on top (no interpenetration contours).
           let dip = 0.05;
           if (ring.holeCells > 0) {
             const cheb = Math.max(Math.abs(i - mid), Math.abs(j - mid));
-            if (cheb < ring.holeCells + 5) dip += (ring.holeCells + 5 - cheb) * 0.5;
+            const edge = ring.holeCells + ring.skirtCells;
+            if (cheb < edge) dip += (edge - cheb) * ring.skirtRate;
           }
           pos.setXYZ(k, wx - scx, h - dip, wz - scz); // anchor-local verts
           col.setXYZ(k, tmp.r, tmp.g, tmp.b);
@@ -994,8 +1003,11 @@ export class Terrain {
   setOceanEnabled(v) {
     if (this.oceanEnabled === !!v) return;
     this.oceanEnabled = !!v;
-    if (this.oceanMesh) this.oceanMesh.visible = false;
-    this._windowCenter = null; // rebuild window + ocean on next tick
+    if (!this.oceanEnabled) {
+      if (this.oceanMesh) this.oceanMesh.visible = false;
+      return;
+    }
+    this._rebuildOcean(); // enable: build immediately against the current window
   }
 
   // Ocean surface: 1-unit quads at SEA_LEVEL over every submerged cell in the
