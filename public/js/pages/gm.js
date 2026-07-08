@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -42,7 +42,7 @@ let riverPreview = null; // polyline following the draft + cursor
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
 
-let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight;
+let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup;
 let ruler;
 let objects = [];
 let selectedObject = null;
@@ -243,7 +243,7 @@ function enterMap(key) {
     for (const k in toolMenuButtons) toolMenuButtons[k].classList.remove('active');
     document.querySelectorAll('#object-menu .menu-button').forEach(b => b.classList.remove('active'));
     // clear local scene; server repopulates via 'map-state' after join-map
-    objects.forEach(o => scene.remove(o));
+    objects.forEach(o => worldGroup.remove(o));
     objects = [];
     ruler.removeSegments();
     showLayerGrid(key);
@@ -313,7 +313,7 @@ function onDoubleClick(event) {
     const objHit = raycaster.intersectObjects(objects, true)[0];
     if (objHit) {
         let top = objHit.object;
-        while (top.parent && top.parent !== scene) top = top.parent;
+        while (top.parent && top.parent !== scene && top.parent !== worldGroup) top = top.parent;
         const obj = objects.find(o => o === top);
         if (obj && obj.userData.objectType === 'portal' && obj.userData.portalTarget) {
             enterMap(obj.userData.portalTarget);
@@ -361,7 +361,7 @@ function initSocket() {
         // Ignore states for maps we're not on (e.g. the automatic 'world' join
         // that precedes our re-join after a reconnect).
         if (data.key && data.key !== currentMapKey) return;
-        objects.forEach(obj => scene.remove(obj));
+        objects.forEach(obj => worldGroup.remove(obj));
         objects = [];
         ruler.removeSegments();
 
@@ -398,11 +398,17 @@ function initSocket() {
                 syncWaterControls();
                 if (data.worldCenter) {
                     const c = data.worldCenter;   // fly to this province's spot in the world
-                    controls.target.set(c.x, 0, c.z);
-                    camera.position.set(c.x + 20, 30, c.z + 20);
+                    // Land with the floating origin already under the province, so
+                    // scene coords start near zero however far out the world we are.
+                    const o = setWorldOriginAt({ terrain, worldGroup }, c.x, c.z);
+                    controls.target.set(c.x - o.x, 0, c.z - o.z);
+                    camera.position.set(c.x - o.x + 20, 30, c.z - o.z + 20);
                 }
             } else {
                 // Hex tiers (no terrain) or a pocket (its own separate terrain).
+                // These live near the true origin: pin the floating origin to 0
+                // (hex picking and pocket bounds assume scene == world).
+                setWorldOriginAt({ terrain, worldGroup }, 0, 0);
                 terrainIsUnified = false;
                 terrain.reset();
                 undoStack.length = 0; redoStack.length = 0;
@@ -454,7 +460,7 @@ function initSocket() {
         const object = objects.find(o => o.userData.syncId === data.id);
         if (object) {
             if (selectedObject === object) deselectObject();
-            scene.remove(object);
+            worldGroup.remove(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
         }
     });
@@ -475,7 +481,7 @@ function initSocket() {
 }
 
 function init() {
-    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight } =
+    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup } =
         createTabletopScene(document.getElementById('scene-container')));
 
     // Tactical terrain (heightmap + material paint + water). Hidden off-tactical.
@@ -490,7 +496,7 @@ function init() {
         new THREE.LineBasicMaterial({ color: 0xff9ff3, transparent: true, opacity: 0.9 })
     );
     rampPreview.visible = false;
-    scene.add(rampPreview);
+    worldGroup.add(rampPreview); // preview points are world coords
 
     // River draft preview: waypoints + cursor as a light-blue polyline.
     riverPreview = new THREE.Line(
@@ -498,12 +504,12 @@ function init() {
         new THREE.LineBasicMaterial({ color: 0x7ad7ff, transparent: true, opacity: 0.9 })
     );
     riverPreview.visible = false;
-    scene.add(riverPreview);
+    worldGroup.add(riverPreview); // preview points are world coords
 
     wasRightDrag = trackRightDrag(renderer.domElement);
 
     ruler = new RulerTool({
-        scene,
+        scene: worldGroup, // ruler points/segments are world coords
         tooltip: document.getElementById('ruler-tooltip'),
         measure: (points) => isHexLayer() ? measurePath(points) : null
     });
@@ -632,7 +638,7 @@ function init() {
     // Debug handle for console/tooling inspection (visual bisection etc).
     // forceRender draws one frame even while the tab is hidden (rAF paused).
     window.__dbg = {
-        terrain, scene, camera, controls, plane, grid, renderer,
+        terrain, scene, camera, controls, plane, grid, renderer, worldGroup,
         forceRender: () => { updateTerrainLOD(); renderer.render(scene, camera); }
     };
     initSocket();
@@ -711,7 +717,7 @@ function onPointerDown(event) {
 
     const firstIntersect = intersects[0];
     let topLevelObject = firstIntersect.object;
-    while (topLevelObject.parent && topLevelObject.parent !== scene) {
+    while (topLevelObject.parent && topLevelObject.parent !== scene && topLevelObject.parent !== worldGroup) {
         topLevelObject = topLevelObject.parent;
     }
     const clickedObject = objects.find(obj => obj === topLevelObject);
@@ -728,7 +734,7 @@ function onPointerDown(event) {
             }
         }
     } else if (firstIntersect.object.name === "tabletop") {
-        const intersectPoint = firstIntersect.point;
+        const intersectPoint = sceneToWorld(firstIntersect.point);
         const snappedPosition = snapToCurrentGrid(intersectPoint);
 
         switch (currentTool) {
@@ -746,14 +752,14 @@ function onPointerDown(event) {
                             }
                         });
                     }
-                    controls.target.copy(selectedObject.position);
+                    focusCameraOn(selectedObject.position);
                     deselectObject();
                 }
                 break;
             case 'add':
                 if (selectedObjectType) {
                     addObject(snappedPosition);
-                    controls.target.copy(snappedPosition);
+                    focusCameraOn(snappedPosition);
                     deselectObjectType();
                 }
                 break;
@@ -799,7 +805,7 @@ function onPointerMove(event) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const intersects = raycaster.intersectObject(plane);
     if (intersects.length === 0) return;
-    const intersectPoint = intersects[0].point;
+    const intersectPoint = sceneToWorld(intersects[0].point);
 
     if (currentTool === 'move' && selectedObject) {
         applyMove(selectedObject, snapToCurrentGrid(intersectPoint), currentMoveMode,
@@ -945,7 +951,7 @@ function onContextMenu(event) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const intersects = raycaster.intersectObject(plane);
     if (intersects.length > 0) {
-        ruler.restartAt(getCurrentRulerSnap(intersects[0].point), emitRuler);
+        ruler.restartAt(getCurrentRulerSnap(sceneToWorld(intersects[0].point)), emitRuler);
     }
 }
 
@@ -1083,7 +1089,7 @@ function addObject(position) {
 function createObjectFromData(id, data) {
     const mesh = buildObjectFromData(id, data);
     if (mesh) {
-        scene.add(mesh);
+        worldGroup.add(mesh); // synced positions are world coords
         objects.push(mesh);
     }
 }
@@ -1223,12 +1229,21 @@ function emitWater() {
 }
 // Pick against the actual terrain chunks on tactical maps (fall back to the flat
 // plane elsewhere) so the brush lands where the cursor visually touches the ground.
+// Returns TRUE world coordinates (scene hit + floating origin) — everything
+// downstream (terrain API, socket emits) speaks world coords.
 function pointerToGround(event) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const hit = (terrain && terrain.group.visible)
         ? raycaster.intersectObjects([terrain.chunkGroup, plane], true)[0]
         : raycaster.intersectObject(plane)[0];
-    return hit ? hit.point : null;
+    return hit ? sceneToWorld(hit.point) : null;
+}
+// Scene <-> world conversion at the raycast/camera boundary (floating origin).
+function sceneToWorld(p) {
+    return new THREE.Vector3(p.x + terrain.worldOrigin.x, p.y, p.z + terrain.worldOrigin.z);
+}
+function focusCameraOn(worldPos) {
+    controls.target.set(worldPos.x - terrain.worldOrigin.x, worldPos.y, worldPos.z - terrain.worldOrigin.z);
 }
 // The effective brush mode for a dab: Shift inverts raise<->lower.
 function effectiveBrushMode() {
@@ -1356,15 +1371,24 @@ function groundY(x, z, halfHeight) {
 // chunks and coarsen outward — zooming out just reveals more 3D world, no mode
 // switch. Fog scales with zoom for depth cueing. Pockets stay detail-only.
 function updateTerrainLOD() {
+    // Floating origin: slide the world under the camera when it wanders too far
+    // for float32. Deferred while a gesture is mid-flight so a stroke never
+    // spans a rebase frame.
+    if (terrainIsUnified && !isSculpting && !lakeDrag && !rampStart) {
+        maybeRebaseWorld({ terrain, worldGroup, camera, controls });
+    }
     const dist = camera.position.distanceTo(controls.target);
     // Grid is a close-up tactical tool: full only when near enough to place
     // tokens, gone by the time you're surveying (the default landing view).
     terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
-    terrain.updateWindow(controls.target);
+    // Terrain streaming/LOD centers are world coords; the camera target is scene.
+    const worldTarget = { x: controls.target.x + terrain.worldOrigin.x,
+                          z: controls.target.z + terrain.worldOrigin.z };
+    terrain.updateWindow(worldTarget);
     if (terrainIsUnified) {
         terrain.setLODVisible(true);
         terrain.setOceanEnabled(true);
-        terrain.updateLODRings(controls.target);
+        terrain.updateLODRings(worldTarget);
         plane.visible = false;                    // rings are the ground everywhere
         scene.fog.near = Math.max(FOG_NEAR, dist * 1.5);
         scene.fog.far = Math.max(FOG_FAR, dist * 6);

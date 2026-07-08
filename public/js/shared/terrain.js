@@ -643,9 +643,11 @@ export class Terrain {
   }
 
   // ===== brush cursor (drawn by the shared material's shader) =====
+  // x/z are world coords; the shader compares against scene-space positions
+  // (vBrushWorld = modelMatrix * vertex), so subtract the floating origin here.
   setBrush({ x, z, radius, color, visible }) {
     const u = this._brushUniforms;
-    if (x != null && z != null) u.uBrushPos.value.set(x, z);
+    if (x != null && z != null) u.uBrushPos.value.set(x - this.worldOrigin.x, z - this.worldOrigin.z);
     if (radius != null) u.uBrushRadius.value = radius;
     if (color != null) u.uBrushColor.value.set(color);
     if (visible != null) u.uBrushVisible.value = visible ? 1 : 0;
