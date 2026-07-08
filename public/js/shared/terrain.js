@@ -409,6 +409,10 @@ export class Terrain {
       const detail = fbm(this.genSeed + 99, wx * 0.09, wz * 0.09, Math.max(1, 3 - lod)) - 0.5;
       h += detail * (0.6 + m * 2.0) * (0.25 + 0.75 * shore);
     }
+    // Below the waterline the seabed falls away steeply (the shelf otherwise
+    // leaves a wide barely-submerged shelf that sits entirely inside the foam
+    // band and renders as dappled dashes instead of a tight surf line).
+    if (h < SEA_LEVEL) h = SEA_LEVEL + (h - SEA_LEVEL) * 2.2;
     return h;
   }
   // Procedural biome at a world point (elevation + moisture), for material choice.
@@ -1036,7 +1040,9 @@ export class Terrain {
             const gx = gox + lx, gz = goz + lz;
             const a = this.getH(gx, gz), b = this.getH(gx + 2, gz);
             const c2 = this.getH(gx, gz + 2), d = this.getH(gx + 2, gz + 2);
-            if (Math.min(a, b, c2, d) >= SEA_LEVEL) continue;
+            // Small epsilon: skip barely-submerged cells, which otherwise pepper
+            // flat shallows with isolated foam-dot quads (dashed waterlines).
+            if (Math.min(a, b, c2, d) >= SEA_LEVEL - 0.05) continue;
             const x0 = gx * VSPACE - ax, z0 = gz * VSPACE - az, x1 = x0 + 1, z1 = z0 + 1;
             pos.push(x0, SEA_LEVEL, z0, x1, SEA_LEVEL, z0, x1, SEA_LEVEL, z1,
                      x0, SEA_LEVEL, z0, x1, SEA_LEVEL, z1, x0, SEA_LEVEL, z1);
