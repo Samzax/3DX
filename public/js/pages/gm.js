@@ -630,7 +630,11 @@ function init() {
         }
     });
     // Debug handle for console/tooling inspection (visual bisection etc).
-    window.__dbg = { terrain, scene, camera, controls, plane, grid };
+    // forceRender draws one frame even while the tab is hidden (rAF paused).
+    window.__dbg = {
+        terrain, scene, camera, controls, plane, grid, renderer,
+        forceRender: () => { updateTerrainLOD(); renderer.render(scene, camera); }
+    };
     initSocket();
 }
 
