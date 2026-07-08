@@ -92,13 +92,57 @@ export function createTabletopScene(container) {
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
+    // World-space container for game content (tokens, props, rulers, previews).
+    // Children keep TRUE world coordinates; the group sits at -worldOrigin so
+    // rendered transforms stay near zero on the unbounded unified world (the
+    // large offsets cancel in float64 on the CPU before the GPU sees them).
+    // Terrain manages its own origin subtraction (Terrain.setWorldOrigin).
+    const worldGroup = new THREE.Group();
+    worldGroup.name = 'world-space';
+    scene.add(worldGroup);
+
     window.addEventListener('resize', () => {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    return { scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight };
+    return { scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup };
+}
+
+// ===== Floating origin (docs/unified-world-design.md §5) =====
+// Game logic uses TRUE world coordinates everywhere; only rendering shifts by
+// -worldOrigin (terrain internally, everything else via worldGroup). Scene ->
+// world is `scene + origin`; pages convert at the raycast boundary.
+export const REBASE_DISTANCE = 4096;
+// The origin always sits on a 25u multiple: a common multiple of the shader
+// grid's close-up cells (1u and 5u), so grid lines don't visibly shift across
+// a rebase. (Water-surface noise is scene-space and jumps pattern on a rebase;
+// rebases only fire thousands of units out, where that's imperceptible.)
+const REBASE_SNAP = 25;
+
+// Hard-set the floating origin (map joins / province flights). Returns the
+// snapped origin so callers can place the camera in scene coordinates.
+export function setWorldOriginAt({ terrain, worldGroup }, x, z) {
+    const ox = Math.round(x / REBASE_SNAP) * REBASE_SNAP;
+    const oz = Math.round(z / REBASE_SNAP) * REBASE_SNAP;
+    terrain.setWorldOrigin(ox, oz);
+    if (worldGroup) worldGroup.position.set(-ox, 0, -oz);
+    return { x: ox, z: oz };
+}
+
+// Per-frame check: once the camera target drifts REBASE_DISTANCE from the scene
+// origin, slide the world origin under it. Camera and target shift together in
+// the same frame, so nothing moves on screen (OrbitControls state is relative).
+export function maybeRebaseWorld({ terrain, worldGroup, camera, controls }) {
+    const t = controls.target;
+    if (Math.max(Math.abs(t.x), Math.abs(t.z)) < REBASE_DISTANCE) return false;
+    const oldX = terrain.worldOrigin.x, oldZ = terrain.worldOrigin.z;
+    const n = setWorldOriginAt({ terrain, worldGroup }, oldX + t.x, oldZ + t.z);
+    const dx = n.x - oldX, dz = n.z - oldZ;
+    camera.position.x -= dx; camera.position.z -= dz;
+    t.x -= dx; t.z -= dz;
+    return true;
 }
 
 // Recenter the ground plane, grid, and sun light on the camera target each frame

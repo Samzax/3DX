@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, FOG_NEAR, FOG_FAR } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -22,7 +22,7 @@ let activeCharId = null;
 const hpState = {}; // charId -> current HP (mirrors the server, kept in sync)
 const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight;
+let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup;
 let ruler;
 let objects = [];
 let selectedObject = null;
@@ -46,7 +46,7 @@ let terrainIsUnified = false; // is the loaded terrain the shared continuous wor
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
 function init() {
-    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight } =
+    ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup } =
         createTabletopScene(document.getElementById('scene-container')));
 
     // Tactical terrain (GM-authored heightmap + water); hidden until a terrain arrives.
@@ -55,7 +55,7 @@ function init() {
     scene.add(terrain.group);
 
     ruler = new RulerTool({
-        scene,
+        scene: worldGroup, // ruler points/segments are world coords
         tooltip: document.getElementById('ruler-tooltip')
     });
 
@@ -155,13 +155,19 @@ function init() {
 // LOD (U3): nested lit 3D rings under the fine chunks on the unified world;
 // zooming out reveals more 3D world. Mirrors gm.js.
 function updateTerrainLOD() {
+    // Floating origin: slide the world under the camera when it wanders too far
+    // for float32 (players free-roam the unified world too).
+    if (terrainIsUnified) maybeRebaseWorld({ terrain, worldGroup, camera, controls });
     const dist = camera.position.distanceTo(controls.target);
     terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
-    terrain.updateWindow(controls.target);
+    // Terrain streaming/LOD centers are world coords; the camera target is scene.
+    const worldTarget = { x: controls.target.x + terrain.worldOrigin.x,
+                          z: controls.target.z + terrain.worldOrigin.z };
+    terrain.updateWindow(worldTarget);
     if (terrainIsUnified) {
         terrain.setLODVisible(true);
         terrain.setOceanEnabled(true);
-        terrain.updateLODRings(controls.target);
+        terrain.updateLODRings(worldTarget);
         plane.visible = false;
         scene.fog.near = Math.max(FOG_NEAR, dist * 1.5);
         scene.fog.far = Math.max(FOG_FAR, dist * 6);
@@ -190,7 +196,7 @@ function onPointerDown(event) {
 
     const firstIntersect = intersects[0];
     let topLevelObject = firstIntersect.object;
-    while (topLevelObject.parent && topLevelObject.parent !== scene) {
+    while (topLevelObject.parent && topLevelObject.parent !== scene && topLevelObject.parent !== worldGroup) {
         topLevelObject = topLevelObject.parent;
     }
     const clickedObject = objects.find(obj => obj === topLevelObject);
@@ -207,7 +213,7 @@ function onPointerDown(event) {
             }
         }
     } else if (firstIntersect.object.name === "tabletop") {
-        const intersectPoint = firstIntersect.point;
+        const intersectPoint = sceneToWorld(firstIntersect.point);
 
         switch (currentTool) {
             case 'move':
@@ -225,7 +231,7 @@ function onPointerDown(event) {
                             }
                         });
                     }
-                    controls.target.copy(selectedObject.position);
+                    focusCameraOn(selectedObject.position);
                     deselectObject();
                 }
                 break;
@@ -252,7 +258,7 @@ function onPointerMove(event) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const intersects = raycaster.intersectObject(plane);
     if (intersects.length === 0) return;
-    const intersectPoint = intersects[0].point;
+    const intersectPoint = sceneToWorld(intersects[0].point);
 
     if (currentTool === 'move' && selectedObject) {
         // Players keep the object's current height, clamped above the ground.
@@ -276,7 +282,7 @@ function onDoubleClick(event) {
     const hit = raycaster.intersectObjects(objects, true)[0];
     if (!hit) return;
     let top = hit.object;
-    while (top.parent && top.parent !== scene) top = top.parent;
+    while (top.parent && top.parent !== scene && top.parent !== worldGroup) top = top.parent;
     const obj = objects.find(o => o === top);
     if (obj && obj.userData.objectType === 'portal' && obj.userData.portalTarget && socket) {
         currentMapKey = obj.userData.portalTarget;
@@ -294,7 +300,7 @@ function onContextMenu(event) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
     const intersects = raycaster.intersectObject(plane);
     if (intersects.length > 0) {
-        ruler.restartAt(ruler.snap(intersects[0].point), emitRuler);
+        ruler.restartAt(ruler.snap(sceneToWorld(intersects[0].point)), emitRuler);
     }
 }
 
@@ -312,11 +318,19 @@ function onKeyDown(event) {
     }
 }
 
+// Scene <-> world conversion at the raycast/camera boundary (floating origin).
+function sceneToWorld(p) {
+    return new THREE.Vector3(p.x + terrain.worldOrigin.x, p.y, p.z + terrain.worldOrigin.z);
+}
+function focusCameraOn(worldPos) {
+    controls.target.set(worldPos.x - terrain.worldOrigin.x, worldPos.y, worldPos.z - terrain.worldOrigin.z);
+}
+
 // --- Object Management ---
 function createObjectFromData(id, data) {
     const mesh = buildObjectFromData(id, data);
     if (mesh) {
-        scene.add(mesh);
+        worldGroup.add(mesh); // synced positions are world coords
         objects.push(mesh);
     }
 }
@@ -631,7 +645,7 @@ function initSocket(username) {
         // Ignore states for maps we're not on (e.g. the automatic 'world' join
         // that precedes our re-join after a reconnect).
         if (data.key && data.key !== currentMapKey) return;
-        objects.forEach(obj => scene.remove(obj));
+        objects.forEach(obj => worldGroup.remove(obj));
         objects = [];
         ruler.removeSegments();
 
@@ -658,10 +672,15 @@ function initSocket(username) {
                 styleGroundForTerrain(plane, true);
                 if (data.worldCenter) {
                     const c = data.worldCenter;
-                    controls.target.set(c.x, 0, c.z);
-                    camera.position.set(c.x + 20, 30, c.z + 20);
+                    // Land with the floating origin already under the province, so
+                    // scene coords start near zero however far out the world we are.
+                    const o = setWorldOriginAt({ terrain, worldGroup }, c.x, c.z);
+                    controls.target.set(c.x - o.x, 0, c.z - o.z);
+                    camera.position.set(c.x - o.x + 20, 30, c.z - o.z + 20);
                 }
             } else {
+                // Pockets live near the true origin: pin the floating origin to 0.
+                setWorldOriginAt({ terrain, worldGroup }, 0, 0);
                 terrainIsUnified = false;
                 terrain.reset();
                 const hasTerrain = !!data.terrain;
@@ -694,7 +713,7 @@ function initSocket(username) {
         const object = objects.find(o => o.userData.syncId === data.id);
         if (object) {
             if (selectedObject === object) deselectObject();
-            scene.remove(object);
+            worldGroup.remove(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
         }
     });
