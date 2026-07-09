@@ -397,8 +397,21 @@ export class Terrain {
   // generated chunk never needs syncing; only GM edits are stored/synced and they
   // override the generation.
 
-  // Continuous elevation field 0..1 (broad continents), seam-free by construction.
-  _genElev(wx, wz) { return fbm(this.genSeed, wx * 0.0035, wz * 0.0035, 4); }
+  // Continuous elevation field 0..1, seam-free by construction. Two scales:
+  // a continental mask (features ~100k units — a couple of 60-mile hexes) that
+  // decides where landmasses sit in a world that is mostly ocean, and the
+  // regional field (~300u features) that shapes terrain within them. Ocean
+  // floors keep a small regional swell (rare islets); continental interiors
+  // get the full range (inland mountains where the regional field runs high).
+  _genElev(wx, wz) {
+    const C = fbm(this.genSeed + 900, wx * 0.00001, wz * 0.00001, 3);
+    // fbm(3 oct) centers near 0.44; the ramp opens at its ~p65 and saturates
+    // at ~p85, leaving roughly a third of the world under continental shelves
+    // and the rest deep ocean.
+    const cont = smooth(Math.max(0, Math.min(1, (C - 0.50) / 0.08)));
+    const regional = fbm(this.genSeed, wx * 0.0035, wz * 0.0035, 4);
+    return 0.28 + cont * 0.38 + (regional - 0.5) * (0.35 + 0.40 * cont);
+  }
   // Moisture field 0..1 — shared by heights and biome selection so terrain
   // character and biome color always agree (dry = dunes, wet = rolling hills).
   _genMoisture(wx, wz) { return fbm(this.genSeed + 200, wx * 0.005, wz * 0.005, 4); }
