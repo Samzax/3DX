@@ -24,9 +24,11 @@ export class RulerTool {
         this.lastMouseX = 0;
         this.lastMouseY = 0;
 
-        this.lineMaterial = new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2, transparent: true, opacity: 0.8 });
+        // Rulers are map annotations: draw over terrain relief (depthTest off),
+        // not through the z-buffer — a measurement across a hill stays visible.
+        this.lineMaterial = new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2, transparent: true, opacity: 0.8, depthTest: false });
         this.previewMaterial = new THREE.LineDashedMaterial({
-            color: 0x00ffff, linewidth: 1, transparent: true, opacity: 0.7, dashSize: 0.2, gapSize: 0.1
+            color: 0x00ffff, linewidth: 1, transparent: true, opacity: 0.7, dashSize: 0.2, gapSize: 0.1, depthTest: false
         });
     }
 
@@ -126,6 +128,7 @@ export class RulerTool {
         this.currentLine = new THREE.Line(lineGeometry, this.previewMaterial);
         this.currentLine.material.color.setHex(this.color);
         this.currentLine.computeLineDistances();
+        this.currentLine.renderOrder = 11;
         this.scene.add(this.currentLine);
     }
 
@@ -135,6 +138,7 @@ export class RulerTool {
         const finalGeometry = new THREE.BufferGeometry().setFromPoints(points);
         const finalLine = new THREE.Line(finalGeometry, this.lineMaterial.clone());
         finalLine.material.color.setHex(data.color);
+        finalLine.renderOrder = 11;
         finalLine.userData.syncId = id;
         finalLine.userData.rulerData = data;
         this.segments.push(finalLine);

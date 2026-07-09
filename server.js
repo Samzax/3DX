@@ -99,6 +99,8 @@ function provinceWorldCenter(key) {
   return { x, z };
 }
 function isTacticalPath(key) { return /^world(\/-?\d+,-?\d+){3}$/.test(key); }
+// Hex-tier layers of the world tree (depth 0-2): zoom lenses over the world.
+function isWorldHexPath(key) { return /^world(\/-?\d+,-?\d+){0,2}$/.test(key); }
 
 // One-time migration: fold legacy per-province tactical islands into WORLD_KEY at
 // their composed world position (chunk-aligned), so the tactical layer becomes one
@@ -432,17 +434,35 @@ io.on('connection', (socket) => {
     return w;
   }
 
+  // All biome hex tags across the world tree, keyed by hex-layer map key.
+  // Clients feed this to the terrain generator (painted biomes override
+  // generation), so every client needs the whole (tiny) tree, not just the
+  // tags of the map it is looking at.
+  function collectHexTree() {
+    const tree = {};
+    for (const key of Object.keys(maps)) {
+      if (!isWorldHexPath(key)) continue;
+      const hexes = maps[key].hexes;
+      if (hexes && Object.keys(hexes).length) tree[key] = hexes;
+    }
+    return tree;
+  }
+
   // Send a room's state. For the unified world the emitted `key` is the province
   // path the client asked for (so its own map-state guard accepts it) while the
   // payload carries the shared world terrain/objects + where to fly (worldCenter).
+  // Hex-tier layers are zoom lenses over the same world: they keep their own
+  // room (objects/rulers/tags) but also carry the world terrain + center.
   function sendMapState(roomKey, contextKey) {
     const m = getMap(roomKey);
     const ctx = contextKey || roomKey;
     const extra = {};
-    if (roomKey === WORLD_KEY) {
-      ensureWorld();
+    if (roomKey === WORLD_KEY || isWorldHexPath(roomKey)) {
       extra.worldCenter = provinceWorldCenter(ctx);
       extra.unified = true;
+      extra.hexTree = collectHexTree();
+      if (roomKey !== WORLD_KEY) extra.terrain = ensureWorld().terrain;
+      else ensureWorld();
     }
     socket.emit('map-state', {
       key: ctx,
@@ -488,13 +508,16 @@ io.on('connection', (socket) => {
     const biome = payload.biome == null ? null : String(payload.biome);
     if (biome !== null && !BIOME_KEYS.includes(biome)) return;
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    if (!isWorldHexPath(key)) return; // tags live on hex-tier layers only
     const map = getMap(key);
     map.hexes = map.hexes || {};
     const hk = q + ',' + r;
     if (biome === null) delete map.hexes[hk];
     else map.hexes[hk] = { biome };
     saveMaps();
-    io.to(key).emit('hex-updated', { hex: hk, biome });
+    // Global broadcast (not just the layer's room): painted biomes override
+    // terrain generation, so every client rendering the world needs the change.
+    io.emit('hex-updated', { key, hex: hk, biome });
   });
 
   // Create a pocket map (dungeon/cave/room): its own map key outside the hex tree,

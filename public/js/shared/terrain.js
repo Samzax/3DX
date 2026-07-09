@@ -17,6 +17,7 @@
 //   tile) are migrated on load (applyData returns { migrated: true }).
 
 import * as THREE from 'three';
+import { TIER_WIDTH, worldToHexAtTier, hexCenterAtTier, hexEdgeDistance, hexDistance, HEX_FIELD_RADIUS } from './hexworld.js';
 
 export const VSPACE = 0.5;                       // world units between lattice verts
 // World sea level: real ocean water renders here, LOD rings paint blue below it,
@@ -43,6 +44,21 @@ const SUMMARY_COLORS = {
   desert: 0xcbb26a, coast: 0x9ec9a0, swamp: 0x4e5f3a
 };
 const SUMMARY_SEA = 0x2f6ea5;
+
+// GM biome painting (hex tags) as generator overrides: each biome pulls the
+// elevation/moisture FIELDS toward these targets, so heights, biome selection
+// and materials all follow naturally (and blend continuously — no cliffs at
+// hex borders). Values sit safely inside genBiomeAt's classification bands.
+const BIOME_FIELDS = {
+  plains:    { e: 0.52, mo: 0.50 },
+  forest:    { e: 0.56, mo: 0.78 },
+  mountains: { e: 0.85, mo: 0.50 },
+  desert:    { e: 0.55, mo: 0.12 },
+  swamp:     { e: 0.45, mo: 0.85 },  // renders as wet lowland (no swamp material yet)
+  coast:     { e: 0.45, mo: 0.55 }   // hugs the waterline: beaches + shallow sea
+};
+// Feather width at hex borders, as a fraction of the tier's hex width.
+const BIOME_FEATHER = 0.18;
 
 // --- base64 <-> typed array (browser btoa/atob; server stores these opaquely) ---
 function u8ToB64(u8) {
@@ -120,6 +136,9 @@ export class Terrain {
     // its own anchor so vertex buffers never hold large float32 values.
     this.worldOrigin = { x: 0, z: 0 };
     this.genSeed = 1337;                    // U2: world generation seed (see genHeightAt)
+    // GM hex-biome tags as generator overrides: { "world": {"q,r":{biome}}, ... }.
+    // Empty/null tree = pure procedural world (see setBiomeOverrides / _fields).
+    this._hexTree = null;
     // Water v2 (docs/water-v2-design.md): authored bodies, physically settled
     // footprints. Footprints are recomputed from the shared quantized heights,
     // never synced.
@@ -337,10 +356,17 @@ export class Terrain {
     // near its hole. L1 dips deep across the whole fine-chunk overlap band so
     // its coarser surface can't poke above true ground (worst at shorelines,
     // where it would surface through the water as sand stripes).
+    // Rings 4-6 extend coverage to the Kingdom/Continent hex-tier altitudes
+    // (fields span ~±41k / ±412k units). `coarse` rings skip per-edit rebuilds:
+    // a brush stroke is sub-texel at those cell sizes, so they only rebuild on
+    // recenter (or biome-override regeneration, which recenters everything).
     this.lodRings = [
-      { cell: 4,  half: 384,  lod: 1, holeCells: 24, skirtCells: 10, skirtRate: 0.6, mesh: null, center: null },
-      { cell: 16, half: 1536, lod: 2, holeCells: 18, skirtCells: 5,  skirtRate: 0.5, mesh: null, center: null },
-      { cell: 64, half: 6144, lod: 3, holeCells: 18, skirtCells: 5,  skirtRate: 0.5, mesh: null, center: null }
+      { cell: 4,    half: 384,    lod: 1, holeCells: 24, skirtCells: 10, skirtRate: 0.6, mesh: null, center: null },
+      { cell: 16,   half: 1536,   lod: 2, holeCells: 18, skirtCells: 5,  skirtRate: 0.5, mesh: null, center: null },
+      { cell: 64,   half: 6144,   lod: 3, holeCells: 18, skirtCells: 5,  skirtRate: 0.5, mesh: null, center: null },
+      { cell: 256,  half: 24576,  lod: 4, holeCells: 18, skirtCells: 5,  skirtRate: 2,   mesh: null, center: null, coarse: true },
+      { cell: 1024, half: 98304,  lod: 5, holeCells: 18, skirtCells: 5,  skirtRate: 8,   mesh: null, center: null, coarse: true },
+      { cell: 4096, half: 393216, lod: 6, holeCells: 18, skirtCells: 5,  skirtRate: 32,  mesh: null, center: null, coarse: true }
     ];
     for (const ring of this.lodRings) {
       ring.material = new THREE.MeshLambertMaterial({
@@ -376,6 +402,43 @@ export class Terrain {
   // Moisture field 0..1 — shared by heights and biome selection so terrain
   // character and biome color always agree (dry = dunes, wet = rolling hills).
   _genMoisture(wx, wz) { return fbm(this.genSeed + 200, wx * 0.005, wz * 0.005, 4); }
+
+  // GM hex-biome tags override generation (the painted world). Tags are set via
+  // setBiomeOverrides; hexes are resolved by the same nesting the server uses
+  // (each tier's lattice is centered on its parent hex). Deeper tags win, and
+  // every tag feathers to zero toward its hex border so terrain stays
+  // continuous — painting warps the e/mo FIELDS, never the heights directly.
+  setBiomeOverrides(tree) {
+    this._hexTree = (tree && Object.keys(tree).some(k => tree[k] && Object.keys(tree[k]).length)) ? tree : null;
+  }
+
+  // Elevation + moisture at a world point, with painted-hex warping applied
+  // shallow -> deep (a Province tag refines its Kingdom tag, etc).
+  _fields(wx, wz) {
+    let e = this._genElev(wx, wz);
+    let mo = this._genMoisture(wx, wz);
+    const tree = this._hexTree;
+    if (tree) {
+      let cx = 0, cz = 0, key = 'world';
+      for (let d = 0; d < 3; d++) {
+        const lx = wx - cx, lz = wz - cz;
+        const h = worldToHexAtTier(d, lx, lz);
+        if (hexDistance(h) > HEX_FIELD_RADIUS) break; // outside this layer's field
+        const tags = tree[key];
+        const tag = tags && tags[h.q + ',' + h.r];
+        const target = tag && BIOME_FIELDS[tag.biome];
+        if (target) {
+          const w = Math.max(0, Math.min(1, hexEdgeDistance(d, lx, lz, h.q, h.r) / (TIER_WIDTH[d] * BIOME_FEATHER)));
+          e += (target.e - e) * w;
+          mo += (target.mo - mo) * w;
+        }
+        const c = hexCenterAtTier(d, h.q, h.r);
+        cx += c.x; cz += c.z;
+        key += '/' + h.q + ',' + h.r;
+      }
+    }
+    return { e, mo };
+  }
   // Ground height at a world point. Continuous (no cliffs at biome borders) but
   // strongly biome-differentiated via smooth masks over the same fields the
   // biome picker uses: plains lie nearly flat, forests roll, deserts ripple
@@ -383,8 +446,7 @@ export class Terrain {
   // `lod` drops the high-frequency octaves — a spectral downsample for the far
   // LOD rings (coarse sampling of full-detail noise would alias; this doesn't).
   genHeightAt(wx, wz, lod = 0) {
-    const e = this._genElev(wx, wz);
-    const mo = this._genMoisture(wx, wz);
+    const { e, mo } = this._fields(wx, wz);
     // Mountain mask rises just below the mountain-biome threshold (e>0.7) so
     // foothills stay modest instead of full ridges bleeding into other biomes.
     const m = smooth(Math.max(0, Math.min(1, (e - 0.62) / 0.18)));
@@ -415,12 +477,13 @@ export class Terrain {
     if (h < SEA_LEVEL) h = SEA_LEVEL + (h - SEA_LEVEL) * 2.2;
     return h;
   }
-  // Procedural biome at a world point (elevation + moisture), for material choice.
+  // Procedural biome at a world point (elevation + moisture), for material
+  // choice. Uses the same painted-hex-warped fields as genHeightAt, so painted
+  // biomes classify (and color) as what the GM painted.
   genBiomeAt(wx, wz) {
-    const e = this._genElev(wx, wz);
+    const { e, mo } = this._fields(wx, wz);
     if (e > 0.7) return 'mountains';
     if (e < 0.4) return 'coast';
-    const mo = this._genMoisture(wx, wz);
     if (mo < 0.38) return 'desert';
     if (mo > 0.62) return 'forest';
     return 'plains';
@@ -498,7 +561,10 @@ export class Terrain {
     for (const ring of this.lodRings) {
       const snap = ring.cell * 4;
       const scx = Math.round(center.x / snap) * snap, scz = Math.round(center.z / snap) * snap;
-      if (!this._lodDirty && ring.center && ring.center.x === scx && ring.center.z === scz) continue;
+      // Coarse rings ignore per-edit dirtying (strokes are sub-texel there);
+      // _lodDirtyAll (map reset / biome regeneration) rebuilds everything.
+      const dirty = this._lodDirtyAll || (this._lodDirty && !ring.coarse);
+      if (!dirty && ring.center && ring.center.x === scx && ring.center.z === scz) continue;
       ring.center = { x: scx, z: scz };
       const n = Math.floor((ring.half * 2) / ring.cell) + 1;
       const mid = (n - 1) / 2;
@@ -547,6 +613,7 @@ export class Terrain {
       ring.mesh.position.set(scx - this.worldOrigin.x, 0, scz - this.worldOrigin.z);
     }
     this._lodDirty = false;
+    this._lodDirtyAll = false;
   }
 
   setLODVisible(v) { if (this.lodGroup) this.lodGroup.visible = v; }
@@ -1427,6 +1494,21 @@ export class Terrain {
   }
 
   // Clear everything (map switch or GM reset). Local only; the caller syncs.
+  // Re-run generation everywhere the GM hasn't edited: drop disposable
+  // generated chunks and force the window + LOD rings to resample. Called when
+  // biome overrides change (hex painting); edited chunks are untouched.
+  regenerate() {
+    for (const [k, c] of this.chunks) {
+      if (!c.generated) continue;
+      if (c.mesh) this._disposeChunkMesh(k);
+      this.chunks.delete(k);
+    }
+    this._windowCenter = null;  // next updateWindow restreams + rebuilds the ocean
+    this._lodDirty = true;
+    this._lodDirtyAll = true;   // painted biomes show at every LOD scale
+    this.refreshWater();        // lakes/rivers re-settle on the new ground
+  }
+
   reset() {
     if (this._strokePatch) {
       for (const [k, c] of this.chunks) {
@@ -1440,6 +1522,7 @@ export class Terrain {
     this._dirtyMesh.clear();
     this._windowCenter = null;
     this._lodDirty = true; // resample the LOD rings for the new map
+    this._lodDirtyAll = true;
     this.water = { bodies: [] };
     this.refreshWater();
   }
