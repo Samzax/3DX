@@ -148,8 +148,12 @@ export function buildObjectFromData(id, data) {
         case 'character':
             if (data.characterData) {
                 objectMesh = createCharacterModel(data.characterData);
-                const heightScale = data.characterData.appearance.height || 1;
-                halfHeight = (1 * heightScale) / 2 * 0.4;
+                // Seat the model on its feet: the group origin sits above the
+                // soles (and the offset varies with build/leg length), so measure
+                // the actual bottom instead of guessing from height. groundY adds
+                // this back so position.y + box.min.y lands the feet on the ground.
+                const box = new THREE.Box3().setFromObject(objectMesh);
+                halfHeight = -box.min.y;
             }
             break;
         case 'cave':
