@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
+import { Grass } from '../shared/grass.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
@@ -12,6 +13,7 @@ import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 
 // --- Terrain editor state (tactical layer only) ---
 let terrain = null;
+let grass = null;                   // instanced ground-cover grass (shared/grass.js)
 let isSculpting = false;
 let strokeRef = 0;                         // flatten target captured at stroke start
 let lastDab = null;                        // last dab position, for fixed-spacing strokes
@@ -527,6 +529,7 @@ function init() {
     terrain = new Terrain();
     terrain.group.visible = false;
     scene.add(terrain.group);
+    grass = new Grass(terrain, scene);   // ground-cover, shown only at tactical zoom
 
     // Ramp gesture preview: a line from the anchor to the cursor while dragging.
     rampPreview = new THREE.Line(
@@ -1462,6 +1465,7 @@ function updateTerrainLOD() {
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }
+    if (grass) grass.update(camera, controls, terrainIsUnified);
 }
 // Reflect the current water bodies in the panel (count readout).
 function syncWaterControls() {

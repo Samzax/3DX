@@ -6,6 +6,7 @@
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
+import { Grass } from '../shared/grass.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
@@ -13,6 +14,7 @@ import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { setupLoginModal } from '../shared/login.js';
 
 let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
+let grass = null;   // instanced ground-cover grass (shared/grass.js)
 
 // --- Character sheet state ---
 let SRD = null;
@@ -55,6 +57,7 @@ function init() {
     terrain = new Terrain();
     terrain.group.visible = false;
     scene.add(terrain.group);
+    grass = new Grass(terrain, scene);   // ground-cover, shown only at tactical zoom
 
     ruler = new RulerTool({
         scene: worldGroup, // ruler points/segments are world coords
@@ -182,6 +185,7 @@ function updateTerrainLOD() {
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }
+    if (grass) grass.update(camera, controls, terrainIsUnified);
 }
 
 function onPointerDown(event) {
