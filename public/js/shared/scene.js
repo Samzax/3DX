@@ -229,12 +229,14 @@ export function castFromPointer(event, { renderer, camera, raycaster, mouse }) {
     return raycaster;
 }
 
-// Snap to the square tactical grid (keeps y).
+// Snap to the square tactical grid (keeps y). Objects land on the CENTER of the
+// cell they're dropped in (floor + 0.5), the way a mini sits in the middle of a
+// square — not on the grid-line corner that Math.round would round to.
 export function snapToGrid(position) {
     return new THREE.Vector3(
-        Math.round(position.x / GRID_CELL_SIZE) * GRID_CELL_SIZE,
+        (Math.floor(position.x / GRID_CELL_SIZE) + 0.5) * GRID_CELL_SIZE,
         position.y,
-        Math.round(position.z / GRID_CELL_SIZE) * GRID_CELL_SIZE
+        (Math.floor(position.z / GRID_CELL_SIZE) + 0.5) * GRID_CELL_SIZE
     );
 }
 
