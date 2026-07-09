@@ -1426,6 +1426,10 @@ function updateTerrainLOD() {
         camera.near = near; camera.far = far;
         camera.updateProjectionMatrix();
     }
+    // The backdrop plane doubles as the ground-pick target (hex descend, biome
+    // paint, ruler). It's 2000u of geometry — scale it with zoom so rays from
+    // any screen point still land on it at hex-lens altitudes.
+    plane.scale.setScalar(Math.max(1, (dist * 3) / 2000));
     // Grid is a close-up tactical tool: full only when near enough to place
     // tokens, gone by the time you're surveying (the default landing view).
     terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
