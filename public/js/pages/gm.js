@@ -203,12 +203,13 @@ function rebuildHexFills() {
 }
 
 // --- Layer-aware snapping & measurement ---
+// Objects (tokens/minis/props) are tactical-scale entities in the one unified
+// world, so they always snap to the fine tactical square grid — never the coarse
+// hex-center snap of a zoom lens. Placing from Continent/Kingdom/Province zoom
+// drops the object where you clicked (the 1u grid is far finer than the view),
+// and focusCameraOn then flies you down to it. (Rulers snap to hex centers
+// separately via getCurrentRulerSnap; that stays hex-aware.)
 function snapToCurrentGrid(point) {
-    if (isHexLayer()) {
-        const h = worldToHex(point.x, point.z);
-        const c = hexToWorld(h.q, h.r);
-        return new THREE.Vector3(c.x, point.y, c.z);
-    }
     return snapToGrid(point);
 }
 function getCurrentRulerSnap(point) {
