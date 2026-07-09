@@ -161,6 +161,9 @@ function updateTerrainLOD() {
     // for float32 (players free-roam the unified world too).
     if (terrainIsUnified) maybeRebaseWorld({ terrain, worldGroup, camera, controls });
     const dist = camera.position.distanceTo(controls.target);
+    // The backdrop plane doubles as the ground-pick target (token moves,
+    // rulers): scale it with zoom so rays from any screen point still hit it.
+    plane.scale.setScalar(Math.max(1, (dist * 3) / 2000));
     terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
     // Terrain streaming/LOD centers are world coords; the camera target is scene.
     const worldTarget = { x: controls.target.x + terrain.worldOrigin.x,
