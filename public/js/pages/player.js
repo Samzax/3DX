@@ -42,6 +42,8 @@ let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
 let boundsRect = null;   // pocket-map boundary rectangle
 let currentMapKey = 'world'; // players travel between maps via portals
 let terrainIsUnified = false; // is the loaded terrain the shared continuous world?
+let hexTree = {};            // GM biome tags (generator overrides), synced via map-state
+let regenTimer = null;       // debounce for biome-driven regeneration
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -661,6 +663,9 @@ function initSocket(username) {
 
         // Terrain.
         if (terrain) {
+            // GM-painted hex biomes override generation — players generate the
+            // same world locally, so they need the same tag tree.
+            if (data.hexTree) { hexTree = data.hexTree; terrain.setBiomeOverrides(hexTree); }
             if (data.unified) {
                 // One continuous world: load once, then fly between provinces.
                 if (!terrainIsUnified) {
@@ -694,6 +699,19 @@ function initSocket(username) {
     // Live terrain edits from the GM (partial chunk payload).
     socket.on('terrain-updated', (data) => {
         if (terrain) { terrain.applyData(data); terrain.group.visible = true; styleGroundForTerrain(plane, true); }
+    });
+
+    // GM painted/cleared a biome hex: the world regenerates under it.
+    // (Debounced — rapid paint strokes coalesce into one heavy rebuild.)
+    socket.on('hex-updated', ({ key, hex, biome }) => {
+        if (!key || !terrain) return;
+        const layer = { ...(hexTree[key] || {}) };
+        if (biome) layer[hex] = { biome };
+        else delete layer[hex];
+        hexTree = { ...hexTree, [key]: layer };
+        terrain.setBiomeOverrides(hexTree);
+        clearTimeout(regenTimer);
+        regenTimer = setTimeout(() => terrain.regenerate(), 400);
     });
 
     socket.on('object-added', (data) => {

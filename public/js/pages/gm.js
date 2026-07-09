@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
+import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 
@@ -87,11 +88,10 @@ const BIOMES = {
 };
 let currentBiome = 'plains';
 let hexTags = {};                   // "q,r" -> { biome } for the current map
+let hexTree = {};                   // all layers' tags (feeds the terrain generator)
+let regenTimer = null;              // debounce for biome-driven regeneration
 let hexFillGroup = null;            // colored hex fill overlay
 
-const SQRT3 = Math.sqrt(3);
-const HEX_SIZE = 2;            // world units (circumradius) used to draw hexes
-const HEX_MAP_RADIUS = 6;      // hex field radius, in hexes
 const TACTICAL_DEPTH = 3;      // depth of the square-grid leaf
 // DMG p14 hex scales per depth (hex layers only).
 const HEX_SCALES = {
@@ -100,7 +100,9 @@ const HEX_SCALES = {
     2: { miles: 1,  label: 'Province' }
 };
 
-const hexLineMaterial = new THREE.LineBasicMaterial({ color: 0x888888, transparent: true, opacity: 0.5 });
+// Overlay lines/fills draw on top of the 3D world regardless of relief
+// (depthTest off) — they're a map annotation, not scene geometry.
+const hexLineMaterial = new THREE.LineBasicMaterial({ color: 0xdddddd, transparent: true, opacity: 0.4, depthTest: false });
 
 function mapDepth(key) { return key.split('/').length - 1; }      // 0..2 hex layers, 3 tactical
 function isPocket(key = currentMapKey) { return key.startsWith('pocket/'); }
@@ -108,40 +110,35 @@ function isPocket(key = currentMapKey) { return key.startsWith('pocket/'); }
 function isTacticalKey(key = currentMapKey) { return isPocket(key) || mapDepth(key) >= TACTICAL_DEPTH; }
 function isHexLayer(depth = mapDepth(currentMapKey)) { return !isPocket(currentMapKey) && depth < TACTICAL_DEPTH; }
 
-// --- Pointy-top axial hex math on the XZ ground plane ---
-function hexToWorld(q, r) {
-    return { x: HEX_SIZE * SQRT3 * (q + r / 2), z: HEX_SIZE * 1.5 * r };
-}
-function roundHex(qf, rf) { // cube rounding
-    let xf = qf, zf = rf, yf = -qf - rf;
-    let rx = Math.round(xf), ry = Math.round(yf), rz = Math.round(zf);
-    const dx = Math.abs(rx - xf), dy = Math.abs(ry - yf), dz = Math.abs(rz - zf);
-    if (dx > dy && dx > dz) rx = -ry - rz;
-    else if (dy > dz) ry = -rx - rz;
-    else rz = -rx - ry;
-    return { q: rx, r: rz };
-}
+// --- World-scale hex lenses (shared math in hexworld.js) ---
+// Hexes live at TRUE world scale: a hex at depth d is TIER_WIDTH[d] units
+// across, and each layer's field is centered on its parent hex's center.
+let layerCenter = { x: 0, z: 0 };   // world center of the current layer's field
+function layerDepth() { return Math.min(mapDepth(currentMapKey), 2); }
+// Hex (q,r) of the current layer's field containing a WORLD point.
 function worldToHex(x, z) {
-    return roundHex((SQRT3 / 3 * x - 1 / 3 * z) / HEX_SIZE, (2 / 3 * z) / HEX_SIZE);
+    return worldToHexAtTier(layerDepth(), x - layerCenter.x, z - layerCenter.z);
 }
-function hexDistance(a, b) {
-    return (Math.abs(a.q - b.q) + Math.abs(a.q + a.r - b.q - b.r) + Math.abs(a.r - b.r)) / 2;
+// WORLD center of hex (q,r) in the current layer's field.
+function hexToWorld(q, r) {
+    const c = hexCenterAtTier(layerDepth(), q, r);
+    return { x: layerCenter.x + c.x, z: layerCenter.z + c.z };
 }
-function hexInField(q, r) {
-    return Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) <= HEX_MAP_RADIUS;
-}
-function hexCorner(cx, cz, i) {
+function hexCorner(cx, cz, R, i) {
     const ang = Math.PI / 180 * (60 * i - 30); // pointy-top corners
-    return new THREE.Vector3(cx + HEX_SIZE * Math.cos(ang), 0.02, cz + HEX_SIZE * Math.sin(ang));
+    return new THREE.Vector3(cx + R * Math.cos(ang), 0, cz + R * Math.sin(ang));
 }
-function buildHexGrid() {
+// Hex outlines for the current layer, built LOCAL to the layer center (the
+// group sits at layerCenter inside worldGroup, so float32 stays precise).
+function buildHexGrid(depth) {
+    const R = tierRadius(depth);
     const positions = [];
-    for (let q = -HEX_MAP_RADIUS; q <= HEX_MAP_RADIUS; q++) {
-        for (let r = -HEX_MAP_RADIUS; r <= HEX_MAP_RADIUS; r++) {
+    for (let q = -6; q <= 6; q++) {
+        for (let r = -6; r <= 6; r++) {
             if (!hexInField(q, r)) continue;
-            const { x, z } = hexToWorld(q, r);
+            const { x, z } = hexCenterAtTier(depth, q, r);
             const c = [];
-            for (let i = 0; i < 6; i++) c.push(hexCorner(x, z, i));
+            for (let i = 0; i < 6; i++) c.push(hexCorner(x, z, R, i));
             for (let i = 0; i < 6; i++) {
                 const a = c[i], b = c[(i + 1) % 6];
                 positions.push(a.x, a.y, a.z, b.x, b.y, b.z);
@@ -151,51 +148,58 @@ function buildHexGrid() {
     const geom = new THREE.BufferGeometry();
     geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
     const group = new THREE.Group();
-    group.add(new THREE.LineSegments(geom, hexLineMaterial));
+    const lines = new THREE.LineSegments(geom, hexLineMaterial);
+    lines.renderOrder = 10; // over terrain + water + fills
+    group.add(lines);
     return group;
 }
 function showLayerGrid(key) {
     // The square grid is drawn in the terrain shader now; keep the old mesh off.
     if (grid) grid.visible = false;
     if (hexGridGroup) {
-        scene.remove(hexGridGroup);
+        worldGroup.remove(hexGridGroup);
         hexGridGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
         hexGridGroup = null;
     }
     if (!isPocket(key) && mapDepth(key) < TACTICAL_DEPTH) {
-        hexGridGroup = buildHexGrid();
-        scene.add(hexGridGroup);
+        hexGridGroup = buildHexGrid(mapDepth(key));
+        hexGridGroup.position.set(layerCenter.x, 0, layerCenter.z);
+        worldGroup.add(hexGridGroup);
     }
 }
 
-// Colored fills for biome-tagged hexes (hex layers only).
+// Colored fills for biome-tagged hexes (hex layers only): a translucent
+// annotation over the real terrain showing what's painted where.
 function rebuildHexFills() {
     if (hexFillGroup) {
-        scene.remove(hexFillGroup);
+        worldGroup.remove(hexFillGroup);
         hexFillGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
         hexFillGroup = null;
     }
     if (!isHexLayer()) return;
+    const depth = layerDepth();
+    const R = tierRadius(depth);
     hexFillGroup = new THREE.Group();
     for (const hk of Object.keys(hexTags)) {
         const biome = BIOMES[hexTags[hk].biome];
         if (!biome) continue;
         const [q, r] = hk.split(',').map(Number);
-        const { x, z } = hexToWorld(q, r);
+        const { x, z } = hexCenterAtTier(depth, q, r); // local to layer center
         const shape = new THREE.Shape();
         for (let i = 0; i < 6; i++) {
-            const c = hexCorner(x, z, i);
+            const c = hexCorner(x, z, R, i);
             if (i === 0) shape.moveTo(c.x, c.z); else shape.lineTo(c.x, c.z);
         }
         const geo = new THREE.ShapeGeometry(shape);
         geo.rotateX(Math.PI / 2); // shape XY -> ground XZ
         const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-            color: biome.color, transparent: true, opacity: 0.35, side: THREE.DoubleSide
+            color: biome.color, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthTest: false
         }));
-        mesh.position.y = 0.012; // under the grid lines
+        mesh.renderOrder = 9; // over terrain, under the hex lines
         hexFillGroup.add(mesh);
     }
-    scene.add(hexFillGroup);
+    hexFillGroup.position.set(layerCenter.x, 0, layerCenter.z);
+    worldGroup.add(hexFillGroup);
 }
 
 // --- Layer-aware snapping & measurement ---
@@ -231,6 +235,8 @@ const emitRuler = (data) => socket.emit('add-ruler', data);
 // --- Drill-down navigation ---
 function enterMap(key) {
     currentMapKey = key;
+    // World position of this layer's hex field (hex lenses are world-scale).
+    layerCenter = isPocket(key) ? { x: 0, z: 0 } : pathWorldCenter(key);
     if (selectedObject) deselectObject();
     ruler.clearInProgress();
     // Fresh map, fresh viewpoint: standard overview centered on the origin.
@@ -325,7 +331,8 @@ function onDoubleClick(event) {
     if (!isHexLayer()) return;
     const hit = raycaster.intersectObject(plane)[0];
     if (!hit) return;
-    const h = worldToHex(hit.point.x, hit.point.z);
+    const p = sceneToWorld(hit.point);
+    const h = worldToHex(p.x, p.z);
     descendInto(h.q, h.r);
 }
 
@@ -383,10 +390,15 @@ function initSocket() {
 
         // Terrain.
         if (terrain) {
+            // Painted hex biomes override generation everywhere (all layers).
+            if (data.hexTree) {
+                hexTree = data.hexTree;
+                terrain.setBiomeOverrides(hexTree);
+            }
             if (data.unified) {
-                // One continuous world: load it once, then just fly the camera
-                // between provinces (no reload flash, no re-applying 1000s of
-                // chunks every hop).
+                // One continuous world (tactical leaves AND hex-tier lenses):
+                // load it once, then just fly the camera between layers (no
+                // reload flash, no re-applying 1000s of chunks every hop).
                 if (!terrainIsUnified) {
                     terrain.reset();
                     undoStack.length = 0; redoStack.length = 0;
@@ -397,18 +409,28 @@ function initSocket() {
                 styleGroundForTerrain(plane, true);
                 syncWaterControls();
                 if (data.worldCenter) {
-                    const c = data.worldCenter;   // fly to this province's spot in the world
-                    // Land with the floating origin already under the province, so
-                    // scene coords start near zero however far out the world we are.
+                    const c = data.worldCenter;   // fly to this layer's spot in the world
+                    // Land with the floating origin already under it, so scene
+                    // coords start near zero however far out the world we are.
                     const o = setWorldOriginAt({ terrain, worldGroup }, c.x, c.z);
-                    controls.target.set(c.x - o.x, 0, c.z - o.z);
-                    camera.position.set(c.x - o.x + 20, 30, c.z - o.z + 20);
+                    const sx = c.x - o.x, sz = c.z - o.z;
+                    controls.target.set(sx, 0, sz);
+                    const depth = mapDepth(currentMapKey);
+                    if (depth >= TACTICAL_DEPTH) {
+                        camera.position.set(sx + 20, 30, sz + 20);
+                        controls.maxDistance = 6000;
+                    } else {
+                        // Hex lens: high enough that the layer's field fills the view.
+                        const alt = TIER_WIDTH[depth] * 8;
+                        camera.position.set(sx, alt, sz + alt * 0.3);
+                        controls.maxDistance = alt * 1.6;
+                    }
                 }
             } else {
-                // Hex tiers (no terrain) or a pocket (its own separate terrain).
-                // These live near the true origin: pin the floating origin to 0
-                // (hex picking and pocket bounds assume scene == world).
+                // A pocket: its own separate terrain near the true origin — pin
+                // the floating origin to 0 (pocket bounds assume scene == world).
                 setWorldOriginAt({ terrain, worldGroup }, 0, 0);
+                controls.maxDistance = 6000;
                 terrainIsUnified = false;
                 terrain.reset();
                 undoStack.length = 0; redoStack.length = 0;
@@ -426,11 +448,26 @@ function initSocket() {
         if (terrain) { terrain.applyData(data); syncWaterControls(); }
     });
 
-    // Live hex tag edits (echo to this and other GM tabs in the room).
-    socket.on('hex-updated', ({ hex, biome }) => {
-        if (biome) hexTags[hex] = { biome };
-        else delete hexTags[hex];
-        rebuildHexFills();
+    // Live hex tag edits (global broadcast: painted biomes reshape the world).
+    socket.on('hex-updated', ({ key, hex, biome }) => {
+        // This layer's fills (legacy events without a key are ours too).
+        if (!key || key === currentMapKey) {
+            if (biome) hexTags[hex] = { biome };
+            else delete hexTags[hex];
+            rebuildHexFills();
+        }
+        // Feed the generator: update the tag tree and regrow procedural ground.
+        // Regeneration (window restream + all LOD rings) is heavy, so rapid
+        // paint strokes coalesce into one rebuild.
+        if (key && terrain) {
+            const layer = { ...(hexTree[key] || {}) };
+            if (biome) layer[hex] = { biome };
+            else delete layer[hex];
+            hexTree = { ...hexTree, [key]: layer };
+            terrain.setBiomeOverrides(hexTree);
+            clearTimeout(regenTimer);
+            regenTimer = setTimeout(() => terrain.regenerate(), 400);
+        }
     });
 
     // A pocket map we requested is ready: drop its entry portal where the GM clicked.
@@ -659,7 +696,8 @@ function onPointerDown(event) {
         castFromPointer(event, { renderer, camera, raycaster, mouse });
         const hit = raycaster.intersectObject(plane)[0];
         if (!hit) return;
-        const h = worldToHex(hit.point.x, hit.point.z);
+        const p = sceneToWorld(hit.point);
+        const h = worldToHex(p.x, p.z);
         if (!hexInField(h.q, h.r)) return;
         socket.emit('update-hex', { q: h.q, r: h.r, biome: event.altKey ? null : currentBiome });
         return;
@@ -1378,6 +1416,16 @@ function updateTerrainLOD() {
         maybeRebaseWorld({ terrain, worldGroup, camera, controls });
     }
     const dist = camera.position.distanceTo(controls.target);
+    // Frustum follows zoom: hex-tier lenses sit hundreds of thousands of units
+    // up, tactical work needs near=0.1. Scale both ends (only on real change —
+    // updateProjectionMatrix isn't free) so depth precision stays healthy.
+    const near = Math.max(0.1, Math.min(2000, dist * 0.002));
+    const far = Math.max(40000, dist * 8);
+    if (near < camera.near * 0.7 || near > camera.near * 1.4 ||
+        far > camera.far * 1.4 || far < camera.far * 0.7) {
+        camera.near = near; camera.far = far;
+        camera.updateProjectionMatrix();
+    }
     // Grid is a close-up tactical tool: full only when near enough to place
     // tokens, gone by the time you're surveying (the default landing view).
     terrain.setGridFade(1 - Math.max(0, Math.min(1, (dist - 15) / (40 - 15))));
