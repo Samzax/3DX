@@ -19,13 +19,32 @@ export const FOG_NEAR = 350, FOG_FAR = 1400;
 // animated per-frame in terrain.js; this color stays put.
 export const SKY_COLOR = 0xbcd6ea;
 
+// A vertical gradient sky as a screen-filling background texture: soft deep blue
+// at the zenith easing down to SKY_COLOR at the horizon, so distant fogged terrain
+// (fog is also SKY_COLOR) melts seamlessly into the base of the sky. A stretched
+// CanvasTexture needs no sky dome and no per-frame upkeep, and stays robust across
+// the whole Continent->Tactical zoom range. The horizon stop MUST stay SKY_COLOR
+// so the fog fade has no seam.
+function makeSkyGradientTexture() {
+    const c = document.createElement('canvas');
+    c.width = 2; c.height = 512;
+    const ctx = c.getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, 512);
+    g.addColorStop(0.00, '#5b8ac4'); // zenith: soft deep blue
+    g.addColorStop(0.55, '#9cc0e2'); // mid sky
+    g.addColorStop(1.00, '#bcd6ea'); // horizon = SKY_COLOR (matches the fog)
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 2, 512);
+    return new THREE.CanvasTexture(c);
+}
+
 // Build the standard tabletop scene. The ground plane is named "tabletop" — pointer
 // handlers rely on that name to tell ground clicks from object clicks.
 export function createTabletopScene(container) {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(SKY_COLOR);
-    // Fog color MUST match the background so distant ground/grid fade seamlessly
-    // into it instead of showing a hard patch edge.
+    scene.background = makeSkyGradientTexture();
+    // Fog color MUST match the sky's horizon stop so distant ground/grid fade
+    // seamlessly into it instead of showing a hard patch edge.
     scene.fog = new THREE.Fog(SKY_COLOR, FOG_NEAR, FOG_FAR);
 
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 40000);
