@@ -13,15 +13,20 @@ export const FEET_PER_GRID_CELL = 5;
 // SUMMARY_THRESH so far zoom-out shows the world map instead of void.
 const MIN_ZOOM = 3, MAX_ZOOM = 6000;
 export const FOG_NEAR = 350, FOG_FAR = 1400;
+// Stylized-look pass (step 1): a soft warm sky the distant world dissolves into.
+// SKY_COLOR is shared by scene.background AND the fog so far terrain fades into
+// the sky (atmospheric perspective) with no hard patch edge. Only near/far are
+// animated per-frame in terrain.js; this color stays put.
+export const SKY_COLOR = 0xbcd6ea;
 
 // Build the standard tabletop scene. The ground plane is named "tabletop" — pointer
 // handlers rely on that name to tell ground clicks from object clicks.
 export function createTabletopScene(container) {
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x2d2d2d);
+    scene.background = new THREE.Color(SKY_COLOR);
     // Fog color MUST match the background so distant ground/grid fade seamlessly
     // into it instead of showing a hard patch edge.
-    scene.fog = new THREE.Fog(0x2d2d2d, FOG_NEAR, FOG_FAR);
+    scene.fog = new THREE.Fog(SKY_COLOR, FOG_NEAR, FOG_FAR);
 
     const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 40000);
     camera.position.set(20, 30, 20);
@@ -47,10 +52,14 @@ export function createTabletopScene(container) {
         RIGHT: THREE.MOUSE.ROTATE
     };
 
-    // Keep total illumination ~1.0: over-lighting saturates colors toward
-    // white/yellow (dark green ground was rendering as cream).
-    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-    const dirLight = new THREE.DirectionalLight(0xfff2dd, 0.85);
+    // Stylized fill: a hemisphere light (warm sky from above, warm earth bounce
+    // from below) instead of flat white ambient. This is what turns flat Lambert
+    // shading into soft, wrap-around, sunny relief — shaded slopes pick up a warm
+    // ground tint rather than going dead grey. Position-independent, so it stays
+    // correct anywhere on the roaming world. Keep total illumination ~1.0:
+    // over-lighting saturates colors toward white/yellow.
+    scene.add(new THREE.HemisphereLight(0xcfe3f2, 0x8f7f5f, 0.55));
+    const dirLight = new THREE.DirectionalLight(0xffe8c4, 0.9);
     dirLight.position.set(10, 20, 5);
     dirLight.castShadow = true;
     dirLight.shadow.camera.top = 500;
