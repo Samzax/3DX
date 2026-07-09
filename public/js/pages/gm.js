@@ -1281,7 +1281,18 @@ function sceneToWorld(p) {
     return new THREE.Vector3(p.x + terrain.worldOrigin.x, p.y, p.z + terrain.worldOrigin.z);
 }
 function focusCameraOn(worldPos) {
-    controls.target.set(worldPos.x - terrain.worldOrigin.x, worldPos.y, worldPos.z - terrain.worldOrigin.z);
+    const tx = worldPos.x - terrain.worldOrigin.x;
+    const tz = worldPos.z - terrain.worldOrigin.z;
+    controls.target.set(tx, worldPos.y, tz);
+    // When we're zoomed far out (a hex-lens altitude), placing/moving an object and
+    // only recentering the orbit pivot does nothing visible — the object is a
+    // sub-pixel dot thousands of units below. Descend to a tactical view of it so
+    // you actually land next to what you placed. When already close (normal
+    // editing/move), keep the current framing and just recenter.
+    const TACTICAL_VIEW_DIST = 120;
+    if (camera.position.distanceTo(controls.target) > TACTICAL_VIEW_DIST) {
+        camera.position.set(tx + 20, worldPos.y + 30, tz + 20);
+    }
 }
 // The effective brush mode for a dab: Shift inverts raise<->lower.
 function effectiveBrushMode() {
