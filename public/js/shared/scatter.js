@@ -152,6 +152,10 @@ export class ScatterField {
                 off += n;
             }
             mesh.count = off;
+            // Upload only the live instances, not the full capacity buffer
+            // (stale data past `count` is never drawn).
+            mesh.instanceMatrix.updateRange = { offset: 0, count: off * 16 };
+            mesh.instanceColor.updateRange = { offset: 0, count: off * 3 };
             mesh.instanceMatrix.needsUpdate = true;
             mesh.instanceColor.needsUpdate = true;
         }

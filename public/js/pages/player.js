@@ -167,6 +167,20 @@ function updateTerrainLOD() {
     // for float32 (players free-roam the unified world too).
     if (terrainIsUnified) maybeRebaseWorld({ terrain, worldGroup, camera, controls });
     const dist = camera.position.distanceTo(controls.target);
+    // Wheel zoom spans grass level to survey altitude — scale the speed with
+    // distance (log) so the trip doesn't take hundreds of ticks while close-up
+    // stays precise. Mirrors gm.js.
+    controls.zoomSpeed = Math.min(4, Math.max(1, 0.8 + Math.log10(Math.max(1, dist / 25))));
+    // Frustum follows zoom (mirrors gm.js): survey altitude needs a far plane
+    // millions of units out, tactical work needs near=0.1. Only touch the
+    // camera on real change — updateProjectionMatrix isn't free.
+    const near = Math.max(0.1, Math.min(2000, dist * 0.002));
+    const far = Math.max(40000, dist * 8);
+    if (near < camera.near * 0.7 || near > camera.near * 1.4 ||
+        far > camera.far * 1.4 || far < camera.far * 0.7) {
+        camera.near = near; camera.far = far;
+        camera.updateProjectionMatrix();
+    }
     // The backdrop plane doubles as the ground-pick target (token moves,
     // rulers): scale it with zoom so rays from any screen point still hit it.
     plane.scale.setScalar(Math.max(1, (dist * 3) / 2000));
@@ -686,6 +700,9 @@ function initSocket(username) {
                 }
                 terrain.group.visible = true;
                 styleGroundForTerrain(plane, true);
+                // The unified world renders at every altitude (LOD rings + ocean):
+                // players can zoom out to survey, not just hug the ground.
+                controls.maxDistance = 811008;
                 if (data.worldCenter) {
                     const c = data.worldCenter;
                     // Land with the floating origin already under the province, so
@@ -698,6 +715,7 @@ function initSocket(username) {
                 // Pockets live near the true origin: pin the floating origin to 0.
                 setWorldOriginAt({ terrain, worldGroup }, 0, 0);
                 terrainIsUnified = false;
+                controls.maxDistance = 6000;   // finite room: no surveying the void
                 terrain.reset();
                 const hasTerrain = !!data.terrain;
                 if (hasTerrain) terrain.applyData(data.terrain);

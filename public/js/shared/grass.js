@@ -6,15 +6,21 @@
 // budget, so roaming never regenerates the whole field in one hitched frame.
 // This file owns what grass LOOKS like: blade geometry, wind, colors, fades.
 //
+// TWO LAYERS, one look: full-density blades out to ~176u (the fine-chunk
+// window) would be ~13M instances, so the field is split like game grass LODs:
+// - NEAR: dense turf underfoot (the close-up carpet).
+// - FAR: a sparser blanket of slightly larger blades reaching most of the
+//   fine-terrain window, so the vegetated ground visually covers the detailed
+//   tiles instead of ending in a small disc around the camera.
+// Each layer has its own rim fade and camera-distance opacity fade; zooming
+// out dissolves the dense layer first, then the far blanket.
+//
 // How it stays cheap and correct:
-// - ONE InstancedMesh, one draw call; density makes turf, not blade size.
+// - One InstancedMesh per layer (two draw calls total).
 // - Blades grow only on the grass material (respects GM paint) and only above
 //   the waterline, seated on the real terrain height (terrain.sampleHeight).
 // - Placement is deterministic per world cell (a fract-sin hash): no sync, no
 //   shimmer, and every client grows the same field.
-// - The rim fade is a shader scale by distance-to-camera (applyScatterFade);
-//   a camera-distance opacity fade dissolves the whole field on zoom-out
-//   (sub-pixel blades only alias into speckle from a high camera).
 //
 // Scale is real: 1 world unit = 1 grid cell = 5 ft = 60 inches. A blade is
 // BLADE_H 0.12u ~= 7", ~1" wide at the root — tiny next to a 5 ft square, so
@@ -24,19 +30,20 @@ import * as THREE from 'three';
 import { SEA_LEVEL } from './terrain.js';
 import { ScatterField, applyScatterFade } from './scatter.js';
 
-const CAP          = 135000; // instance capacity (worst case: all-grass tile cover)
-const RADIUS       = 12;     // world-units of grass around the camera target (60 ft)
-const TILE         = 6;      // scatter tile size (world units)
-const STEP         = 0.18;   // tuft spacing (~11 inches)
-const DENSITY      = 0.8;    // fraction of candidate cells that grow a tuft
-const CLUMP        = 4;      // blades per tuft
-const CLUMP_R      = 0.09;   // tuft spread radius (~5 inches)
-const EDGE_FADE    = 0.7;    // rim fade starts at this fraction of RADIUS
-// Camera-distance fade: past FADE_NEAR the whole field dissolves, gone by FADE_FAR.
-const FADE_NEAR    = 22;
-const FADE_FAR     = 38;
-const BLADE_H      = 0.12;   // ~7 inches
-const BLADE_W      = 0.018;  // ~1 inch base half-width
+// Layer dials. CAP is the worst case (every cell grass material) of the tile
+// cover area x blades per cell; blades/u^2 = DENSITY*CLUMP/STEP^2.
+const NEAR = {
+    RADIUS: 12, TILE: 6, STEP: 0.17, DENSITY: 0.85, CLUMP: 5, CLUMP_R: 0.09,
+    CAP: 195000, EDGE: 0.7, SCALE: 1,
+    FADE_NEAR: 22, FADE_FAR: 38          // camera-distance opacity fade
+};
+const FAR = {
+    RADIUS: 55, TILE: 16, STEP: 0.55, DENSITY: 0.6, CLUMP: 2, CLUMP_R: 0.12,
+    CAP: 85000, EDGE: 0.75, SCALE: 1.35,
+    FADE_NEAR: 28, FADE_FAR: 50
+};
+const BLADE_H = 0.12;   // ~7 inches
+const BLADE_W = 0.018;  // ~1 inch base half-width
 
 // Deterministic 0..1 hash of two world coords (GLSL fract-sin trick).
 function hash2(x, z) {
@@ -75,6 +82,18 @@ function makeBladeGeometry() {
 
 export class Grass {
     constructor(terrain, scene) {
+        this.terrain = terrain;
+        this._timeU = { value: 0 };
+        this._geometry = makeBladeGeometry();
+        this._layers = [
+            this._makeLayer(NEAR, terrain, scene),
+            this._makeLayer(FAR, terrain, scene)
+        ];
+        // Kept for pages/tests that peek at .mesh (the dense layer is "the" grass).
+        this.mesh = this._layers[0].mesh;
+    }
+
+    _makeLayer(cfg, terrain, scene) {
         // vertexColors multiplies the baked root->tip gradient with the
         // per-instance green tint. The emissive floor keeps back faces (whose
         // up-normals get flipped downward by DoubleSide) from going black.
@@ -83,11 +102,10 @@ export class Grass {
             vertexColors: true, side: THREE.DoubleSide,
             transparent: true, opacity: 1   // opacity drives the camera-distance fade
         });
-        this._timeU = { value: 0 };
-        this._fadeU = {
+        const fadeU = {
             uCenter: { value: new THREE.Vector2() },
-            uFadeStart: { value: RADIUS * EDGE_FADE },
-            uFadeEnd: { value: RADIUS }
+            uFadeStart: { value: cfg.RADIUS * cfg.EDGE },
+            uFadeEnd: { value: cfg.RADIUS }
         };
         mat.onBeforeCompile = (shader) => {
             // Wind: sway the tip, phase-shifted per blade by its instance
@@ -103,40 +121,41 @@ export class Grass {
                   transformed.z += cos(uTime * 1.3 + gPhase * 1.7) * gBend * 0.02;
                 #endif`
             );
-            applyScatterFade(shader, this._fadeU);   // rim fade (anchors project_vertex)
+            applyScatterFade(shader, fadeU);   // rim fade (anchors project_vertex)
         };
-        this.mesh = new THREE.InstancedMesh(makeBladeGeometry(), mat, CAP);
-        this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-        this.mesh.count = 0;
-        this.mesh.frustumCulled = false;     // instances live near the camera, not the mesh origin
-        this.mesh.castShadow = false;
-        this.mesh.receiveShadow = false;
-        this.mesh.visible = false;
-        scene.add(this.mesh);
+        const mesh = new THREE.InstancedMesh(this._geometry, mat, cfg.CAP);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        mesh.count = 0;
+        mesh.frustumCulled = false;     // instances live near the camera, not the mesh origin
+        mesh.castShadow = false;
+        mesh.receiveShadow = false;
+        mesh.visible = false;
+        scene.add(mesh);
 
         const dummy = new THREE.Object3D();
-        this.field = new ScatterField({
-            terrain, meshes: [this.mesh],
-            tileSize: TILE, radius: RADIUS, budgetMs: 3,
+        const field = new ScatterField({
+            terrain, meshes: [mesh],
+            tileSize: cfg.TILE, radius: cfg.RADIUS, budgetMs: 3,
             buildTile: (x0, z0, x1, z1, emit) => {
                 // Cell grid anchored to world multiples of STEP (independent of
                 // tile boundaries), half-open per tile so no seam double-plants.
-                const k0x = Math.ceil(x0 / STEP - 1e-9), k1x = Math.ceil(x1 / STEP - 1e-9);
-                const k0z = Math.ceil(z0 / STEP - 1e-9), k1z = Math.ceil(z1 / STEP - 1e-9);
+                const S = cfg.STEP;
+                const k0x = Math.ceil(x0 / S - 1e-9), k1x = Math.ceil(x1 / S - 1e-9);
+                const k0z = Math.ceil(z0 / S - 1e-9), k1z = Math.ceil(z1 / S - 1e-9);
                 for (let kx = k0x; kx < k1x; kx++) {
                     for (let kz = k0z; kz < k1z; kz++) {
-                        const wx = kx * STEP, wz = kz * STEP;
-                        if (hash2(wx * 1.3, wz * 1.7) > DENSITY) continue;   // thin out
-                        if (terrain.dominantMaterial(wx, wz) !== 0) continue; // grass channel only
-                        const px = wx + (hash2(wx + 11.3, wz) - 0.5) * STEP;
-                        const pz = wz + (hash2(wx, wz + 7.7) - 0.5) * STEP;
+                        const wx = kx * S, wz = kz * S;
+                        if (hash2(wx * 1.3, wz * 1.7) > cfg.DENSITY) continue;  // thin out
+                        if (terrain.dominantMaterial(wx, wz) !== 0) continue;   // grass channel only
+                        const px = wx + (hash2(wx + 11.3, wz) - 0.5) * S;
+                        const pz = wz + (hash2(wx, wz + 7.7) - 0.5) * S;
                         const hy = terrain.sampleHeight(px, pz);
-                        if (hy < SEA_LEVEL + 0.3) continue;                  // no underwater/beach grass
+                        if (hy < SEA_LEVEL + 0.3) continue;                     // no underwater/beach grass
                         // A tight clump of blades per cell: single tiny blades
                         // read as specks, a tuft reads as grass.
-                        for (let k = 0; k < CLUMP; k++) {
+                        for (let k = 0; k < cfg.CLUMP; k++) {
                             const ang = hash2(px + k * 1.7, pz + k * 2.3) * Math.PI * 2;
-                            const rad = hash2(px + k * 3.1, pz - k) * CLUMP_R;
+                            const rad = hash2(px + k * 3.1, pz - k) * cfg.CLUMP_R;
                             const bx = px + Math.cos(ang) * rad;
                             const bz = pz + Math.sin(ang) * rad;
                             dummy.position.set(bx, hy, bz);   // TRUE world coords (pack shifts by origin)
@@ -146,7 +165,7 @@ export class Grass {
                                 (hash2(bx + 7.7, bz + 1.2) - 0.5) * 0.5,
                                 hash2(bx + 3.1, bz + 9.2) * Math.PI * 2,
                                 (hash2(bx + 4.4, bz + 6.6) - 0.5) * 0.5);
-                            const s = 0.6 + hash2(bx + 5, bz + 5) * 0.7;
+                            const s = (0.6 + hash2(bx + 5, bz + 5) * 0.7) * cfg.SCALE;
                             dummy.scale.set(s, s, s);
                             dummy.updateMatrix();
                             // Per-blade green with a little hue jitter, kept a touch
@@ -159,7 +178,7 @@ export class Grass {
                 }
             }
         });
-        this.terrain = terrain;
+        return { cfg, mat, mesh, field, fadeU };
     }
 
     // Call each frame. `unified` gates grass to the continuous outdoor world
@@ -167,15 +186,18 @@ export class Grass {
     update(camera, controls, unified) {
         this._timeU.value = performance.now() / 1000;
         const dist = camera.position.distanceTo(controls.target);
-        if (!unified || dist > FADE_FAR) {
-            this.mesh.visible = false;       // cache survives; returning is instant
-            return;
-        }
-        this.mesh.visible = true;
-        // Dissolve with zoom instead of popping.
-        this.mesh.material.opacity = Math.min(1, Math.max(0, (FADE_FAR - dist) / (FADE_FAR - FADE_NEAR)));
-        this._fadeU.uCenter.value.set(controls.target.x, controls.target.z); // scene coords
         const ox = this.terrain.worldOrigin.x, oz = this.terrain.worldOrigin.z;
-        this.field.update(controls.target.x + ox, controls.target.z + oz, ox, oz);
+        const cwx = controls.target.x + ox, cwz = controls.target.z + oz;
+        for (const L of this._layers) {
+            if (!unified || dist > L.cfg.FADE_FAR) {
+                L.mesh.visible = false;      // cache survives; returning is instant
+                continue;
+            }
+            L.mesh.visible = true;
+            // Dissolve with zoom instead of popping.
+            L.mat.opacity = Math.min(1, Math.max(0, (L.cfg.FADE_FAR - dist) / (L.cfg.FADE_FAR - L.cfg.FADE_NEAR)));
+            L.fadeU.uCenter.value.set(controls.target.x, controls.target.z);   // scene coords
+            L.field.update(cwx, cwz, ox, oz);
+        }
     }
 }

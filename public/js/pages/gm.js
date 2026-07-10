@@ -423,7 +423,10 @@ function initSocket() {
                     const depth = mapDepth(currentMapKey);
                     if (depth >= TACTICAL_DEPTH) {
                         camera.position.set(sx + 20, 30, sz + 20);
-                        controls.maxDistance = 6000;
+                        // The unified world renders at every altitude (LOD rings +
+                        // ocean), so don't wall the zoom-out at tactical height —
+                        // let it climb to the continent-lens ceiling.
+                        controls.maxDistance = 811008;
                     } else {
                         // Hex lens: high enough that the layer's field fills the view.
                         const alt = TIER_WIDTH[depth] * 8;
@@ -1434,6 +1437,11 @@ function updateTerrainLOD() {
         maybeRebaseWorld({ terrain, worldGroup, camera, controls });
     }
     const dist = camera.position.distanceTo(controls.target);
+    // Wheel zoom spans grass level to lens altitude — five orders of magnitude.
+    // A constant zoom speed makes that trip take hundreds of ticks; scale the
+    // speed with distance (log) so high-altitude ticks cover real ground while
+    // close-up stays precise.
+    controls.zoomSpeed = Math.min(4, Math.max(1, 0.8 + Math.log10(Math.max(1, dist / 25))));
     // Frustum follows zoom: hex-tier lenses sit hundreds of thousands of units
     // up, tactical work needs near=0.1. Scale both ends (only on real change —
     // updateProjectionMatrix isn't free) so depth precision stays healthy.
