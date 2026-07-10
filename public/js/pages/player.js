@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
 import { Terrain } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
+import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
@@ -15,6 +16,7 @@ import { setupLoginModal } from '../shared/login.js';
 
 let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
 let grass = null;   // instanced ground-cover grass (shared/grass.js)
+let trees = null;   // procedural low-poly trees (shared/trees.js)
 
 // --- Character sheet state ---
 let SRD = null;
@@ -58,6 +60,7 @@ function init() {
     terrain.group.visible = false;
     scene.add(terrain.group);
     grass = new Grass(terrain, scene);   // ground-cover, shown only at tactical zoom
+    trees = new Trees(terrain, scene);   // biome-scattered low-poly trees
 
     ruler = new RulerTool({
         scene: worldGroup, // ruler points/segments are world coords
@@ -186,6 +189,7 @@ function updateTerrainLOD() {
         scene.fog.far = FOG_FAR;
     }
     if (grass) grass.update(camera, controls, terrainIsUnified);
+    if (trees) trees.update(camera, controls, terrainIsUnified);
 }
 
 function onPointerDown(event) {
