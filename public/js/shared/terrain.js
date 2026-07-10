@@ -377,7 +377,16 @@ export class Terrain {
         polygonOffsetUnits: ring.lod * 2
       });
     }
-    this._lodDirty = false;  // an edit changed terrain -> rings resample it
+    // Edit revisions instead of booleans: ring rebuilds are time-sliced (one
+    // ring job at a time, a few rows per frame), so each ring records the
+    // revision it was built at and rebuilds when it falls behind. _lodRev
+    // bumps on any edit (fine rings care); _lodRevAll marks map resets/biome
+    // regeneration (coarse rings care too).
+    this._lodRev = 1;
+    this._lodRevAll = 1;
+    this._ringJob = null;      // in-flight time-sliced ring rebuild
+    this._ringScratch = null;  // shared staging buffers (all rings are 193x193)
+    this._fMemoX = NaN; this._fMemoZ = NaN; this._fMemo = null; // _fields memo
 
     this.group = new THREE.Group();
     this.group.add(this.lodGroup);
@@ -424,11 +433,17 @@ export class Terrain {
   // continuous — painting warps the e/mo FIELDS, never the heights directly.
   setBiomeOverrides(tree) {
     this._hexTree = (tree && Object.keys(tree).some(k => tree[k] && Object.keys(tree[k]).length)) ? tree : null;
+    this._fMemoX = NaN; // painted hexes warp the fields: drop the memo
   }
 
   // Elevation + moisture at a world point, with painted-hex warping applied
   // shallow -> deep (a Province tag refines its Kingdom tag, etc).
   _fields(wx, wz) {
+    // One-point memo: height and material generation both need the fields at
+    // the SAME point (genHeightAt then genMaterialAt->genBiomeAt), and the
+    // fields are the expensive half (11 fbm octaves). Exact-key, pure function
+    // — invalidated only when the painted-hex overrides change.
+    if (wx === this._fMemoX && wz === this._fMemoZ) return this._fMemo;
     let e = this._genElev(wx, wz);
     let mo = this._genMoisture(wx, wz);
     const tree = this._hexTree;
@@ -451,7 +466,8 @@ export class Terrain {
         key += '/' + h.q + ',' + h.r;
       }
     }
-    return { e, mo };
+    this._fMemoX = wx; this._fMemoZ = wz;
+    return (this._fMemo = { e, mo });
   }
   // Ground height at a world point. Continuous (no cliffs at biome borders) but
   // strongly biome-differentiated via smooth masks over the same fields the
@@ -571,63 +587,99 @@ export class Terrain {
   // Rebuild rings that recentered by a threshold or were dirtied by an edit.
   // Geometry is anchor-local (floating-origin safe); each ring sits slightly
   // lower than the finer one so near detail always wins where they overlap.
+  //
+  // TIME-SLICED: a ring is 193x193 generator samples (~tens of ms), so instead
+  // of rebuilding every stale ring in one frame, one ring at a time is filled
+  // a few rows per frame into shared scratch buffers and committed to its
+  // geometry in a single frame. While a job is in flight the ring keeps
+  // showing its old area — the finer rings/chunks over it cover the lag.
   updateLODRings(center) {
+    // While the fine-chunk window is draining, every frame already carries a
+    // ~20ms chunk build — pause ring work so the costs never stack. Rings keep
+    // showing their previous area meanwhile.
+    if (this._windowPending && this._windowPending.length) return;
+    // Continue the in-flight job first: budgeted row fill, then commit.
+    if (this._ringJob && this._ringStep()) return;
+    // No job (or it just finished): find the finest ring that's stale.
     for (const ring of this.lodRings) {
       const snap = ring.cell * 4;
       const scx = Math.round(center.x / snap) * snap, scz = Math.round(center.z / snap) * snap;
-      // Coarse rings ignore per-edit dirtying (strokes are sub-texel there);
-      // _lodDirtyAll (map reset / biome regeneration) rebuilds everything.
-      const dirty = this._lodDirtyAll || (this._lodDirty && !ring.coarse);
-      if (!dirty && ring.center && ring.center.x === scx && ring.center.z === scz) continue;
-      ring.center = { x: scx, z: scz };
+      // Coarse rings ignore per-edit revisions (strokes are sub-texel there);
+      // _lodRevAll (map reset / biome regeneration) rebuilds everything.
+      const needRev = ring.coarse ? this._lodRevAll : this._lodRev;
+      const moved = !ring.center || ring.center.x !== scx || ring.center.z !== scz;
+      if (!moved && (ring.builtRev || 0) >= needRev) continue;
       const n = Math.floor((ring.half * 2) / ring.cell) + 1;
-      const mid = (n - 1) / 2;
-      let geo;
-      if (!ring.mesh) {
-        geo = new THREE.BufferGeometry();
-        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
-        geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
-        const idx = [];
-        for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
-          // Clipmap hole: skip quads the next-finer ring is guaranteed to cover.
-          if (ring.holeCells > 0 &&
-              Math.abs(i - mid + 0.5) < ring.holeCells && Math.abs(j - mid + 0.5) < ring.holeCells) continue;
-          const a = j * n + i, b = a + 1, d = a + n, e = d + 1;
-          idx.push(a, d, b, b, d, e);
-        }
-        geo.setIndex(idx);
-        ring.mesh = new THREE.Mesh(geo, ring.material);
-        ring.mesh.name = 'lod-ring';
-        this.lodGroup.add(ring.mesh);
-      } else {
-        geo = ring.mesh.geometry;
+      if (!this._ringScratch || this._ringScratch.n < n) {
+        this._ringScratch = { n, pos: new Float32Array(n * n * 3), col: new Float32Array(n * n * 3) };
       }
-      const pos = geo.attributes.position, col = geo.attributes.color;
-      const tmp = new THREE.Color();
-      for (let j = 0; j < n; j++) {
-        for (let i = 0; i < n; i++) {
-          const wx = scx - ring.half + i * ring.cell, wz = scz - ring.half + j * ring.cell;
-          const k = j * n + i;
-          const h = this._lodSample(wx, wz, ring.lod, tmp);
-          // Skirt: dip the ring down near its hole so the finer level covering
-          // that band always renders on top (no interpenetration contours).
-          let dip = 0.05;
-          if (ring.holeCells > 0) {
-            const cheb = Math.max(Math.abs(i - mid), Math.abs(j - mid));
-            const edge = ring.holeCells + ring.skirtCells;
-            if (cheb < edge) dip += (edge - cheb) * ring.skirtRate;
-          }
-          pos.setXYZ(k, wx - scx, h - dip, wz - scz); // anchor-local verts
-          col.setXYZ(k, tmp.r, tmp.g, tmp.b);
-        }
-      }
-      pos.needsUpdate = true; col.needsUpdate = true;
-      geo.computeVertexNormals();
-      geo.computeBoundingSphere();
-      ring.mesh.position.set(scx - this.worldOrigin.x, 0, scz - this.worldOrigin.z);
+      this._ringJob = { ring, scx, scz, n, mid: (n - 1) / 2, row: 0, rev: needRev };
+      this._ringStep();
+      return; // one ring job per frame keeps the frame budget honest
     }
-    this._lodDirty = false;
-    this._lodDirtyAll = false;
+  }
+
+  // Fill rows of the pending ring rebuild under a per-frame budget; commit the
+  // finished sheet to the ring's geometry. Returns true while work remains.
+  _ringStep() {
+    const job = this._ringJob, ring = job.ring;
+    const { scx, scz, n, mid } = job;
+    const pos = this._ringScratch.pos, col = this._ringScratch.col;
+    const tmp = this._ringTmpColor || (this._ringTmpColor = new THREE.Color());
+    const t0 = performance.now();
+    while (job.row < n && performance.now() - t0 < 4) {
+      const j = job.row;
+      for (let i = 0; i < n; i++) {
+        const wx = scx - ring.half + i * ring.cell, wz = scz - ring.half + j * ring.cell;
+        const k = (j * n + i) * 3;
+        const h = this._lodSample(wx, wz, ring.lod, tmp);
+        // Skirt: dip the ring down near its hole so the finer level covering
+        // that band always renders on top (no interpenetration contours).
+        let dip = 0.05;
+        if (ring.holeCells > 0) {
+          const cheb = Math.max(Math.abs(i - mid), Math.abs(j - mid));
+          const edge = ring.holeCells + ring.skirtCells;
+          if (cheb < edge) dip += (edge - cheb) * ring.skirtRate;
+        }
+        pos[k] = wx - scx; pos[k + 1] = h - dip; pos[k + 2] = wz - scz; // anchor-local
+        col[k] = tmp.r; col[k + 1] = tmp.g; col[k + 2] = tmp.b;
+      }
+      job.row++;
+    }
+    if (job.row < n) return true;   // more rows next frame
+
+    // Commit: copy the finished sheet into the geometry in one frame.
+    let geo;
+    if (!ring.mesh) {
+      geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
+      const idx = [];
+      for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
+        // Clipmap hole: skip quads the next-finer ring is guaranteed to cover.
+        if (ring.holeCells > 0 &&
+            Math.abs(i - mid + 0.5) < ring.holeCells && Math.abs(j - mid + 0.5) < ring.holeCells) continue;
+        const a = j * n + i, b = a + 1, d = a + n, e = d + 1;
+        idx.push(a, d, b, b, d, e);
+      }
+      geo.setIndex(idx);
+      ring.mesh = new THREE.Mesh(geo, ring.material);
+      ring.mesh.name = 'lod-ring';
+      this.lodGroup.add(ring.mesh);
+    } else {
+      geo = ring.mesh.geometry;
+    }
+    geo.attributes.position.array.set(pos.subarray(0, n * n * 3));
+    geo.attributes.color.array.set(col.subarray(0, n * n * 3));
+    geo.attributes.position.needsUpdate = true;
+    geo.attributes.color.needsUpdate = true;
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    ring.mesh.position.set(scx - this.worldOrigin.x, 0, scz - this.worldOrigin.z);
+    ring.center = { x: scx, z: scz };
+    ring.builtRev = job.rev;
+    this._ringJob = null;
+    return false;
   }
 
   setLODVisible(v) { if (this.lodGroup) this.lodGroup.visible = v; }
@@ -685,7 +737,7 @@ export class Terrain {
     if (!d) { d = { heights: false, splat: false }; this._dirtyData.set(k, d); }
     d[layer] = true;
     this._dirtyMesh.add(k);
-    this._lodDirty = true; // this edit should show in the far LOD rings too
+    this._lodRev++; // this edit should show in the far LOD rings too
     // A border vertex is read by neighbor meshes (position apron at low edges,
     // normals at both edges) — mark them for rebuild too.
     if (lx === 0) this._dirtyMesh.add(ckey(cx - 1, cz));
@@ -1092,17 +1144,18 @@ export class Terrain {
       }
       this._oceanDirty = true;
     }
-    // Drain: one chunk per frame keeps the app interactive while ground fills in.
+    // Drain: one chunk per frame keeps the app interactive while ground fills
+    // in. The ocean rebuild gets its own (chunk-free) frame after the drain so
+    // the two big costs never stack in one frame.
     if (this._windowPending && this._windowPending.length) {
       const [kx, kz] = this._windowPending.shift();
       const k = ckey(kx, kz);
       let c = this.chunks.get(k);
       if (!c) { c = this._makeGeneratedChunk(kx, kz); this.chunks.set(k, c); }
       if (!c.mesh) this._buildChunkMesh(k);
-      if (!this._windowPending.length && this._oceanDirty) {
-        this._rebuildOcean(); // coastline follows the window (once, after the fill)
-        this._oceanDirty = false;
-      }
+    } else if (this._oceanDirty) {
+      this._rebuildOcean(); // coastline follows the window (once, after the fill)
+      this._oceanDirty = false;
     }
   }
 
@@ -1133,39 +1186,64 @@ export class Terrain {
     const { cx, cz } = this._windowCenter;
     const r = this.windowRadius;
     const ax = cx * CHUNK_SIZE, az = cz * CHUNK_SIZE; // anchor (world units)
-    const pos = [], depth = [];
+    // Preallocated scratch: an all-ocean window is ~124k quads, and pushing
+    // ~3M floats through JS arrays took ~150ms per rebuild. Indexed writes
+    // into persistent typed arrays + one memcpy at the end is a few ms.
+    const maxQuads = (2 * r + 1) * (2 * r + 1) * (CHUNK_VERTS / 2) * (CHUNK_VERTS / 2);
+    if (!this._oceanScratch || this._oceanScratch.maxQuads < maxQuads) {
+      this._oceanScratch = { maxQuads, pos: new Float32Array(maxQuads * 18), depth: new Float32Array(maxQuads * 6) };
+    }
+    const P = this._oceanScratch.pos, D = this._oceanScratch.depth;
+    let q = 0;
     for (let dz = -r; dz <= r; dz++) {
       for (let dx = -r; dx <= r; dx++) {
         const c = this.chunks.get(ckey(cx + dx, cz + dz));
         if (!c || c.minH >= SEA_LEVEL) continue;    // all-land chunk: skip fast
         const gox = (cx + dx) * CHUNK_VERTS, goz = (cz + dz) * CHUNK_VERTS;
+        const H = c.heights, CV = CHUNK_VERTS;
         for (let lz = 0; lz < CHUNK_VERTS; lz += 2) {     // 1 cell = 2 lattice steps
           for (let lx = 0; lx < CHUNK_VERTS; lx += 2) {
             const gx = gox + lx, gz = goz + lz;
-            const a = this.getH(gx, gz), b = this.getH(gx + 2, gz);
-            const c2 = this.getH(gx, gz + 2), d = this.getH(gx + 2, gz + 2);
+            // Fast path: read this chunk's height array directly; only the
+            // +2 reads on the last row/column cross into a neighbor chunk.
+            const inX = lx + 2 < CV, inZ = lz + 2 < CV;
+            const a = H[lz * CV + lx];
+            const b = inX ? H[lz * CV + lx + 2] : this.getH(gx + 2, gz);
+            const c2 = inZ ? H[(lz + 2) * CV + lx] : this.getH(gx, gz + 2);
+            const d = (inX && inZ) ? H[(lz + 2) * CV + lx + 2] : this.getH(gx + 2, gz + 2);
             // Small epsilon: skip barely-submerged cells, which otherwise pepper
             // flat shallows with isolated foam-dot quads (dashed waterlines).
             if (Math.min(a, b, c2, d) >= SEA_LEVEL - 0.05) continue;
             const x0 = gx * VSPACE - ax, z0 = gz * VSPACE - az, x1 = x0 + 1, z1 = z0 + 1;
-            pos.push(x0, SEA_LEVEL, z0, x1, SEA_LEVEL, z0, x1, SEA_LEVEL, z1,
-                     x0, SEA_LEVEL, z0, x1, SEA_LEVEL, z1, x0, SEA_LEVEL, z1);
-            depth.push(SEA_LEVEL - a, SEA_LEVEL - b, SEA_LEVEL - d,
-                       SEA_LEVEL - a, SEA_LEVEL - d, SEA_LEVEL - c2);
+            let o = q * 18;
+            P[o] = x0; P[o + 1] = SEA_LEVEL; P[o + 2] = z0;
+            P[o + 3] = x1; P[o + 4] = SEA_LEVEL; P[o + 5] = z0;
+            P[o + 6] = x1; P[o + 7] = SEA_LEVEL; P[o + 8] = z1;
+            P[o + 9] = x0; P[o + 10] = SEA_LEVEL; P[o + 11] = z0;
+            P[o + 12] = x1; P[o + 13] = SEA_LEVEL; P[o + 14] = z1;
+            P[o + 15] = x0; P[o + 16] = SEA_LEVEL; P[o + 17] = z1;
+            o = q * 6;
+            D[o] = SEA_LEVEL - a; D[o + 1] = SEA_LEVEL - b; D[o + 2] = SEA_LEVEL - d;
+            D[o + 3] = SEA_LEVEL - a; D[o + 4] = SEA_LEVEL - d; D[o + 5] = SEA_LEVEL - c2;
+            q++;
           }
         }
       }
     }
     const geo = this.oceanMesh.geometry;
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(depth, 1));
-    const vcount = pos.length / 3;
+    // slice() = one memcpy each; the scratch stays reusable for the next rebuild.
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(P.slice(0, q * 18), 3));
+    geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(D.slice(0, q * 6), 1));
+    const vcount = q * 6;
     geo.setAttribute('aFlow', new THREE.Float32BufferAttribute(new Float32Array(vcount * 2), 2));
     geo.setAttribute('aFlowSpeed', new THREE.Float32BufferAttribute(new Float32Array(vcount), 1));
-    geo.computeBoundingSphere();
+    // Analytic bounds: the sheet is the window box at SEA_LEVEL (anchor-local).
+    // computeBoundingSphere would walk ~750k verts for the same answer.
+    const half = (r + 0.5) * CHUNK_SIZE + 1;
+    geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, SEA_LEVEL, 0), Math.SQRT2 * half);
     this.oceanMesh.position.set(ax - this.worldOrigin.x, 0, az - this.worldOrigin.z);
     this.oceanMesh.userData.anchor = { x: ax, z: az };
-    this.oceanMesh.visible = pos.length > 0;
+    this.oceanMesh.visible = q > 0;
   }
 
   // ===== water v2: authored bodies with physically settled footprints =====
@@ -1540,8 +1618,8 @@ export class Terrain {
       this.chunks.delete(k);
     }
     this._windowCenter = null;  // next updateWindow restreams + rebuilds the ocean
-    this._lodDirty = true;
-    this._lodDirtyAll = true;   // painted biomes show at every LOD scale
+    this._lodRev++;
+    this._lodRevAll = this._lodRev;   // painted biomes show at every LOD scale
     this.refreshWater();        // lakes/rivers re-settle on the new ground
   }
 
@@ -1558,8 +1636,8 @@ export class Terrain {
     this._dirtyData.clear();
     this._dirtyMesh.clear();
     this._windowCenter = null;
-    this._lodDirty = true; // resample the LOD rings for the new map
-    this._lodDirtyAll = true;
+    this._lodRev++; // resample the LOD rings for the new map
+    this._lodRevAll = this._lodRev;
     this.water = { bodies: [] };
     this.refreshWater();
   }
