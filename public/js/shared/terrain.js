@@ -1066,25 +1066,44 @@ export class Terrain {
   // it. Edited chunks keep their data when out of window; only their mesh is freed.
   updateWindow(center) {
     const cx = Math.floor(center.x / CHUNK_SIZE), cz = Math.floor(center.z / CHUNK_SIZE);
-    if (this._windowCenter && this._windowCenter.cx === cx && this._windowCenter.cz === cz) return;
-    this._windowCenter = { cx, cz };
-    const r = this.windowRadius;
-    for (let dz = -r; dz <= r; dz++) {
-      for (let dx = -r; dx <= r; dx++) {
-        const kx = cx + dx, kz = cz + dz, k = ckey(kx, kz);
-        let c = this.chunks.get(k);
-        if (!c) { c = this._makeGeneratedChunk(kx, kz); this.chunks.set(k, c); }
-        if (!c.mesh) this._buildChunkMesh(k);
+    if (!this._windowCenter || this._windowCenter.cx !== cx || this._windowCenter.cz !== cz) {
+      this._windowCenter = { cx, cz };
+      const r = this.windowRadius;
+      // Queue the missing chunks nearest-first instead of generating the whole
+      // window in one frame: a chunk costs tens of ms to generate + mesh, so a
+      // teleport used to freeze for seconds and a pan hitched crossing every
+      // chunk boundary. The queue drains a chunk per updateWindow call (each
+      // frame); the LOD rings underneath cover the ground until it lands.
+      this._windowPending = [];
+      for (let dz = -r; dz <= r; dz++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const kx = cx + dx, kz = cz + dz;
+          const c = this.chunks.get(ckey(kx, kz));
+          if (!c || !c.mesh) this._windowPending.push([kx, kz, dx * dx + dz * dz]);
+        }
+      }
+      this._windowPending.sort((a, b) => a[2] - b[2]);
+      for (const [k, c] of this.chunks) {
+        const [kx, kz] = k.split(',').map(Number);
+        if (Math.max(Math.abs(kx - cx), Math.abs(kz - cz)) > r + 1) {
+          if (c.mesh) this._disposeChunkMesh(k);
+          if (c.generated) this.chunks.delete(k); // regenerated deterministically on return
+        }
+      }
+      this._oceanDirty = true;
+    }
+    // Drain: one chunk per frame keeps the app interactive while ground fills in.
+    if (this._windowPending && this._windowPending.length) {
+      const [kx, kz] = this._windowPending.shift();
+      const k = ckey(kx, kz);
+      let c = this.chunks.get(k);
+      if (!c) { c = this._makeGeneratedChunk(kx, kz); this.chunks.set(k, c); }
+      if (!c.mesh) this._buildChunkMesh(k);
+      if (!this._windowPending.length && this._oceanDirty) {
+        this._rebuildOcean(); // coastline follows the window (once, after the fill)
+        this._oceanDirty = false;
       }
     }
-    for (const [k, c] of this.chunks) {
-      const [kx, kz] = k.split(',').map(Number);
-      if (Math.max(Math.abs(kx - cx), Math.abs(kz - cz)) > r + 1) {
-        if (c.mesh) this._disposeChunkMesh(k);
-        if (c.generated) this.chunks.delete(k); // regenerated deterministically on return
-      }
-    }
-    this._rebuildOcean(); // coastline follows the window
   }
 
   // Enable/disable the world ocean (unified world only; pockets dig below
