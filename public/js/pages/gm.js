@@ -8,6 +8,7 @@ import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
+import { buildWallRun, buildFloorPatch, disposeBuiltObject } from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -44,6 +45,14 @@ let lakeDrag = null;
 // River draft: clicked waypoints awaiting Enter/double-click commit.
 let riverDraft = null;   // { points: [{x,z}] }
 let riverPreview = null; // polyline following the draft + cursor
+
+// --- Build tool (tile brush) state: walls/floors dragged out on the grid.
+// Wall drags anchor on grid CORNERS (world coords), floor drags on CELL indices.
+const buildBrush = { mode: 'wall', style: 'stone', scruffy: false, wallHeight: 2 };
+const MAX_RUN = 48;                        // cells per gesture (walls and floor sides)
+let buildDrag = null;                      // { kind:'wall'|'floor', ax, az, seed }
+let buildGhost = null;                     // translucent preview in worldGroup
+let buildGhostKey = '';                    // memo: rebuild only when the snap changes
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
 
@@ -271,6 +280,8 @@ function enterMap(key) {
     rampStart = null;
     lakeDrag = null;
     cancelRiverDraft();
+    buildDrag = null;
+    clearBuildGhost();
     if (rampPreview) rampPreview.visible = false;
     if (terrain) terrain.setBrush({ visible: false });
     updateTerrainPanel();
@@ -405,6 +416,7 @@ function initSocket() {
                 // load it once, then just fly the camera between layers (no
                 // reload flash, no re-applying 1000s of chunks every hop).
                 if (!terrainIsUnified) {
+                    terrain.generatorOn = true;
                     terrain.reset();
                     undoStack.length = 0; redoStack.length = 0;
                     if (data.terrain) terrain.applyData(data.terrain);
@@ -437,9 +449,12 @@ function initSocket() {
             } else {
                 // A pocket: its own separate terrain near the true origin — pin
                 // the floating origin to 0 (pocket bounds assume scene == world).
+                // Generator OFF: pocket ground is implicit flat 0 plus edits,
+                // not the procedural world that happens to sit at the origin.
                 setWorldOriginAt({ terrain, worldGroup }, 0, 0);
                 controls.maxDistance = 6000;
                 terrainIsUnified = false;
+                terrain.generatorOn = false;
                 terrain.reset();
                 undoStack.length = 0; redoStack.length = 0;
                 if (data.terrain) terrain.applyData(data.terrain);
@@ -659,6 +674,25 @@ function init() {
     const flattenBtn = document.getElementById('flatten-target');
     if (flattenBtn) flattenBtn.addEventListener('click', clearFlattenTarget);
 
+    // --- Build tool (tile brush) wiring ---
+    toolMenuButtons.build = document.getElementById('btn-tool-build');
+    toolMenuButtons.build.addEventListener('click', () => setTool('build'));
+    document.querySelectorAll('#build-modes .brush-mode').forEach(btn => {
+        btn.addEventListener('click', () => setBuildMode(btn.dataset.bmode));
+    });
+    document.querySelectorAll('#build-styles .brush-mode').forEach(btn => {
+        btn.addEventListener('click', () => setBuildStyle(btn.dataset.bstyle));
+    });
+    document.getElementById('wall-height').addEventListener('input', e => {
+        buildBrush.wallHeight = +e.target.value;
+        document.getElementById('wall-height-val').textContent = (+e.target.value).toFixed(1);
+        clearBuildGhost();
+    });
+    document.getElementById('build-scruffy').addEventListener('change', e => {
+        buildBrush.scruffy = e.target.checked;
+        clearBuildGhost();
+    });
+
     // Biome palette (hex layers).
     document.querySelectorAll('#biome-panel .biome-swatch').forEach(btn => {
         btn.addEventListener('click', () => setBiome(btn.dataset.biome));
@@ -710,6 +744,26 @@ function onPointerDown(event) {
         const h = worldToHex(p.x, p.z);
         if (!hexInField(h.q, h.r)) return;
         socket.emit('update-hex', { q: h.q, r: h.r, biome: event.altKey ? null : currentBiome });
+        return;
+    }
+
+    // Build tool (tile brush): walls/floors on tactical maps.
+    if (buildActive()) {
+        if (buildBrush.mode === 'erase' || event.altKey) {
+            const target = pickBuildTarget(event);
+            if (target) socket.emit('delete-object', { id: target.userData.syncId });
+            return;
+        }
+        const p = pointerToGround(event);
+        if (!p) return;
+        const seed = Math.floor(Math.random() * 1e9);
+        if (buildBrush.mode === 'wall') {
+            const c = snapCorner(p);
+            buildDrag = { kind: 'wall', ax: c.x, az: c.z, seed };
+        } else {
+            buildDrag = { kind: 'floor', ax: Math.floor(p.x / GRID_CELL_SIZE), az: Math.floor(p.z / GRID_CELL_SIZE), seed };
+        }
+        updateBuildGhost(p);
         return;
     }
 
@@ -770,7 +824,16 @@ function onPointerDown(event) {
     }
     const clickedObject = objects.find(obj => obj === topLevelObject);
 
-    if (clickedObject) {
+    // Build surfaces usually read as GROUND for the placement tools — you drop
+    // tokens ON a floor, measure across a room, release a move onto it. The
+    // move tool can still grab one when nothing else is selected (to reposition
+    // a whole run/patch or Del-delete it); the build tool's erase removes them.
+    const clickedType = clickedObject && clickedObject.userData.objectType;
+    const buildAsGround = (clickedType === 'wall' || clickedType === 'floor') &&
+        (currentTool === 'add' || currentTool === 'ruler' ||
+         (currentTool === 'move' && selectedObject && selectedObject !== clickedObject));
+
+    if (clickedObject && !buildAsGround) {
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
             selectObject(clickedObject);
             isDraggingHeight = true;
@@ -781,7 +844,7 @@ function onPointerDown(event) {
                 selectObject(clickedObject);
             }
         }
-    } else if (firstIntersect.object.name === "tabletop") {
+    } else if (firstIntersect.object.name === "tabletop" || buildAsGround) {
         const intersectPoint = sceneToWorld(firstIntersect.point);
         const snappedPosition = snapToCurrentGrid(intersectPoint);
 
@@ -840,6 +903,13 @@ function onPointerMove(event) {
         if (isSculpting || rampStart) return;
     }
 
+    // Build tool: ghost preview follows the cursor (hover marker or live drag).
+    if (buildActive()) {
+        const p = pointerToGround(event);
+        if (p) updateBuildGhost(p);
+        return;
+    }
+
     if (isDraggingHeight && selectedObject) {
         const deltaY = event.movementY * -0.01;
         selectedObject.position.y += deltaY;
@@ -871,6 +941,15 @@ function onPointerMove(event) {
 
 function onPointerUp(event) {
     if (event.button !== 0) return;
+
+    // Build drag: commit the dragged wall run / floor rectangle.
+    if (buildDrag) {
+        const p = pointerToGround(event);
+        if (p) commitBuildDrag(p);
+        buildDrag = null;
+        clearBuildGhost();
+        return;
+    }
 
     // Lake gesture: commit the poured/re-leveled lake.
     if (lakeDrag) {
@@ -1043,7 +1122,10 @@ function onKeyDown(event) {
         return;
     }
     if (event.key === "Escape") {
-        if (riverDraft) {
+        if (buildDrag) {
+            buildDrag = null;
+            clearBuildGhost();
+        } else if (riverDraft) {
             cancelRiverDraft();
         } else if (lakeDrag) {
             terrain.setWaterData({ bodies: lakeDrag.before }); // cancel: restore pre-gesture
@@ -1236,6 +1318,125 @@ function setTool(toolName) {
     updateTerrainPanel();
 }
 
+// --- Build tool (tile brush) logic ---
+function buildActive() { return currentTool === 'build' && isTacticalKey(); }
+function snapCorner(p) {
+    return { x: Math.round(p.x / GRID_CELL_SIZE) * GRID_CELL_SIZE,
+             z: Math.round(p.z / GRID_CELL_SIZE) * GRID_CELL_SIZE };
+}
+function round2(v) { return Math.round(v * 100) / 100; }
+
+// Wall run data from anchor corner a to cursor corner b: axis-aligned along the
+// dominant drag axis, ground heights baked per piece so both screens (and later
+// loads) rebuild the exact same wall (see structures.js).
+function wallData(a, b) {
+    let dx = Math.round((b.x - a.x) / GRID_CELL_SIZE), dz = Math.round((b.z - a.z) / GRID_CELL_SIZE);
+    if (Math.abs(dx) >= Math.abs(dz)) dz = 0; else dx = 0;
+    dx = Math.max(-MAX_RUN, Math.min(MAX_RUN, dx));
+    dz = Math.max(-MAX_RUN, Math.min(MAX_RUN, dz));
+    const n = Math.abs(dx) + Math.abs(dz);
+    const ux = Math.sign(dx), uz = Math.sign(dz);
+    const y0 = round2(terrain.sampleHeight(a.x, a.z));
+    const ys = [];
+    for (let i = 0; i < n; i++) {
+        ys.push(round2(terrain.sampleHeight(a.x + ux * (i + 0.5) * GRID_CELL_SIZE,
+                                            a.z + uz * (i + 0.5) * GRID_CELL_SIZE) - y0));
+    }
+    return { type: 'wall', style: buildBrush.style, scruffy: buildBrush.scruffy,
+             wallHeight: buildBrush.wallHeight, seed: buildDrag ? buildDrag.seed : 1,
+             position: { x: a.x, y: y0, z: a.z },
+             bx: dx * GRID_CELL_SIZE, bz: dz * GRID_CELL_SIZE, ys };
+}
+
+// Floor rectangle data between anchor cell a and cursor cell b (cell indices).
+// Oversized drags clamp toward the anchor.
+function floorData(a, b) {
+    let x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
+    let z0 = Math.min(a.z, b.z), z1 = Math.max(a.z, b.z);
+    if (x1 - x0 >= MAX_RUN) { if (b.x >= a.x) x1 = x0 + MAX_RUN - 1; else x0 = x1 - MAX_RUN + 1; }
+    if (z1 - z0 >= MAX_RUN) { if (b.z >= a.z) z1 = z0 + MAX_RUN - 1; else z0 = z1 - MAX_RUN + 1; }
+    const cols = x1 - x0 + 1, rows = z1 - z0 + 1;
+    const px = x0 * GRID_CELL_SIZE, pz = z0 * GRID_CELL_SIZE;
+    const y0 = round2(terrain.sampleHeight(px + (cols / 2) * GRID_CELL_SIZE, pz + (rows / 2) * GRID_CELL_SIZE));
+    const ys = [];
+    for (let tz = 0; tz < rows; tz++) {
+        for (let tx = 0; tx < cols; tx++) {
+            ys.push(round2(terrain.sampleHeight(px + (tx + 0.5) * GRID_CELL_SIZE,
+                                                pz + (tz + 0.5) * GRID_CELL_SIZE) - y0));
+        }
+    }
+    return { type: 'floor', style: buildBrush.style, scruffy: buildBrush.scruffy,
+             seed: buildDrag ? buildDrag.seed : 1,
+             position: { x: px, y: y0, z: pz }, cols, rows, ys };
+}
+
+// Rebuild the translucent ghost only when the snapped endpoints (or brush
+// settings) actually change — mousemove between snaps is free.
+function updateBuildGhost(p) {
+    const mode = buildDrag ? buildDrag.kind : buildBrush.mode;
+    if (mode === 'erase') { clearBuildGhost(); return; }
+    let a, b;
+    if (mode === 'wall') {
+        b = snapCorner(p);
+        a = buildDrag ? { x: buildDrag.ax, z: buildDrag.az } : b;
+    } else {
+        b = { x: Math.floor(p.x / GRID_CELL_SIZE), z: Math.floor(p.z / GRID_CELL_SIZE) };
+        a = buildDrag ? { x: buildDrag.ax, z: buildDrag.az } : b;
+    }
+    const key = [mode, a.x, a.z, b.x, b.z, buildBrush.style, buildBrush.scruffy,
+                 buildBrush.wallHeight, buildDrag ? buildDrag.seed : 0].join('|');
+    if (key === buildGhostKey && buildGhost) return;
+    clearBuildGhost();
+    const data = mode === 'wall' ? wallData(a, b) : floorData(a, b);
+    buildGhost = mode === 'wall' ? buildWallRun(data, { ghost: true })
+                                 : buildFloorPatch(data, { ghost: true });
+    buildGhost.position.set(data.position.x, data.position.y, data.position.z);
+    worldGroup.add(buildGhost); // synced-object coords are world coords
+    buildGhostKey = key;
+}
+function clearBuildGhost() {
+    if (!buildGhost) return;
+    worldGroup.remove(buildGhost);
+    disposeBuiltObject(buildGhost);
+    buildGhost = null;
+    buildGhostKey = '';
+}
+function commitBuildDrag(p) {
+    if (buildDrag.kind === 'wall') {
+        const data = wallData({ x: buildDrag.ax, z: buildDrag.az }, snapCorner(p));
+        if (Math.abs(data.bx) + Math.abs(data.bz) === 0) return; // click, no run
+        socket.emit('add-object', data);
+    } else {
+        const b = { x: Math.floor(p.x / GRID_CELL_SIZE), z: Math.floor(p.z / GRID_CELL_SIZE) };
+        socket.emit('add-object', floorData({ x: buildDrag.ax, z: buildDrag.az }, b));
+    }
+}
+// The wall/floor under the cursor, if any (for erase / Alt+click).
+function pickBuildTarget(event) {
+    castFromPointer(event, { renderer, camera, raycaster, mouse });
+    const hit = raycaster.intersectObjects(objects, true)[0];
+    if (!hit) return null;
+    let top = hit.object;
+    while (top.parent && top.parent !== scene && top.parent !== worldGroup) top = top.parent;
+    const obj = objects.find(o => o === top);
+    const t = obj && obj.userData.objectType;
+    return (t === 'wall' || t === 'floor') ? obj : null;
+}
+function setBuildMode(mode) {
+    buildBrush.mode = mode;
+    buildDrag = null;
+    clearBuildGhost();
+    document.querySelectorAll('#build-modes .brush-mode').forEach(b =>
+        b.classList.toggle('active', b.dataset.bmode === mode));
+    updateHintBar();
+}
+function setBuildStyle(style) {
+    buildBrush.style = style;
+    clearBuildGhost(); // next hover rebuilds in the new style
+    document.querySelectorAll('#build-styles .brush-mode').forEach(b =>
+        b.classList.toggle('active', b.dataset.bstyle === style));
+}
+
 // --- Terrain editor logic ---
 function terrainActive() { return currentTool === 'terrain' && isTacticalKey(); }
 function updateTerrainPanel() {
@@ -1245,6 +1446,10 @@ function updateTerrainPanel() {
     // On hex layers the same tool paints biomes instead.
     const biomePanel = document.getElementById('biome-panel');
     if (biomePanel) biomePanel.classList.toggle('hidden', !(currentTool === 'terrain' && isHexLayer()));
+    // Build panel rides the same left slot; ghost dies with the tool.
+    const buildPanel = document.getElementById('build-panel');
+    if (buildPanel) buildPanel.classList.toggle('hidden', !(currentTool === 'build' && isTacticalKey()));
+    if (currentTool !== 'build') { buildDrag = null; clearBuildGhost(); }
     if (terrain) terrain.setBrush({ visible: false });
     updateHintBar();
 }
@@ -1409,6 +1614,15 @@ function updateHintBar() {
         }
     } else if (currentTool === 'terrain') {
         hint = `Biomes — LMB paint hex · Alt+click clear · tagged hexes seed new tactical maps · ${cam}`;
+    } else if (currentTool === 'build' && isTacticalKey()) {
+        const m = buildBrush.mode;
+        hint = m === 'erase'
+            ? `Build · erase — LMB click a wall/floor to remove it · ${cam}`
+            : m === 'wall'
+                ? `Build · wall — LMB drag along the grid · Esc cancel · Alt+click erase · ${cam}`
+                : `Build · floor — LMB drag a rectangle of tiles · Esc cancel · Alt+click erase · ${cam}`;
+    } else if (currentTool === 'build') {
+        hint = `Build works on tactical maps — enter a province leaf or pocket first · ${cam}`;
     } else if (currentTool === 'move') {
         hint = `Move — LMB select, LMB ground to drop · Del delete · ${cam}`;
     } else if (currentTool === 'ruler') {

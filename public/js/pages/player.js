@@ -228,7 +228,12 @@ function onPointerDown(event) {
     }
     const clickedObject = objects.find(obj => obj === topLevelObject);
 
-    if (clickedObject) {
+    // GM-built walls/floors are scenery to players: clicks on them read as
+    // ground (drop a move on a floor, measure across a room), never selection.
+    const clickedType = clickedObject && clickedObject.userData.objectType;
+    const buildAsGround = clickedType === 'wall' || clickedType === 'floor';
+
+    if (clickedObject && !buildAsGround) {
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
             selectObject(clickedObject);
             isDraggingHeight = true;
@@ -239,7 +244,7 @@ function onPointerDown(event) {
                 selectObject(clickedObject);
             }
         }
-    } else if (firstIntersect.object.name === "tabletop") {
+    } else if (firstIntersect.object.name === "tabletop" || buildAsGround) {
         const intersectPoint = sceneToWorld(firstIntersect.point);
 
         switch (currentTool) {
@@ -694,6 +699,7 @@ function initSocket(username) {
             if (data.unified) {
                 // One continuous world: load once, then fly between provinces.
                 if (!terrainIsUnified) {
+                    terrain.generatorOn = true;
                     terrain.reset();
                     if (data.terrain) terrain.applyData(data.terrain);
                     terrainIsUnified = true;
@@ -713,8 +719,10 @@ function initSocket(username) {
                 }
             } else {
                 // Pockets live near the true origin: pin the floating origin to 0.
+                // Generator OFF: pocket ground is implicit flat 0 plus edits.
                 setWorldOriginAt({ terrain, worldGroup }, 0, 0);
                 terrainIsUnified = false;
+                terrain.generatorOn = false;
                 controls.maxDistance = 6000;   // finite room: no surveying the void
                 terrain.reset();
                 const hasTerrain = !!data.terrain;

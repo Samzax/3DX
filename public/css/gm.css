@@ -99,33 +99,33 @@
 #btn-up:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 #breadcrumb { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* --- Terrain editor panel --- */
-#terrain-panel {
+/* --- Terrain editor panel (+ Build panel: same look, same left slot) --- */
+#terrain-panel, #build-panel {
   position: absolute; left: 78px; top: 10px; width: 230px; z-index: 30;
   background: var(--panel-bg); border: 1px solid var(--panel-border);
   border-radius: var(--panel-radius);
   padding: 12px; color: var(--text);
 }
-#terrain-panel.hidden { display: none; }
-#terrain-panel h3 { margin: 0 0 10px; font-size: 15px; color: var(--accent-warm); }
-#terrain-panel .tp-label { font-size: 11px; text-transform: uppercase; color: var(--text-dim); margin: 10px 0 5px; letter-spacing: .5px; }
-#terrain-panel .tp-row { display: flex; flex-wrap: wrap; gap: 5px; }
-#terrain-panel .brush-mode {
+#terrain-panel.hidden, #build-panel.hidden { display: none; }
+#terrain-panel h3, #build-panel h3 { margin: 0 0 10px; font-size: 15px; color: var(--accent-warm); }
+#terrain-panel .tp-label, #build-panel .tp-label { font-size: 11px; text-transform: uppercase; color: var(--text-dim); margin: 10px 0 5px; letter-spacing: .5px; }
+#terrain-panel .tp-row, #build-panel .tp-row { display: flex; flex-wrap: wrap; gap: 5px; }
+#terrain-panel .brush-mode, #build-panel .brush-mode {
   flex: 1 1 30%; padding: 6px 4px; font-size: 12px;
   background: var(--btn-bg); color: var(--text);
   border: 1px solid var(--panel-border); border-radius: var(--btn-radius); cursor: pointer;
   transition: background-color 0.15s;
 }
-#terrain-panel .brush-mode:hover { background: var(--btn-bg-hover); }
-#terrain-panel .brush-mode.active { background: var(--accent-warm); color: #1a1a1a; font-weight: 700; border-color: var(--accent-warm); }
-#terrain-panel .brush-mode:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
+#terrain-panel .brush-mode:hover, #build-panel .brush-mode:hover { background: var(--btn-bg-hover); }
+#terrain-panel .brush-mode.active, #build-panel .brush-mode.active { background: var(--accent-warm); color: #1a1a1a; font-weight: 700; border-color: var(--accent-warm); }
+#terrain-panel .brush-mode:focus-visible, #build-panel .brush-mode:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 #terrain-mats { gap: 8px; }
 #terrain-mats .mat-swatch { width: 34px; height: 28px; border-radius: var(--btn-radius); border: 2px solid #555; cursor: pointer; }
 #terrain-mats .mat-swatch.active { border-color: #fff; box-shadow: 0 0 6px #fff; }
 #terrain-mats .mat-swatch:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
-#terrain-panel .tp-slider { margin: 8px 0; }
-#terrain-panel .tp-slider label { display: block; font-size: 12px; color: #cbd0d8; margin-bottom: 3px; }
-#terrain-panel .tp-slider input[type=range] { width: 100%; accent-color: var(--accent-warm); }
+#terrain-panel .tp-slider, #build-panel .tp-slider { margin: 8px 0; }
+#terrain-panel .tp-slider label, #build-panel .tp-slider label { display: block; font-size: 12px; color: #cbd0d8; margin-bottom: 3px; }
+#terrain-panel .tp-slider input[type=range], #build-panel .tp-slider input[type=range] { width: 100%; accent-color: var(--accent-warm); }
 #terrain-panel .tp-chip {
   display: inline-block; margin-left: 6px; padding: 2px 10px;
   background: var(--btn-bg); color: var(--text);
@@ -133,7 +133,7 @@
   font-size: 12px; cursor: pointer; transition: background-color 0.15s;
 }
 #terrain-panel .tp-chip:hover { background: var(--btn-bg-hover); }
-#terrain-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin: 4px 0 2px; }
+#terrain-panel .tp-hint, #build-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin: 4px 0 2px; }
 
 /* --- Biome palette (hex layers) --- */
 #biome-panel {

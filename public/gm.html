@@ -76,6 +76,10 @@
         <button id="btn-tool-terrain" class="tool-button" title="Terrain (tactical maps only)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20l5-9 4 5 3-4 6 8z"></path></svg>
         </button>
+
+        <button id="btn-tool-build" class="tool-button" title="Build: tile-brush walls &amp; floors (tactical maps only)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1"></rect><path d="M3 9.3h18M3 14.6h18M9 4v5.3M15 9.3v5.3M9 14.6V20"></path></svg>
+        </button>
     </div>
 
     <!-- --- Terrain editor panel (shown when the Terrain tool is active on a tactical map) --- -->
@@ -118,6 +122,31 @@
             <label><input type="checkbox" id="river-carve" checked> Carve river beds into terrain</label>
         </div>
         <button id="terrain-reset" class="tp-reset">Reset terrain</button>
+    </div>
+
+    <!-- --- Build panel (tile brush: walls & floors on tactical maps) --- -->
+    <div id="build-panel" class="hidden">
+        <h3>Build</h3>
+        <div class="tp-label">Mode</div>
+        <div class="tp-row" id="build-modes">
+            <button class="brush-mode active" data-bmode="wall" title="Drag along the grid to raise a wall run">Wall</button>
+            <button class="brush-mode" data-bmode="floor" title="Drag a rectangle of floor tiles">Floor</button>
+            <button class="brush-mode" data-bmode="erase" title="Click a wall/floor to remove it">Erase</button>
+        </div>
+        <div class="tp-label">Style</div>
+        <div class="tp-row" id="build-styles">
+            <button class="brush-mode active" data-bstyle="stone">Stone</button>
+            <button class="brush-mode" data-bstyle="wood">Wood</button>
+            <button class="brush-mode" data-bstyle="plaster">Plaster</button>
+        </div>
+        <div class="tp-slider">
+            <label>Wall height <span id="wall-height-val">2.0</span></label>
+            <input type="range" id="wall-height" min="0.6" max="4" step="0.2" value="2">
+        </div>
+        <div class="tp-slider">
+            <label><input type="checkbox" id="build-scruffy"> Scruffy (ruins: gaps, crumble, tilt)</label>
+        </div>
+        <div class="tp-hint">Walls snap to grid lines and follow the terrain; floors fill dragged rectangles. Esc cancels a drag, Alt+click erases a whole run/patch. For interiors, pair with a portal pocket map.</div>
     </div>
 
     <!-- --- Biome palette (terrain tool on hex layers: paint hexes) --- -->
