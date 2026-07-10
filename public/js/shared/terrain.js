@@ -129,6 +129,7 @@ function sharedIndex() {
 export class Terrain {
   constructor() {
     this.chunks = new Map();               // "cx,cz" -> { heights, splat, mesh }
+    this.rev = 0;                          // bumped on any content change (scatter caches watch this)
     // Floating origin (docs/unified-world-design.md §5): game logic uses TRUE
     // world coordinates everywhere; rendering subtracts worldOrigin so mesh
     // transforms (and thus GPU matrices) stay near zero even when content sits
@@ -679,6 +680,7 @@ export class Terrain {
   }
 
   _markDirty(k, cx, cz, lx, lz, layer) {
+    this.rev++; // content changed: vegetation scatter caches watch this
     let d = this._dirtyData.get(k);
     if (!d) { d = { heights: false, splat: false }; this._dirtyData.set(k, d); }
     d[layer] = true;
@@ -975,6 +977,7 @@ export class Terrain {
   }
 
   _markChunkDirtyAll(k) {
+    this.rev++; // content changed: vegetation scatter caches watch this
     const [cx, cz] = k.split(',').map(Number);
     this._dirtyData.set(k, { heights: true, splat: true });
     for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) this._dirtyMesh.add(ckey(cx + dx, cz + dz));
@@ -1511,6 +1514,7 @@ export class Terrain {
   // generated chunks and force the window + LOD rings to resample. Called when
   // biome overrides change (hex painting); edited chunks are untouched.
   regenerate() {
+    this.rev++; // generated ground changes under the scatter caches too
     for (const [k, c] of this.chunks) {
       if (!c.generated) continue;
       if (c.mesh) this._disposeChunkMesh(k);
@@ -1523,6 +1527,7 @@ export class Terrain {
   }
 
   reset() {
+    this.rev++; // content changed: vegetation scatter caches watch this
     if (this._strokePatch) {
       for (const [k, c] of this.chunks) {
         if (c.generated) continue; // generated ground regenerates; not part of undo
