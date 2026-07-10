@@ -137,6 +137,11 @@ export class Terrain {
     // its own anchor so vertex buffers never hold large float32 values.
     this.worldOrigin = { x: 0, z: 0 };
     this.genSeed = 1337;                    // U2: world generation seed (see genHeightAt)
+    // Pocket maps are their own flat little worlds: the pages switch the
+    // generator OFF there so unedited ground is implicit flat 0 (the original
+    // pocket semantics), not whatever the procedural world happens to contain
+    // around the origin. Edited chunks always win either way.
+    this.generatorOn = true;
     // GM hex-biome tags as generator overrides: { "world": {"q,r":{biome}}, ... }.
     // Empty/null tree = pure procedural world (see setBiomeOverrides / _fields).
     this._hexTree = null;
@@ -476,6 +481,7 @@ export class Terrain {
   // `lod` drops the high-frequency octaves — a spectral downsample for the far
   // LOD rings (coarse sampling of full-detail noise would alias; this doesn't).
   genHeightAt(wx, wz, lod = 0) {
+    if (!this.generatorOn) return 0;                 // pockets: implicit flat ground
     const { e, mo } = this._fields(wx, wz);
     // Mountain mask rises just below the mountain-biome threshold (e>0.7) so
     // foothills stay modest instead of full ridges bleeding into other biomes.
@@ -511,6 +517,7 @@ export class Terrain {
   // choice. Uses the same painted-hex-warped fields as genHeightAt, so painted
   // biomes classify (and color) as what the GM painted.
   genBiomeAt(wx, wz) {
+    if (!this.generatorOn) return 'plains';          // pockets: neutral ground
     const { e, mo } = this._fields(wx, wz);
     if (e > 0.7) return 'mountains';
     if (e < 0.4) return 'coast';
@@ -520,6 +527,7 @@ export class Terrain {
   }
   // Material channel (0 grass,1 dirt,2 rock,3 sand) for generated ground.
   genMaterialAt(wx, wz, h) {
+    if (!this.generatorOn) return 0;                 // pockets: plain grass
     if (h < SEA_LEVEL + 1.0) return 3;               // beaches ring every shore
     const b = this.genBiomeAt(wx, wz);
     const n = fbm(this.genSeed + 300, wx * 0.05, wz * 0.05, 2);

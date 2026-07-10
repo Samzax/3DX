@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { GRID_CELL_SIZE } from './scene.js';
+import { buildWallRun, buildFloorPatch } from './structures.js';
 
 export const defaultMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
 export const selectedMaterial = new THREE.MeshLambertMaterial({ color: 0xffff44, emissive: 0xaaaa00 });
@@ -163,6 +164,16 @@ export function buildObjectFromData(id, data) {
             break;
         case 'portal':
             objectMesh = createPortalMesh();
+            halfHeight = 0;
+            break;
+        case 'wall':
+            // Tile-brush wall run: pieces + baked ground heights live in data
+            // (structures.js), position is the run's anchor grid corner.
+            objectMesh = buildWallRun(data);
+            halfHeight = 0;
+            break;
+        case 'floor':
+            objectMesh = buildFloorPatch(data);
             halfHeight = 0;
             break;
         default:
