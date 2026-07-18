@@ -6,6 +6,7 @@ import {
 } from '../shared/srd.js';
 import { setupLoginModal } from '../shared/login.js';
 import { createCharacterModel, disposeModel } from '../shared/models.js';
+import { createRigCharacter, releaseRigCharacter, tickRigCharacters } from '../shared/charmesh.js';
 
 let SRD = null;
 let pendingHomebrew = null;
@@ -469,20 +470,21 @@ function initPreview() {
   controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0,0.45,0); controls.enableDamping=true; controls.enablePan=false; controls.minDistance=0.8; controls.maxDistance=4;
   scene.add(new THREE.HemisphereLight(0xfff4e0, 0x445566, 0.9));
   const dl = new THREE.DirectionalLight(0xffffff,0.9); dl.position.set(2,5,3); scene.add(dl);
+  renderer.outputEncoding = THREE.sRGBEncoding; // PBR character textures need gamma out
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(10,10), new THREE.MeshStandardMaterial({color:0x333333}));
   ground.rotation.x=-Math.PI/2; scene.add(ground);
   buildModel();
-  (function loop(){ requestAnimationFrame(loop); controls.update(); renderer.render(scene,camera); })();
+  (function loop(){ requestAnimationFrame(loop); tickRigCharacters(); controls.update(); renderer.render(scene,camera); })();
   window.addEventListener('resize', () => { const ww=canvas.clientWidth||300; renderer.setSize(ww,300); camera.aspect=ww/300; camera.updateProjectionMatrix(); });
 }
-// The preview renders the exact model the tabletop will: same shared builder,
-// same tabletop scale. Cheap enough to rebuild+dispose on every tweak, which
-// also keeps race features and equipment in sync with the sliders.
+// EXPERIMENT: rigged GLTF character (charmesh.js) instead of the procedural
+// model. Rebuild+release on every tweak; the procedural builder stays one
+// import away as the fallback.
 function buildModel() {
-  if (model) { scene.remove(model); disposeModel(model); }
-  model = createCharacterModel({ appearance: char.appearance, race: char.race, equipment: char.equipment });
-  const box = new THREE.Box3().setFromObject(model);
-  model.position.y = -box.min.y; // feet on the ground plane
+  if (model) { scene.remove(model); if (model.userData.rigCharacter) releaseRigCharacter(model); else disposeModel(model); }
+  model = createRigCharacter(
+    { appearance: char.appearance, race: char.race, equipment: char.equipment },
+    { footY: 0 });
   scene.add(model);
 }
 function updateModel() { if (renderer) buildModel(); }

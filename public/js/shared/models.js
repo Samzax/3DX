@@ -5,6 +5,7 @@
 import * as THREE from 'three';
 import { GRID_CELL_SIZE } from './scene.js';
 import { buildWallRun, buildFloorPatch } from './structures.js';
+import { createRigCharacter } from './charmesh.js';
 
 export const defaultMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
 export const selectedMaterial = new THREE.MeshLambertMaterial({ color: 0xffff44, emissive: 0xaaaa00 });
@@ -330,13 +331,21 @@ export function buildObjectFromData(id, data) {
             break;
         case 'character':
             if (data.characterData) {
-                objectMesh = createCharacterModel(data.characterData);
-                // Seat the model on its feet: the group origin sits above the
-                // soles (and the offset varies with build/leg length), so measure
-                // the actual bottom instead of guessing from height. groundY adds
-                // this back so position.y + box.min.y lands the feet on the ground.
-                const box = new THREE.Box3().setFromObject(objectMesh);
-                halfHeight = -box.min.y;
+                // EXPERIMENT: rigged GLTF character. The procedural model shows
+                // instantly as a placeholder and swaps out inside the same group
+                // once the shared assets arrive (position/selection unaffected).
+                // Both seat their soles at -0.38, the procedural foot depth.
+                halfHeight = 0.38;
+                objectMesh = createRigCharacter(data.characterData, {
+                    footY: -0.38,
+                    onReady: (g) => {
+                        const ph = g.userData.placeholder;
+                        if (ph) { g.remove(ph); disposeModel(ph); delete g.userData.placeholder; }
+                    }
+                });
+                const ph = createCharacterModel(data.characterData);
+                objectMesh.add(ph);
+                objectMesh.userData.placeholder = ph;
             }
             break;
         case 'cave':

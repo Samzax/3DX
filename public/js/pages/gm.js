@@ -10,6 +10,7 @@ import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trac
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { loadSRD } from '../shared/srd.js';
 import { CombatTracker, CombatOverlays, deriveCombatStats } from '../shared/combat.js';
+import { tickRigCharacters } from '../shared/charmesh.js';
 import { buildWallRun, buildFloorPatch, disposeBuiltObject } from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { FogMask, FogOverlay, fogHexAt, hexesWithin } from '../shared/fog.js';
@@ -826,6 +827,7 @@ function init() {
         onTick: () => {
             updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
             if (combatOverlays) combatOverlays.tick(); // rings/badges track their tokens
+            tickRigCharacters();                                           // character idle/walk clips
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary

@@ -270,11 +270,13 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 app.use(express.static(PUBLIC_DIR));
 app.use('/data/srd', express.static(path.join(__dirname, 'data', 'srd')));
 
-// Routes
-app.get('/', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'creator.html')));
-app.get('/gm', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'gm.html')));
-app.get('/player', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'player.html')));
-app.get('/homebrew', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'homebrew.html')));
+// Routes. root+relative (not one absolute path) so sendFile's dotfile check
+// doesn't reject the whole app when the repo lives under a dot-directory
+// (e.g. a git worktree in .claude/worktrees/).
+app.get('/', (req, res) => res.sendFile('creator.html', { root: PUBLIC_DIR }));
+app.get('/gm', (req, res) => res.sendFile('gm.html', { root: PUBLIC_DIR }));
+app.get('/player', (req, res) => res.sendFile('player.html', { root: PUBLIC_DIR }));
+app.get('/homebrew', (req, res) => res.sendFile('homebrew.html', { root: PUBLIC_DIR }));
 
 // Helper: Check if user is GM. NOTE: login is unauthenticated (the client supplies its
 // own username), so isGM and owner checks are advisory conveniences, not a security boundary.
