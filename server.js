@@ -205,6 +205,182 @@ function canAccessCharacter(username, character) {
   return isGM(username) || character.owner === username;
 }
 
+// ===== Combat (turn-based encounters) =====
+// Combat state lives at maps[roomKey].combat and persists with the map. The
+// server is the single source of truth: it rolls every die and enforces turn
+// order, the one-action economy and per-turn movement budgets. Clients render
+// and (per the advisory trust model) supply SRD-derived character stats.
+
+function rollDie(sides) { return crypto.randomInt(1, sides + 1); }
+
+// Roll a damage expression like "2d6+3" (or a flat number); crits double the dice.
+function rollDamage(expr, crit) {
+  const m = /^\s*(\d+)\s*d\s*(\d+)\s*(?:([+-])\s*(\d+))?\s*$/.exec(String(expr || ''));
+  if (!m) {
+    const flat = Math.max(0, Math.floor(Number(expr) || 0));
+    return { expr: String(expr || flat), rolls: [flat], total: flat };
+  }
+  const count = Math.min(40, Number(m[1])) * (crit ? 2 : 1);
+  const sides = Math.max(2, Math.min(1000, Number(m[2])));
+  const mod = m[3] ? (m[3] === '-' ? -1 : 1) * Number(m[4]) : 0;
+  const rolls = [];
+  for (let i = 0; i < count; i++) rolls.push(rollDie(sides));
+  return { expr: String(expr), rolls, total: Math.max(0, rolls.reduce((a, b) => a + b, 0) + mod) };
+}
+
+function fmtSigned(n) { return (n < 0 ? '- ' : '+ ') + Math.abs(n); }
+
+// Conditions a combatant can carry. auto:true effects (from Dash/Dodge/
+// Disengage) are stripped at the start of that combatant's next turn.
+const CONDITION_LABELS = {
+  dodging: 'Dodge', disengaged: 'Disengage', dashed: 'Dash', down: 'Down',
+  prone: 'Prone', poisoned: 'Poisoned', restrained: 'Restrained', stunned: 'Stunned',
+  blinded: 'Blinded', frightened: 'Frightened', grappled: 'Grappled', invisible: 'Invisible'
+};
+
+function getCombat(key) { return maps[key] && maps[key].combat; }
+function hasEffect(c, key) { return (c.effects || []).some(e => e.key === key); }
+function addEffect(c, key, auto) {
+  if (!CONDITION_LABELS[key] || hasEffect(c, key)) return;
+  c.effects.push({ key, label: CONDITION_LABELS[key], auto: !!auto });
+}
+function removeEffect(c, key) { c.effects = (c.effects || []).filter(e => e.key !== key); }
+
+// Set a combatant's tracked HP and keep the 'down' condition in sync.
+function setCombatantHP(c, v) {
+  c.hp = { current: v };
+  if (v <= 0) addEffect(c, 'down', false);
+  else removeEffect(c, 'down');
+}
+
+// Set a character's live HP (clamped), persist, broadcast — shared by the
+// update-hp handler and combat damage. Also refreshes the HP mirror on any
+// combat tracker that includes this character.
+function applyCharacterHP(id, current) {
+  const char = charactersDB[id];
+  if (!char) return null;
+  const v = Math.max(0, Math.floor(Number(current) || 0));
+  char.hp = { current: v };
+  saveJSON('characters.json', charactersDB);
+  io.emit('hp-updated', { id, current: v });
+  for (const [key, m] of Object.entries(maps)) {
+    if (!m.combat) continue;
+    let touched = false;
+    for (const c of Object.values(m.combat.combatants)) {
+      if (c.charId === id) { setCombatantHP(c, v); touched = true; }
+    }
+    if (touched) broadcastCombat(key);
+  }
+  return v;
+}
+
+// Append a log entry (capped at 100 for joiners) and stream it to the room.
+function pushLog(key, combat, entry) {
+  entry.id = crypto.randomUUID().slice(0, 8);
+  entry.ts = Date.now();
+  entry.round = combat.round;
+  combat.log.push(entry);
+  if (combat.log.length > 100) combat.log.splice(0, combat.log.length - 100);
+  io.to(key).emit('combat-log', entry);
+  return entry;
+}
+
+function broadcastCombat(key) {
+  saveMaps();
+  io.to(key).emit('combat-updated', (maps[key] && maps[key].combat) || null);
+}
+
+// Build a combatant from a map object. Characters join with statsPending until
+// an owning client sends SRD-derived stats; plain tokens get editable defaults.
+function seedCombatant(obj) {
+  const base = {
+    id: obj.id, initiative: null,
+    movementUsedFeet: 0, dashFeet: 0, actionUsed: false, effects: []
+  };
+  if (obj.type === 'character' && obj.characterData) {
+    const cd = obj.characterData;
+    const live = cd.id && charactersDB[cd.id];
+    return {
+      ...base, kind: 'character',
+      name: String(cd.name || 'Adventurer').slice(0, 40),
+      color: cd.color || '#dd4444',
+      charId: cd.id || null, owner: cd.owner || null,
+      statsPending: true, ac: 10, speedFeet: 30, initMod: 0, maxHP: 10,
+      hp: (live && live.hp && typeof live.hp.current === 'number') ? { current: live.hp.current } : null,
+      attacks: []
+    };
+  }
+  if (obj.type === 'token') {
+    return {
+      ...base, kind: 'token', name: 'Token', color: obj.color || 0xdd4444,
+      charId: null, owner: null, statsPending: false,
+      ac: 12, speedFeet: 30, initMod: 0, maxHP: 10, hp: { current: 10 },
+      attacks: [{ name: 'Strike', attack: 2, damage: '1d6', damageType: 'bludgeoning', ranged: false, rangeFt: 5 }]
+    };
+  }
+  return null;
+}
+
+// Sort the turn order: initiative desc, tiebreak initMod desc, then name.
+// Un-rolled combatants (mid-combat additions) sink to the end.
+function sortOrder(combat) {
+  const cs = combat.combatants;
+  combat.order = Object.keys(cs).sort((a, b) =>
+    ((cs[b].initiative ?? -Infinity) - (cs[a].initiative ?? -Infinity)) ||
+    (cs[b].initMod - cs[a].initMod) ||
+    String(cs[a].name).localeCompare(String(cs[b].name)));
+}
+
+function startTurn(key, combat, id) {
+  combat.activeId = id || null;
+  const c = id && combat.combatants[id];
+  if (!c) return;
+  c.movementUsedFeet = 0;
+  c.dashFeet = 0;
+  c.actionUsed = false;
+  c.effects = (c.effects || []).filter(e => !e.auto);
+  pushLog(key, combat, { kind: 'turn', actorName: c.name, text: `Round ${combat.round} — ${c.name}'s turn` });
+}
+
+function advanceTurn(key, combat) {
+  if (!combat.order.length) { combat.activeId = null; return; }
+  const idx = combat.order.indexOf(combat.activeId);
+  const next = (idx + 1) % combat.order.length;
+  if (idx >= 0 && next === 0) combat.round++;
+  startTurn(key, combat, combat.order[next]);
+}
+
+// Begin the fight: auto-roll any missing initiative, sort, round 1, first turn.
+function beginCombat(key, combat) {
+  for (const c of Object.values(combat.combatants)) {
+    if (c.initiative == null) {
+      const die = rollDie(20);
+      c.initiative = die + c.initMod;
+      pushLog(key, combat, {
+        kind: 'initiative', actorName: c.name,
+        text: `${c.name} rolls initiative: d20 ${die} ${fmtSigned(c.initMod)} = ${c.initiative}`,
+        roll: { d20: [die], used: die, mod: c.initMod, total: c.initiative }
+      });
+    }
+  }
+  sortOrder(combat);
+  combat.started = true;
+  combat.round = 1;
+  startTurn(key, combat, combat.order[0]);
+}
+
+// Drop a combatant from the fight (token deleted or GM removal). If it was
+// their turn, the turn passes first so activeId stays valid.
+function removeCombatant(key, combat, id) {
+  if (!combat.combatants[id]) return;
+  if (combat.activeId === id) {
+    if (combat.order.length > 1) advanceTurn(key, combat);
+    else combat.activeId = null;
+  }
+  delete combat.combatants[id];
+  combat.order = combat.order.filter(x => x !== id);
+}
+
 // Socket.io connection handling
 io.on('connection', (socket) => {
   console.log(`[+] Client connected: ${socket.id}`);
@@ -339,10 +515,7 @@ io.on('connection', (socket) => {
     const char = id && charactersDB[id];
     if (!char) { socket.emit('error', 'Character not found'); return; }
     if (!canAccessCharacter(socket.username, char)) { socket.emit('error', 'Permission denied'); return; }
-    const current = Math.max(0, Math.floor(Number(payload.current) || 0));
-    char.hp = { current };
-    saveJSON('characters.json', charactersDB);
-    io.emit('hp-updated', { id, current });
+    applyCharacterHP(id, payload.current);
   });
 
   // --- Homebrew (custom races/classes) — shared content ---
@@ -472,6 +645,7 @@ io.on('connection', (socket) => {
       meta: m.meta || null,
       hexes: m.hexes || {},
       biome: resolveBiome(ctx),
+      combat: m.combat || null,
       ...extra
     });
   }
@@ -556,11 +730,36 @@ io.on('connection', (socket) => {
   socket.on('move-object', (data) => {
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
     const map = getMap(key);
-    if (map.objects[data.id]) {
-      map.objects[data.id].position = data.position;
-      saveMaps();
-      socket.to(key).emit('object-moved', data);
+    if (!map.objects[data.id]) return;
+    // In a started combat, combatant tokens move only on their turn, only by
+    // their owner (GM excepted), and only within the turn's movement budget.
+    const combat = map.combat;
+    const c = combat && combat.started && combat.combatants[data.id];
+    if (c) {
+      const old = { ...map.objects[data.id].position };
+      const gm = isGM(socket.username);
+      const isTheirTurn = combat.activeId === data.id && c.owner === socket.username;
+      if (!gm && (!isTheirTurn || hasEffect(c, 'down'))) {
+        socket.emit('object-moved', { id: data.id, position: old });
+        socket.emit('combat-denied', { reason: hasEffect(c, 'down') ? `${c.name} is down` : "Not this token's turn" });
+        return;
+      }
+      if (combat.activeId === data.id && data.position) {
+        // XZ euclidean, matching the ruler: 1 world unit = 1 cell = 5 ft.
+        const feet = Math.hypot((Number(data.position.x) || 0) - old.x, (Number(data.position.z) || 0) - old.z) * 5;
+        const remaining = c.speedFeet + c.dashFeet - c.movementUsedFeet;
+        if (!gm && feet > remaining + 0.5) {
+          socket.emit('object-moved', { id: data.id, position: old });
+          socket.emit('combat-denied', { reason: `Too far: ${Math.round(feet)} ft (${Math.max(0, Math.round(remaining))} ft left)` });
+          return;
+        }
+        c.movementUsedFeet += feet;
+      }
     }
+    map.objects[data.id].position = data.position;
+    saveMaps();
+    socket.to(key).emit('object-moved', data);
+    if (c) broadcastCombat(key);
   });
 
   socket.on('delete-object', (data) => {
@@ -570,7 +769,267 @@ io.on('connection', (socket) => {
       delete map.objects[data.id];
       saveMaps();
       io.to(key).emit('object-deleted', data);
+      // A deleted token leaves the fight too.
+      if (map.combat && map.combat.combatants[data.id]) {
+        const name = map.combat.combatants[data.id].name;
+        removeCombatant(key, map.combat, data.id);
+        pushLog(key, map.combat, { kind: 'info', actorName: name, text: `${name} was removed from the map` });
+        broadcastCombat(key);
+      }
     }
+  });
+
+  // --- Combat handlers. All act on the current room's combat; failed checks
+  // answer only the offending socket with combat-denied (never 'error': the
+  // player client routes that to the login modal). ---
+  function combatDeny(reason) { socket.emit('combat-denied', { reason }); }
+  function canControl(c) { return isGM(socket.username) || (!!c.owner && c.owner === socket.username); }
+  const clampInt = (v, min, max, dflt) => {
+    v = Number(v);
+    return isFinite(v) ? Math.max(min, Math.min(max, Math.round(v))) : dflt;
+  };
+
+  socket.on('combat-start', () => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const map = getMap(key);
+    if (map.combat) return combatDeny('Combat already running');
+    const combat = map.combat = {
+      active: true, started: false, round: 0, activeId: null,
+      order: [], combatants: {}, log: []
+    };
+    for (const obj of Object.values(map.objects)) {
+      const c = seedCombatant(obj);
+      if (c) combat.combatants[c.id] = c;
+    }
+    pushLog(key, combat, { kind: 'info', actorName: 'GM', text: 'Combat! Roll initiative.' });
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-end', () => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    if (!getCombat(key)) return;
+    delete maps[key].combat;
+    broadcastCombat(key); // emits null → clients tear down
+  });
+
+  // Owning client (or GM) answers a character's statsPending with SRD-derived
+  // numbers. Strictly first write wins — later edits go through
+  // combat-update-combatant. (Accepting repeats would echo forever: every
+  // broadcast triggers the clients' auto-fill pass again.)
+  socket.on('combat-set-stats', (payload) => {
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    const c = combat && payload && combat.combatants[payload.combatantId];
+    if (!c || !canControl(c)) return;
+    if (!c.statsPending) return;
+    c.ac = clampInt(payload.ac, 1, 30, c.ac);
+    c.speedFeet = clampInt(payload.speedFeet, 0, 120, c.speedFeet);
+    c.initMod = clampInt(payload.initMod, -10, 20, c.initMod);
+    c.maxHP = clampInt(payload.maxHP, 1, 999, c.maxHP);
+    if (Array.isArray(payload.attacks)) {
+      c.attacks = payload.attacks.slice(0, 8).map(a => ({
+        name: String((a && a.name) || 'Attack').slice(0, 30),
+        attack: clampInt(a && a.attack, -10, 30, 0),
+        damage: String((a && a.damage) || '1').slice(0, 20),
+        damageType: String((a && a.damageType) || '').slice(0, 20),
+        ranged: !!(a && a.ranged),
+        rangeFt: clampInt(a && a.rangeFt, 5, 600, 5)
+      }));
+    }
+    if (!c.hp) c.hp = { current: c.maxHP };
+    c.statsPending = false;
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-roll-initiative', (payload) => {
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    const c = combat && payload && combat.combatants[payload.combatantId];
+    if (!c) return;
+    if (!canControl(c)) return combatDeny('Not your combatant');
+    if (c.initiative != null && !isGM(socket.username)) return combatDeny('Initiative already rolled');
+    const die = rollDie(20);
+    c.initiative = die + c.initMod;
+    pushLog(key, combat, {
+      kind: 'initiative', actorName: c.name,
+      text: `${c.name} rolls initiative: d20 ${die} ${fmtSigned(c.initMod)} = ${c.initiative}`,
+      roll: { d20: [die], used: die, mod: c.initMod, total: c.initiative }
+    });
+    if (!combat.started) {
+      if (Object.values(combat.combatants).every(x => x.initiative != null)) beginCombat(key, combat);
+    } else {
+      sortOrder(combat); // mid-combat addition slots into the order
+    }
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-begin', () => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    if (!combat || combat.started) return;
+    if (!Object.keys(combat.combatants).length) return combatDeny('No combatants');
+    beginCombat(key, combat);
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-action', (payload) => {
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    if (!combat || !combat.started || !payload) return;
+    const c = combat.combatants[payload.combatantId];
+    if (!c) return;
+    if (!canControl(c)) return combatDeny('Not your combatant');
+    if (combat.activeId !== c.id) return combatDeny("Not this combatant's turn");
+    if (c.actionUsed) return combatDeny('Action already used this turn');
+    if (hasEffect(c, 'down')) return combatDeny(`${c.name} is down`);
+    const kind = String(payload.kind || '');
+    if (kind === 'dash') {
+      c.dashFeet += c.speedFeet;
+      addEffect(c, 'dashed', true);
+      pushLog(key, combat, { kind: 'action', actorName: c.name, text: `${c.name} dashes (+${c.speedFeet} ft movement)` });
+    } else if (kind === 'dodge') {
+      addEffect(c, 'dodging', true);
+      pushLog(key, combat, { kind: 'action', actorName: c.name, text: `${c.name} takes the Dodge action (attacks against them at disadvantage)` });
+    } else if (kind === 'disengage') {
+      addEffect(c, 'disengaged', true);
+      pushLog(key, combat, { kind: 'action', actorName: c.name, text: `${c.name} disengages` });
+    } else if (kind === 'attack') {
+      const target = combat.combatants[payload.targetId];
+      if (!target) return combatDeny('No such target');
+      if (target.id === c.id) return combatDeny("Can't target yourself");
+      const atk = c.attacks[clampInt(payload.attackIndex, 0, 99, -1)];
+      if (!atk) return combatDeny('No such attack');
+      const disadvantage = hasEffect(target, 'dodging');
+      const d20 = [rollDie(20)];
+      if (disadvantage) d20.push(rollDie(20));
+      const used = disadvantage ? Math.min(d20[0], d20[1]) : d20[0];
+      const crit = used === 20;
+      const total = used + atk.attack;
+      const hit = used !== 1 && (crit || total >= target.ac);
+      const dieTxt = disadvantage ? `[${d20.join(', ')}] → ${used}` : `${used}`;
+      let text = `${c.name} attacks ${target.name} (${atk.name}): d20 ${dieTxt} ${fmtSigned(atk.attack)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
+      const entry = {
+        kind: 'attack', actorName: c.name, targetName: target.name,
+        roll: { d20, used, mod: atk.attack, total, vs: target.ac, hit, crit, disadvantage }
+      };
+      if (hit) {
+        const dmg = rollDamage(atk.damage, crit);
+        entry.dmg = dmg;
+        text += ` · ${dmg.expr}${crit ? ' (crit ×2 dice)' : ''} → ${dmg.total}${atk.damageType ? ' ' + atk.damageType : ''}`;
+        const cur = (target.hp && typeof target.hp.current === 'number') ? target.hp.current : target.maxHP;
+        const next = Math.max(0, cur - dmg.total);
+        if (target.kind === 'character' && target.charId && charactersDB[target.charId]) {
+          applyCharacterHP(target.charId, next); // mirrors into target.hp too
+        } else {
+          setCombatantHP(target, next);
+        }
+        if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
+      }
+      entry.text = text;
+      pushLog(key, combat, entry);
+    } else {
+      return;
+    }
+    c.actionUsed = true;
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-end-turn', () => {
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    if (!combat || !combat.started) return;
+    const active = combat.activeId && combat.combatants[combat.activeId];
+    if (!isGM(socket.username) && !(active && active.owner === socket.username)) return combatDeny('Not your turn');
+    advanceTurn(key, combat);
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-set-turn', (payload) => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    const c = combat && combat.started && payload && combat.combatants[payload.combatantId];
+    if (!c) return;
+    startTurn(key, combat, c.id);
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-update-combatant', (payload) => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    const c = combat && payload && combat.combatants[payload.combatantId];
+    if (!c) return;
+    const patch = payload.patch || {};
+    if (patch.name != null) c.name = String(patch.name).slice(0, 40) || c.name;
+    if (patch.ac != null) c.ac = clampInt(patch.ac, 1, 30, c.ac);
+    if (patch.speedFeet != null) c.speedFeet = clampInt(patch.speedFeet, 0, 120, c.speedFeet);
+    if (patch.initMod != null) c.initMod = clampInt(patch.initMod, -10, 20, c.initMod);
+    if (patch.maxHP != null) c.maxHP = clampInt(patch.maxHP, 1, 999, c.maxHP);
+    if (patch.initiative != null) {
+      c.initiative = clampInt(patch.initiative, -20, 60, c.initiative);
+      if (combat.started) sortOrder(combat); // activeId is id-based, stays valid
+    }
+    if (patch.hpCurrent != null) {
+      const v = clampInt(patch.hpCurrent, 0, 999, 0);
+      if (c.kind === 'character' && c.charId && charactersDB[c.charId]) applyCharacterHP(c.charId, v);
+      else setCombatantHP(c, v);
+    }
+    c.statsPending = false;
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-set-order', (payload) => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    if (!combat || !payload || !Array.isArray(payload.order)) return;
+    const cur = [...combat.order].sort().join(' ');
+    const req = payload.order.map(String).sort().join(' ');
+    if (cur !== req) return; // must be a permutation of the current order
+    combat.order = payload.order.map(String);
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-remove-combatant', (payload) => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    const c = combat && payload && combat.combatants[payload.combatantId];
+    if (!c) return;
+    removeCombatant(key, combat, c.id);
+    pushLog(key, combat, { kind: 'info', actorName: c.name, text: `${c.name} leaves the fight` });
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-add-combatant', (payload) => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    const map = getMap(key);
+    const obj = combat && payload && map.objects[payload.objectId];
+    if (!obj || combat.combatants[obj.id]) return;
+    const c = seedCombatant(obj);
+    if (!c) return combatDeny('Only tokens and characters can fight');
+    combat.combatants[c.id] = c;
+    if (combat.started) combat.order.push(c.id); // end of round until initiative is rolled
+    pushLog(key, combat, { kind: 'info', actorName: c.name, text: `${c.name} joins the fight` });
+    broadcastCombat(key);
+  });
+
+  socket.on('combat-effect', (payload) => {
+    if (!isGM(socket.username)) return combatDeny('GM only');
+    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const combat = getCombat(key);
+    const c = combat && payload && combat.combatants[payload.combatantId];
+    const effKey = payload && String(payload.key || '');
+    if (!c || !CONDITION_LABELS[effKey]) return;
+    if (payload.add) addEffect(c, effKey, false);
+    else removeEffect(c, effKey);
+    broadcastCombat(key);
   });
 
   socket.on('add-ruler', (data) => {

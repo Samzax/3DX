@@ -8,11 +8,12 @@ import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../sha
 import { Terrain } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { setupLoginModal } from '../shared/login.js';
+import { CombatTracker, CombatOverlays, deriveCombatStats, remainingFeet } from '../shared/combat.js';
 
 let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
 let grass = null;   // instanced ground-cover grass (shared/grass.js)
@@ -32,6 +33,15 @@ let objects = [];
 let selectedObject = null;
 
 let socket = null; // created on login
+let myUsername = null;
+
+// --- Combat mode (server-authoritative, synced via combat-updated) ---
+let combatState = null;
+let combatTracker = null;
+let pendingAttack = null;       // { combatantId, attackIndex } while picking a target
+let dragStartPos = null;        // selected token's world position when the move began
+let combatOverlays = null;      // turn/range rings + effect badges (created in init)
+let closeAllPanels = () => {};  // assigned in init (needs the HUD overlay refs)
 
 let currentTool = null;
 let currentMoveMode = 'standard';
@@ -65,6 +75,12 @@ function init() {
     ruler = new RulerTool({
         scene: worldGroup, // ruler points/segments are world coords
         tooltip: document.getElementById('ruler-tooltip')
+    });
+
+    combatOverlays = new CombatOverlays({
+        worldGroup,
+        findMesh: findObjectMesh,
+        feetToWorld: ft => (ft / FEET_PER_GRID_CELL) * GRID_CELL_SIZE
     });
 
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
@@ -137,11 +153,15 @@ function init() {
         });
     });
 
-    function closeAllPanels() {
+    closeAllPanels = function () {
         hudOverlay.classList.add('hidden');
         hudOverlay.style.display = 'none';
         document.querySelectorAll('.hud-panel').forEach(p => p.classList.add('hidden'));
-    }
+    };
+
+    document.getElementById('btn-end-turn').addEventListener('click', () => {
+        if (socket) socket.emit('combat-end-turn', {});
+    });
 
     closeButtons.forEach(btn => btn.addEventListener('click', closeAllPanels));
     hudOverlay.addEventListener('click', (e) => {
@@ -152,6 +172,7 @@ function init() {
         renderer, scene, camera, controls,
         onTick: () => {
             updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
+            if (combatOverlays) combatOverlays.tick(); // rings/badges track their tokens
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary
@@ -233,7 +254,25 @@ function onPointerDown(event) {
     const clickedType = clickedObject && clickedObject.userData.objectType;
     const buildAsGround = clickedType === 'wall' || clickedType === 'floor';
 
+    // Combat: with an attack pending, this click picks the target instead.
+    if (pendingAttack) {
+        const targetId = clickedObject && clickedObject.userData.syncId;
+        if (targetId && combatState && combatState.combatants[targetId] && socket) {
+            socket.emit('combat-action', {
+                combatantId: pendingAttack.combatantId, kind: 'attack',
+                targetId, attackIndex: pendingAttack.attackIndex
+            });
+        } else if (combatTracker) {
+            combatTracker.flash('Attack cancelled — that was not a combatant');
+        }
+        pendingAttack = null;
+        return;
+    }
+
     if (clickedObject && !buildAsGround) {
+        // Combat: combatant tokens are locked to their owner, on their turn.
+        const deny = combatSelectDenied(clickedObject);
+        if (deny) { if (combatTracker) combatTracker.flash(deny); return; }
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
             selectObject(clickedObject);
             isDraggingHeight = true;
@@ -296,6 +335,7 @@ function onPointerMove(event) {
         // Players keep the object's current height, clamped above the ground.
         applyMove(selectedObject, snapToGrid(intersectPoint), currentMoveMode,
             (x, z, halfHeight, currentY) => Math.max(currentY, halfHeight));
+        updateMoveCostTooltip(event); // combat: live «X ft — Y ft left»
     }
 
     if (currentTool === 'ruler' && ruler.points.length > 0) {
@@ -339,6 +379,11 @@ function onContextMenu(event) {
 function onKeyDown(event) {
     // No delete for players
     if (event.key === "Escape") {
+        if (pendingAttack) {
+            pendingAttack = null;
+            if (combatTracker) combatTracker.flash('Attack cancelled');
+            return;
+        }
         if (currentTool === 'ruler' && ruler.points.length > 0) {
             ruler.clearInProgress();
         } else if (isDraggingHeight) {
@@ -370,6 +415,7 @@ function createObjectFromData(id, data) {
 function selectObject(object) {
     deselectObject();
     selectedObject = object;
+    dragStartPos = object.position.clone(); // combat movement is measured from here
     if (!selectedObject.userData.characterData) {
         selectedObject.material = selectedMaterial;
     }
@@ -384,6 +430,84 @@ function deselectObject() {
         }
     }
     selectedObject = null;
+    dragStartPos = null;
+    hideMoveTooltip();
+}
+
+// --- Combat mode -------------------------------------------------------------
+
+function findObjectMesh(id) { return objects.find(o => o.userData.syncId === id); }
+const combatantDown = c => (c.effects || []).some(e => e.key === 'down');
+
+// Why a click on a token is refused during combat (null = allowed).
+function combatSelectDenied(obj) {
+    if (!combatState || !combatState.started) return null;
+    const c = combatState.combatants[obj.userData.syncId];
+    if (!c) return null; // not a combatant: moves freely
+    if (c.owner !== myUsername) return `You don't control ${c.name}`;
+    if (combatState.activeId !== c.id) return `Not ${c.name}'s turn`;
+    if (combatantDown(c)) return `${c.name} is down`;
+    return null;
+}
+
+// Every combat-updated re-applies the whole state: tracker, overlays, HUD.
+function setCombat(combat) {
+    combatState = combat;
+    if (combatTracker) combatTracker.setState(combat);
+    answerStatsPending();
+    if (combatOverlays) combatOverlays.sync(combat);
+    renderHUD(); // the Actions panel reflects turn state
+    const endBtn = document.getElementById('btn-end-turn');
+    if (endBtn) {
+        const active = combat && combat.started && combat.combatants[combat.activeId];
+        endBtn.classList.toggle('hidden', !(active && active.owner === myUsername));
+    }
+    if (!combat) { pendingAttack = null; hideMoveTooltip(); }
+}
+
+// Character combatants join with statsPending: their owner's client answers
+// with SRD-derived numbers (first write wins server-side). answeredStats stops
+// re-sends while our write is still in flight.
+const answeredStats = new Set();
+function answerStatsPending() {
+    if (!combatState || !SRD || !socket) return;
+    for (const c of Object.values(combatState.combatants)) {
+        if (!c.statsPending || c.owner !== myUsername || !c.charId || answeredStats.has(c.id)) continue;
+        const char = myCharacters.find(x => x.id === c.charId);
+        if (!char) continue;
+        answeredStats.add(c.id);
+        socket.emit('combat-set-stats', { combatantId: c.id, ...deriveCombatStats(char, SRD) });
+    }
+}
+
+function beginTargetPick(combatantId, attackIndex, attack) {
+    pendingAttack = { combatantId, attackIndex };
+    closeAllPanels();
+    if (combatTracker) combatTracker.flash(`Pick a target for ${attack.name}: click a token (Esc cancels)`);
+}
+
+// Live «12 ft — 18 ft left» while dragging the active combatant. Reuses the
+// ruler tooltip element (move and ruler tools are mutually exclusive).
+function updateMoveCostTooltip(event) {
+    if (!dragStartPos || !selectedObject || !combatState || !combatState.started) return;
+    const c = combatState.combatants[selectedObject.userData.syncId];
+    if (!c || combatState.activeId !== c.id) return;
+    const el = document.getElementById('ruler-tooltip');
+    if (!el) return;
+    const feet = Math.hypot(selectedObject.position.x - dragStartPos.x,
+        selectedObject.position.z - dragStartPos.z) / GRID_CELL_SIZE * FEET_PER_GRID_CELL;
+    const left = c.speedFeet + c.dashFeet - c.movementUsedFeet;
+    el.textContent = `${Math.round(feet)} ft — ${Math.max(0, Math.round(left - feet))} ft left`;
+    el.style.color = feet > left + 0.5 ? '#ff6b6b' : '';
+    el.style.display = 'block';
+    el.style.left = (event.clientX + 14) + 'px';
+    el.style.top = (event.clientY + 14) + 'px';
+}
+
+function hideMoveTooltip() {
+    if (currentTool === 'ruler') return; // the ruler owns the tooltip right now
+    const el = document.getElementById('ruler-tooltip');
+    if (el) { el.style.display = 'none'; el.style.color = ''; }
 }
 
 // --- Character sheet HUD rendering ---
@@ -559,6 +683,45 @@ function renderSpellsPanel(char, d) {
 
 function renderActionsPanel(char, d) {
     const ac = document.getElementById('actions-content');
+
+    // Combat, my turn: the panel becomes the action bar for the ACTIVE
+    // combatant (its server-held attacks, not the HUD character's — a player
+    // with several tokens acts with whichever one has the turn).
+    const active = combatState && combatState.started && combatState.combatants[combatState.activeId];
+    if (active && active.owner === myUsername && !combatantDown(active)) {
+        const c = active;
+        const dis = c.actionUsed ? 'disabled' : '';
+        const atkBtns = (c.attacks || []).map((a, i) =>
+            `<button class="btn-combat atk" data-combat-atk="${i}" ${dis}>⚔ ${escHtml(a.name)} <span class="tag">${fmtMod(a.attack)} · ${escHtml(a.damage)} ${escHtml(a.damageType)}</span></button>`
+        ).join('') || '<p class="muted">No attacks.</p>';
+        ac.innerHTML = `
+            <div class="row-item"><span>▶ ${escHtml(c.name)}'s turn — Round ${combatState.round}</span><b>${remainingFeet(c)} ft left</b></div>
+            ${c.actionUsed ? '<p class="muted">Action used this turn — you can still move, then end your turn.</p>' : ''}
+            <h4>Attacks</h4>
+            <div class="combat-actions-list">${atkBtns}</div>
+            <h4>Other Actions</h4>
+            <div class="combat-actions-list">
+                <button class="btn-combat" data-combat-act="dash" ${dis}>💨 Dash <span class="tag">+${c.speedFeet} ft move</span></button>
+                <button class="btn-combat" data-combat-act="dodge" ${dis}>🛡 Dodge <span class="tag">attacks vs you at disadv.</span></button>
+                <button class="btn-combat" data-combat-act="disengage" ${dis}>↪ Disengage</button>
+                <button class="btn-combat end" data-combat-act="end-turn">■ End Turn</button>
+            </div>`;
+        ac.querySelectorAll('[data-combat-atk]').forEach(btn => btn.onclick = () => {
+            const i = +btn.dataset.combatAtk;
+            if (c.attacks[i]) beginTargetPick(c.id, i, c.attacks[i]);
+        });
+        ac.querySelectorAll('[data-combat-act]').forEach(btn => btn.onclick = () => {
+            const act = btn.dataset.combatAct;
+            if (!socket) return;
+            if (act === 'end-turn') socket.emit('combat-end-turn', {});
+            else socket.emit('combat-action', { combatantId: c.id, kind: act });
+        });
+        return;
+    }
+
+    // Outside combat (or waiting for the turn): the reference list.
+    const waiting = combatState && combatState.started
+        ? `<p class="muted">⚔ Combat — waiting for ${escHtml(active ? active.name : '…')}'s turn.</p>` : '';
     const eq = char.equipment || {};
     const attacks = (eq.weapons || []).map(wi => {
         const w = SRD.get('equipment', wi); if (!w) return '';
@@ -567,7 +730,7 @@ function renderActionsPanel(char, d) {
     }).join('') || '<p class="muted">No weapon attacks.</p>';
     const standard = ['Attack', 'Cast a Spell', 'Dash', 'Disengage', 'Dodge', 'Help', 'Hide', 'Ready', 'Search', 'Use an Object']
         .map(x => `<div class="row-item"><span>${x}</span></div>`).join('');
-    ac.innerHTML = `
+    ac.innerHTML = `${waiting}
         <h4>Attacks</h4>${attacks}
         <h4>Standard Actions</h4>${standard}
         <div class="muted" style="margin-top:8px;">Bonus actions &amp; reactions depend on your class features and prepared spells.</div>`;
@@ -621,6 +784,12 @@ function setRulerColor(colorValue, clickedButton) {
 // --- Socket.IO: receive and share the GM's map in real time ---
 function initSocket(username) {
     socket = io();
+    myUsername = username;
+    combatTracker = new CombatTracker({
+        container: document.getElementById('combat-tracker'),
+        socket, isGM: false, username,
+        onPickTarget: beginTargetPick
+    });
 
     socket.on('connect', () => {
         console.log('Conectado ao servidor com ID:', socket.id);
@@ -642,6 +811,7 @@ function initSocket(username) {
             activeCharId = myCharacters[0] ? myCharacters[0].id : null;
         }
         renderHUD();
+        answerStatsPending(); // combat may have arrived before the characters
     });
 
     socket.on('load-homebrew', (hb) => {
@@ -663,6 +833,11 @@ function initSocket(username) {
         renderHUD();
     });
 
+    // --- Combat sync ---
+    socket.on('combat-updated', (combat) => setCombat(combat));
+    socket.on('combat-log', (entry) => { if (combatTracker) combatTracker.appendLog(entry); });
+    socket.on('combat-denied', ({ reason }) => { if (combatTracker) combatTracker.flash(reason || 'Not allowed'); });
+
     // Live HP sync: another client (or this one elsewhere) changed current HP.
     socket.on('hp-updated', ({ id, current }) => {
         hpState[id] = current;
@@ -683,6 +858,7 @@ function initSocket(username) {
 
         data.objects.forEach(objData => createObjectFromData(objData.id, objData));
         data.rulers.forEach(rulerData => ruler.addFromData(rulerData.id, rulerData));
+        setCombat(data.combat || null); // joiners land mid-combat fully synced
 
         // Pocket-map boundary rectangle (dungeons/rooms).
         if (boundsRect) { scene.remove(boundsRect); boundsRect.geometry.dispose(); boundsRect = null; }
@@ -808,4 +984,5 @@ loadSRD().then(srd => {
     SRD = srd;
     if (pendingHomebrew) SRD.setHomebrew(pendingHomebrew);
     renderHUD();
+    answerStatsPending(); // combat may have arrived before the SRD finished loading
 }).catch(e => console.error('Failed to load SRD data:', e));

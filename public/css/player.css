@@ -170,3 +170,9 @@
 details.spell-lvl { margin-bottom:8px; }
 details.spell-lvl summary { color:#cbd0d8; font-size:13px; font-weight:600; padding:4px 0; }
 details.spell-lvl .row-item { padding-left:10px; }
+
+/* --- Combat: tracker placement + End Turn shortcut --- */
+#combat-tracker { position: absolute; right: 12px; bottom: 12px; z-index: 25; }
+.hud-button.end-turn { background: #2f4a5d; }
+.hud-button.end-turn:hover { background: #3a5d75; }
+.hud-button.end-turn.hidden { display: none; }
