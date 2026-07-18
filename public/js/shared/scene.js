@@ -173,6 +173,62 @@ export function maybeRebaseWorld({ terrain, worldGroup, camera, controls }) {
     return true;
 }
 
+// ===== GM-directed camera flights =====
+// Eased camera fly-to that runs in TRUE world coordinates and converts through
+// the current floating origin every tick, so a mid-flight rebase can't bend the
+// path. One instance per page; call tick() from onTick (it runs before
+// controls.update(), so a live flight owns camera.position + controls.target
+// for that frame). pose = { pos:{x,y,z}, look:{x,y,z} } in world coords.
+export class CameraFly {
+    constructor(camera, controls) {
+        this.camera = camera;
+        this.controls = controls;
+        this.flight = null;
+    }
+    get active() { return !!this.flight; }
+    // origin: the CURRENT world origin ({x,z}) — needed to lift the camera's
+    // scene-space pose into world space for the start point. duration seconds;
+    // defaults to a distance-scaled 0.6–2.5s.
+    start(pose, origin, duration) {
+        const from = {
+            pos: {
+                x: this.camera.position.x + origin.x,
+                y: this.camera.position.y,
+                z: this.camera.position.z + origin.z
+            },
+            look: {
+                x: this.controls.target.x + origin.x,
+                y: this.controls.target.y,
+                z: this.controls.target.z + origin.z
+            }
+        };
+        const dist = Math.hypot(pose.look.x - from.look.x, pose.look.z - from.look.z);
+        this.flight = {
+            from, to: pose,
+            t0: performance.now(),
+            dur: 1000 * (duration || Math.min(2.5, 0.6 + dist / 1500))
+        };
+    }
+    cancel() { this.flight = null; }
+    tick(origin) {
+        const f = this.flight;
+        if (!f) return false;
+        const t = Math.min(1, (performance.now() - f.t0) / f.dur);
+        const e = t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2; // easeInOutQuad
+        const L = (a, b) => a + (b - a) * e;
+        this.camera.position.set(
+            L(f.from.pos.x, f.to.pos.x) - origin.x,
+            L(f.from.pos.y, f.to.pos.y),
+            L(f.from.pos.z, f.to.pos.z) - origin.z);
+        this.controls.target.set(
+            L(f.from.look.x, f.to.look.x) - origin.x,
+            L(f.from.look.y, f.to.look.y),
+            L(f.from.look.z, f.to.look.z) - origin.z);
+        if (t >= 1) this.flight = null;
+        return true;
+    }
+}
+
 // Recenter the ground plane, grid, and sun light on the camera target each frame
 // so they follow the view. The generated terrain (Terrain.updateWindow) is what
 // actually fills the world with ground; the plane is just a thin backdrop under

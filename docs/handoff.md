@@ -12,6 +12,33 @@ CLAUDE.md has the conventions. Design docs: `docs/unified-world-design.md`,
 **Branch state:** everything is on `main`, pushed to GitHub. No side branches.
 
 Built and working (newest first):
+- **GM camera control (View tool)**: the GM steers player cameras. Events:
+  `players-updated` (presence roster, broadcast on login/join-map/disconnect),
+  `camera-command { target: 'all'|username, pose: {pos, look}, mode:
+  'fly'|'snap', lock }` (GM-only, TRUE world coords) → `camera-goto` to
+  targeted players, `camera-release` → `camera-unlock`. Server
+  (`forEachCameraTarget`) matches by SPACE not raw room: any unified key
+  counts as one space (hex tiers have their own rooms but show the same
+  world), pockets match exactly; ephemeral, nothing persists.
+  `shared/scene.js` gained `CameraFly` — eased fly-to lerping in world
+  coords, converting through the floating origin each tick, so mid-flight
+  rebases can't bend the path. player.js: flights > 20000u snap and re-seat
+  the origin at the destination (a cross-continent glide would drag dozens of
+  rebases); `lock` disables OrbitControls + shows `#view-lock-banner`; player
+  wheel/orbit input cancels an UNLOCKED flight (locked controls can't fire
+  those events); map-state cancels flight + lock; player got a `__dbg`
+  (mirrors gm.js). GM screen: eye toolbar button + View panel (player rows
+  from the roster with pocket tag, Point/Token click actions, Smooth-fly +
+  Lock checkboxes, Bring-to-my-view, Release, 2.5s status line); clicks send
+  `viewPoseAt` (the focusCameraOn 20/30/20 framing) at the ground point or
+  picked object. Verified in two preview tabs: exact world-coord landings
+  (bring-to-view, point send), lock/release round-trip, long-jump origin
+  re-seat, panel wiring end-to-end. Known interaction: snapping a player to
+  GROUND level in an unrevealed region puts the camera UNDER the fog sheet
+  (y=80) so they see bare generated terrain — fog-v2 concern (the sheet only
+  protects GM edits either way). V2 dials: follow-me streaming (throttled
+  repeated commands), cross-map summon (mapKey + join-map + pose stash),
+  auto-reveal at destination.
 - **U4: Fog of war (per-player reveal)**: players free-roam the camera but the
   server only SENDS them content inside GM-revealed regions. The mask is a set
   of hexes on a **global province-pitch lattice** (1-mile cells, centered on
