@@ -12,6 +12,32 @@ CLAUDE.md has the conventions. Design docs: `docs/unified-world-design.md`,
 **Branch state:** everything is on `main`, pushed to GitHub. No side branches.
 
 Built and working (newest first):
+- **Combat mode (server-authoritative 5e fights)**: `shared/combat.js` holds
+  the client pieces — `deriveCombatStats` (SRD→combatant numbers, same math as
+  the player HUD sheet), `CombatTracker` (initiative list + combat log UI) and
+  `CombatOverlays` (turn ring, movement-range ring, effect badges in
+  `worldGroup`). The **server rolls all dice** and enforces turns, actions and
+  movement (`server.js` grew to ~1040 lines and now owns rules, not just
+  persistence): actions are `attack` / `dash` / `dodge` / `disengage`; auto
+  effects expire at the start of the combatant's next turn; GM can hand out
+  conditions (prone, poisoned, restrained, …) from the tracker. Events:
+  `combat-start/-end/-set-stats/-roll-initiative/-begin/-action/-end-turn/
+  -set-turn/-update-combatant/-set-order/-remove-combatant/-add-combatant/
+  -effect` → `combat-updated` (full state or null), `combat-log`,
+  `combat-denied` (offender only — never reuse `error`, the player client
+  routes that to the login modal). Combat state lives on the room key, so a
+  tactical fight is stored on `@world` = **one combat at a time outside
+  pockets**. The server never loads SRD data: clients answer `statsPending`
+  character combatants via `combat-set-stats` (first write wins, GM edits
+  always win; the GM client can answer for every character since it has them
+  all + homebrew). GM screen: combat toggle button, tracker panel,
+  click-to-target attacks, live «X ft — Y ft left» move tooltip; player screen
+  mirrors state and offers own-turn actions. Damage/healing on character
+  combatants syncs back to the saved character's HP.
+- **Shared character models in the creator**: the creator preview now renders
+  the exact model the tabletop shows (`models.js` `createCharacterModel` +
+  `disposeModel`), same scale, rebuilt+disposed on every slider tweak — race
+  features and equipment stay in sync between preview and table.
 - **Tile-brush structures (step 4, v1)**: a new
   Build tool button on the GM toolbar (own panel, tactical maps only).
   `shared/structures.js` builds modular wall runs (drag along grid lines,
@@ -80,17 +106,19 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
    tilt/jitter) for ruins. Interiors reuse pocket maps via portals.
 
 ## Next steps, in priority order
-1. ~~Tile-brush structures (step 4)~~ — v1 done (see above). Possible v2
-   dials: doors/gaps in runs, per-segment erase, roofs, wall-follow drag
-   (L-shapes in one gesture), thicker panel look.
-2. Vegetation extras: biome-varied ground cover (desert tufts, forest ferns,
+1. ~~Combat mode~~ — v1 done (see above). Possible v2 dials: opportunity
+   attacks, advantage/disadvantage from conditions, saving-throw actions,
+   spell attacks/slots in combat, death saves, multi-target/AoE.
+2. **U4: fog of war + per-player region subscription** (`subscribe-region`
+   reserved in the design doc) — still the plan for player visibility.
+3. Tile-brush v2 dials: doors/gaps in runs, per-segment erase, roofs,
+   wall-follow drag (L-shapes in one gesture), thicker panel look.
+4. Vegetation extras: biome-varied ground cover (desert tufts, forest ferns,
    flowers, rocks), GM density brush (needs a synced channel), tree
    billboards past 220u.
-3. Look-pass dials (toon banding, rim light).
-4. **U4: fog of war + per-player region subscription** (`subscribe-region`
-   reserved in the design doc) — parked, still the plan for player visibility.
-5. Later: characters/animations/combat on srd.js, pocket playable masks,
-   region-scoped terrain reset.
+5. Look-pass dials (toon banding, rim light).
+6. Later: character animations, pocket playable masks, region-scoped terrain
+   reset.
 
 ## Known minor issues
 - ~90ms frame for the all-ocean sheet rebuild once per window drain (worst
@@ -149,10 +177,20 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
   ScatterField (geometry, wind, colors, fades / species + biome mixing).
 - `public/js/shared/scene.js` — gradient sky + `SKY_COLOR`, hemisphere+sun
   lights, camera bounds, floating origin (`maybeRebaseWorld`), grid snap.
+- `public/js/shared/combat.js` — `deriveCombatStats`, `CombatTracker`
+  (tracker + log UI), `CombatOverlays` (rings/badges), `EFFECTS`,
+  `remainingFeet`.
+- `public/js/shared/models.js` — `buildObjectFromData` (the one place synced
+  objects are built), `createCharacterModel`/`disposeModel` (shared with the
+  creator preview), move helper `applyMove`.
 - `public/js/pages/gm.js` — tools/gestures, `updateTerrainLOD` (zoom speed,
   frustum, fog, grid fade, vegetation update per frame), `focusCameraOn`
-  (descends from lens altitudes), `__dbg`.
+  (descends from lens altitudes), combat wiring (`setCombat`, `pendingAttack`
+  click-to-target, `answerStatsPending`), `__dbg`.
 - `public/js/pages/player.js` — mirrors gm's updateTerrainLOD (incl. frustum
-  scaling); unified maxDistance 811008 / pocket 6000.
-- `server.js` — `@world` store + routing, `provinceWorldCenter`, migrations,
-  socket handlers (map/objects/terrain/hex/pocket).
+  scaling); unified maxDistance 811008 / pocket 6000; combat panel +
+  own-turn actions.
+- `server.js` (~1040 lines) — `@world` store + routing, `provinceWorldCenter`,
+  migrations, socket handlers (map/objects/terrain/hex/pocket) **and the
+  whole combat rules engine** (dice, turn order, action/movement
+  enforcement, condition expiry, HP write-back to characters).

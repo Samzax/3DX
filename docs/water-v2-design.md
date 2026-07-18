@@ -1,5 +1,8 @@
 # Water v2 — Design
 
+> **Status (2026-07):** implemented (poured lakes + spline rivers are live).
+> Kept as the reference for the data model and the pour algorithm.
+
 Goal: water that **looks** like water (stylized, animated, Ghibli-leaning) and
 **behaves** like water (fills the valley you pour it into, stops at ridges,
 reacts when you sculpt under it) — without the failure of v0 (full simulation
