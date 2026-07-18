@@ -101,6 +101,73 @@ function provinceWorldCenter(key) {
 function isTacticalPath(key) { return /^world(\/-?\d+,-?\d+){3}$/.test(key); }
 // Hex-tier layers of the world tree (depth 0-2): zoom lenses over the world.
 function isWorldHexPath(key) { return /^world(\/-?\d+,-?\d+){0,2}$/.test(key); }
+// Rooms that render the one continuous world (tactical store + hex lenses).
+function isUnifiedKey(key) { return key === WORLD_KEY || isWorldHexPath(key); }
+
+// ===== Fog of war (U4, docs/unified-world-design.md) =====
+// Players free-roam the camera but only RECEIVE content inside regions the GM
+// has revealed. The mask is a set of hexes on a GLOBAL province-pitch lattice
+// centered on the world origin (deliberately not the nested navigation
+// lattice, which re-ids the same ground under different parents). It persists
+// at maps[WORLD_KEY].fog as { "q,r": 1 }. Math mirrors shared/fog.js —
+// keep bit-identical: the server decides what each player is sent.
+const FOG_TIER = 2;
+function fogHexKeyAt(x, z) {
+  const R = TIER_WIDTH[FOG_TIER] / SQRT3;
+  const qf = (SQRT3 / 3 * x - 1 / 3 * z) / R;
+  const rf = (2 / 3 * z) / R;
+  let rq = Math.round(qf), ry = Math.round(-qf - rf), rr = Math.round(rf);
+  const dq = Math.abs(rq - qf), dy = Math.abs(ry - (-qf - rf)), dr = Math.abs(rr - rf);
+  if (dq > dy && dq > dr) rq = -ry - rr;
+  else if (dy <= dr) rr = -rq - ry;
+  return rq + ',' + rr;
+}
+// Fog hex containing a terrain chunk ("cx,cz"), classified by chunk center.
+function chunkFogHexKey(chunkKey) {
+  const [cx, cz] = chunkKey.split(',').map(Number);
+  return fogHexKeyAt((cx + 0.5) * CHUNK_CELLS, (cz + 0.5) * CHUNK_CELLS);
+}
+function worldFog() {
+  const w = getMap(WORLD_KEY);
+  if (!w.fog) w.fog = {};
+  return w.fog;
+}
+function isRevealedAt(x, z) {
+  return !!worldFog()[fogHexKeyAt(Number(x) || 0, Number(z) || 0)];
+}
+// A player always sees their own characters — losing your own token to fog
+// would strand the HUD/combat panel, and "where am I" is never a GM secret.
+function ownsObject(username, obj) {
+  return !!(username && obj && obj.type === 'character' &&
+    obj.characterData && obj.characterData.owner === username);
+}
+function objectVisibleTo(username, obj) {
+  if (isGM(username)) return true;
+  if (ownsObject(username, obj)) return true;
+  const p = obj.position || {};
+  return isRevealedAt(p.x, p.z);
+}
+// Terrain as a player may see it: only chunks inside revealed fog hexes.
+// (The base procedural ground regenerates client-side either way — what fog
+// actually protects is GM-authored edits: carved entrances, sculpted lairs.)
+function filterTerrainForPlayer(t) {
+  if (!t || !t.chunks) return t;
+  const chunks = {};
+  for (const k of Object.keys(t.chunks)) {
+    if (worldFog()[chunkFogHexKey(k)]) chunks[k] = t.chunks[k];
+  }
+  return { ...t, chunks };
+}
+// Per-socket emit to a room (fog filtering needs to know WHO receives).
+function emitToRoom(key, exceptSocket, fn) {
+  const room = io.sockets.adapter.rooms.get(key);
+  if (!room) return;
+  for (const sid of room) {
+    if (exceptSocket && sid === exceptSocket.id) continue;
+    const sock = io.sockets.sockets.get(sid);
+    if (sock) fn(sock);
+  }
+}
 
 // One-time migration: fold legacy per-province tactical islands into WORLD_KEY at
 // their composed world position (chunk-aligned), so the tactical layer becomes one
@@ -412,6 +479,11 @@ io.on('connection', (socket) => {
       races: Object.values(homebrewDB.races),
       classes: Object.values(homebrewDB.classes)
     });
+
+    // The auto-join map-state went out before we knew who this was, so it was
+    // fog-filtered as an anonymous player. Now that the role is known, re-send
+    // (the GM gets the unfiltered world; players get their owned-token pass).
+    if (socket.currentMapKey) sendMapState(socket.currentMapKey);
   });
 
   // Get characters (filtered by permission)
@@ -630,18 +702,30 @@ io.on('connection', (socket) => {
     const m = getMap(roomKey);
     const ctx = contextKey || roomKey;
     const extra = {};
-    if (roomKey === WORLD_KEY || isWorldHexPath(roomKey)) {
+    const gm = isGM(socket.username);
+    const unified = isUnifiedKey(roomKey);
+    if (unified) {
       extra.worldCenter = provinceWorldCenter(ctx);
       extra.unified = true;
       extra.hexTree = collectHexTree();
-      if (roomKey !== WORLD_KEY) extra.terrain = ensureWorld().terrain;
-      else ensureWorld();
+      // The revealed set (the mask itself isn't secret — clients render it).
+      extra.fog = Object.keys(worldFog());
+      const wt = ensureWorld().terrain;
+      if (roomKey !== WORLD_KEY) extra.terrain = gm ? wt : filterTerrainForPlayer(wt);
+    }
+    // Fog of war: players only receive objects and terrain edits inside
+    // revealed regions of the unified world (pockets are never fogged).
+    let objectsOut = Object.values(m.objects);
+    let terrainOut = m.terrain || null;
+    if (unified && !gm) {
+      objectsOut = objectsOut.filter(o => objectVisibleTo(socket.username, o));
+      terrainOut = filterTerrainForPlayer(terrainOut);
     }
     socket.emit('map-state', {
       key: ctx,
-      objects: Object.values(m.objects),
+      objects: objectsOut,
       rulers: Object.values(m.rulers),
-      terrain: m.terrain || null,
+      terrain: terrainOut,
       meta: m.meta || null,
       hexes: m.hexes || {},
       biome: resolveBiome(ctx),
@@ -724,7 +808,15 @@ io.on('connection', (socket) => {
     const newObject = { ...data, id: id };
     map.objects[id] = newObject;
     saveMaps();
-    io.to(key).emit('object-added', newObject);
+    if (!isUnifiedKey(key)) {
+      io.to(key).emit('object-added', newObject);
+      return;
+    }
+    // Fog of war: only players who can see the spot learn the object exists.
+    socket.emit('object-added', newObject); // the author always gets the echo
+    emitToRoom(key, socket, (sock) => {
+      if (objectVisibleTo(sock.username, newObject)) sock.emit('object-added', newObject);
+    });
   });
 
   socket.on('move-object', (data) => {
@@ -756,9 +848,28 @@ io.on('connection', (socket) => {
         c.movementUsedFeet += feet;
       }
     }
-    map.objects[data.id].position = data.position;
+    const obj = map.objects[data.id];
+    const oldPos = { ...(obj.position || {}) };
+    obj.position = data.position;
     saveMaps();
-    socket.to(key).emit('object-moved', data);
+    if (!isUnifiedKey(key)) {
+      socket.to(key).emit('object-moved', data);
+    } else {
+      // Fog of war: an object crossing the reveal boundary pops into (full
+      // object) or out of (delete) existence for players — hidden objects
+      // simply don't exist on their side.
+      emitToRoom(key, socket, (sock) => {
+        if (isGM(sock.username) || ownsObject(sock.username, obj)) {
+          sock.emit('object-moved', data);
+          return;
+        }
+        const was = isRevealedAt(oldPos.x, oldPos.z);
+        const now = isRevealedAt(obj.position && obj.position.x, obj.position && obj.position.z);
+        if (was && now) sock.emit('object-moved', data);
+        else if (!was && now) sock.emit('object-added', obj);
+        else if (was && !now) sock.emit('object-deleted', { id: obj.id });
+      });
+    }
     if (c) broadcastCombat(key);
   });
 
@@ -1098,7 +1209,77 @@ io.on('connection', (socket) => {
       }
     }
     saveMaps();
-    socket.to(key).emit('terrain-updated', data);
+    if (!isUnifiedKey(key)) {
+      socket.to(key).emit('terrain-updated', data);
+      return;
+    }
+    // Fog of war: players only receive chunk edits inside revealed hexes.
+    emitToRoom(key, socket, (sock) => {
+      if (isGM(sock.username)) { sock.emit('terrain-updated', data); return; }
+      const out = { ...data };
+      if (out.chunks) {
+        const chunks = {};
+        for (const k of Object.keys(out.chunks)) {
+          if (CHUNK_KEY_RE.test(k) && worldFog()[chunkFogHexKey(k)]) chunks[k] = out.chunks[k];
+        }
+        if (Object.keys(chunks).length) out.chunks = chunks;
+        else delete out.chunks;
+      }
+      if (out.chunks || out.water || out.clear) sock.emit('terrain-updated', out);
+    });
+  });
+
+  // --- Fog of war (U4): the GM reveals/hides fog hexes; players get the mask
+  // plus the content that just became visible (or lose what was hidden).
+  const FOG_HEX_RE = /^-?\d+,-?\d+$/;
+  socket.on('update-fog', (payload) => {
+    if (!isGM(socket.username)) return;
+    if (!payload || !Array.isArray(payload.hexes)) return;
+    const revealed = !!payload.revealed;
+    const fog = worldFog();
+    const changed = [];
+    for (const raw of payload.hexes.slice(0, 1024)) {
+      const hk = String(raw);
+      if (!FOG_HEX_RE.test(hk)) continue;
+      const [q, r] = hk.split(',').map(Number);
+      if (Math.abs(q) > 20000 || Math.abs(r) > 20000) continue;
+      if (!!fog[hk] === revealed) continue;
+      if (revealed) fog[hk] = 1;
+      else delete fog[hk];
+      changed.push(hk);
+    }
+    if (!changed.length) return;
+    saveMaps();
+    // Global broadcast (like hex-updated): every client rendering the unified
+    // world keeps the mask, whichever room it currently sits in.
+    io.emit('fog-updated', { hexes: changed, revealed });
+    // Content delta for players in unified rooms: what the toggle uncovered
+    // (full objects + terrain chunks) or swallowed (object deletes; the client
+    // drops its own chunks for hidden hexes — it knows the mask).
+    const changedSet = new Set(changed);
+    let chunkDelta = null;
+    if (revealed) {
+      const wt = maps[WORLD_KEY] && maps[WORLD_KEY].terrain;
+      if (wt && wt.chunks) {
+        for (const ck of Object.keys(wt.chunks)) {
+          if (changedSet.has(chunkFogHexKey(ck))) {
+            (chunkDelta = chunkDelta || {})[ck] = wt.chunks[ck];
+          }
+        }
+      }
+    }
+    for (const sock of io.sockets.sockets.values()) {
+      if (isGM(sock.username) || !isUnifiedKey(sock.currentMapKey || '')) continue;
+      const m = getMap(sock.currentMapKey);
+      for (const obj of Object.values(m.objects)) {
+        if (ownsObject(sock.username, obj)) continue; // visible either way
+        const p = obj.position || {};
+        if (!changedSet.has(fogHexKeyAt(Number(p.x) || 0, Number(p.z) || 0))) continue;
+        if (revealed) sock.emit('object-added', obj);
+        else sock.emit('object-deleted', { id: obj.id });
+      }
+      if (chunkDelta) sock.emit('terrain-updated', { chunks: chunkDelta });
+    }
   });
 
   socket.on('disconnect', () => {

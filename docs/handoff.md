@@ -12,6 +12,29 @@ CLAUDE.md has the conventions. Design docs: `docs/unified-world-design.md`,
 **Branch state:** everything is on `main`, pushed to GitHub. No side branches.
 
 Built and working (newest first):
+- **U4: Fog of war (per-player reveal)**: players free-roam the camera but the
+  server only SENDS them content inside GM-revealed regions. The mask is a set
+  of hexes on a **global province-pitch lattice** (1-mile cells, centered on
+  the world origin — deliberately not the nested navigation lattice, which
+  re-ids the same ground under different parents); it persists at
+  `maps['@world'].fog`. `shared/fog.js` holds the client half: `FogMask`,
+  brush helpers, and `FogOverlay` — ONE dark sheet at y=80 with holes punched
+  for revealed hexes (hidden ground is the infinite default, so per-hidden-hex
+  tiles can't work at survey zoom), rebuilt only when mask/center-bucket/zoom-
+  bucket change. Server (`update-fog` → `fog-updated` global broadcast, like
+  hex-updated): filters `map-state` objects+terrain chunks for non-GM sockets
+  on unified rooms, per-socket emits for add/move/terrain
+  (`emitToRoom`/`objectVisibleTo`), boundary crossings emit
+  object-added/deleted, reveals push the uncovered chunks, hides rely on the
+  client dropping its own chunks (`fog-updated` handler in player.js). Own
+  characters are always visible to their owner; pockets are never fogged;
+  chunks classify by center (`chunkFogHexKey`, identical both sides). GM: Fog
+  tool button + panel (Reveal/Hide, radius 0–6 hexes), drag-paints at any
+  zoom, sees a 0.45-opacity preview sheet while the tool is active; players
+  get a 0.94-opacity sheet always. `fogHexKeyAt` math MUST stay bit-identical
+  between server.js and shared/fog.js. Login re-sends map-state (the pre-login
+  auto-join snapshot was filtered as anonymous). Default is ALL HIDDEN — a
+  fresh player sees darkness until the GM reveals.
 - **Combat mode (server-authoritative 5e fights)**: `shared/combat.js` holds
   the client pieces — `deriveCombatStats` (SRD→combatant numbers, same math as
   the player HUD sheet), `CombatTracker` (initiative list + combat log UI) and
@@ -109,8 +132,11 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
 1. ~~Combat mode~~ — v1 done (see above). Possible v2 dials: opportunity
    attacks, advantage/disadvantage from conditions, saving-throw actions,
    spell attacks/slots in combat, death saves, multi-target/AoE.
-2. **U4: fog of war + per-player region subscription** (`subscribe-region`
-   reserved in the design doc) — still the plan for player visibility.
+2. ~~U4: fog of war~~ — v1 done (see above). Possible v2 dials: fog sheet
+   look (soft edges / cloud texture instead of the flat dark plane),
+   auto-reveal around player tokens, per-player masks (now it's one shared
+   mask), rulers/water filtering, `subscribe-region` streaming when world
+   size demands it.
 3. Tile-brush v2 dials: doors/gaps in runs, per-segment erase, roofs,
    wall-follow drag (L-shapes in one gesture), thicker panel look.
 4. Vegetation extras: biome-varied ground cover (desert tufts, forest ferns,
@@ -145,7 +171,8 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
   preview tab is VISIBLE on my screen; hidden tab = stale frames/timeouts.
   When blocked, verify headlessly (counts, timings, pure functions) and ask
   me to eyeball. On `/gm`, `window.__dbg` exposes `{ terrain, scene, camera,
-  controls, plane, grid, renderer, worldGroup, forceRender() }`.
+  controls, plane, grid, renderer, worldGroup, fogMask, socket,
+  forceRender() }`.
 - **Test-harness trap:** teleporting `controls.target` more than 4096u in an
   eval triggers a floating-origin rebase — after it, scene coords ≠ world
   coords. Convert via `terrain.worldOrigin` before concluding "the land is
@@ -185,8 +212,12 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
   click-to-target, `answerStatsPending`), `__dbg`.
 - `public/js/pages/player.js` — mirrors gm's updateTerrainLOD (incl. frustum
   scaling); unified maxDistance 811008 / pocket 6000; combat panel +
-  own-turn actions.
-- `server.js` (~1040 lines) — `@world` store + routing, `provinceWorldCenter`,
-  migrations, socket handlers (map/objects/terrain/hex/pocket) **and the
-  whole combat rules engine** (dice, turn order, action/movement
+  own-turn actions; fog mask/overlay + `fog-updated` chunk-drop.
+- `public/js/shared/fog.js` — U4 fog of war: global province-pitch lattice
+  (`fogHexKeyAt`, bit-identical to server.js), `FogMask`, `FogOverlay`
+  (holes-in-a-sheet), `hexesWithin` (GM brush).
+- `server.js` (~1215 lines) — `@world` store + routing, `provinceWorldCenter`,
+  migrations, socket handlers (map/objects/terrain/hex/pocket/fog), fog
+  filtering (`objectVisibleTo`/`filterTerrainForPlayer`/`emitToRoom`) **and
+  the whole combat rules engine** (dice, turn order, action/movement
   enforcement, condition expiry, HP write-back to characters).
