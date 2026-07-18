@@ -987,8 +987,8 @@ io.on('connection', (socket) => {
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
     const combat = getCombat(key);
     if (!combat || !payload || !Array.isArray(payload.order)) return;
-    const cur = [...combat.order].sort().join(' ');
-    const req = payload.order.map(String).sort().join(' ');
+    const cur = [...combat.order].sort().join('\0');
+    const req = payload.order.map(String).sort().join('\0');
     if (cur !== req) return; // must be a permutation of the current order
     combat.order = payload.order.map(String);
     broadcastCombat(key);
