@@ -12,6 +12,7 @@ import { loadSRD } from '../shared/srd.js';
 import { CombatTracker, CombatOverlays, deriveCombatStats } from '../shared/combat.js';
 import { buildWallRun, buildFloorPatch, disposeBuiltObject } from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
+import { FogMask, FogOverlay, fogHexAt, hexesWithin } from '../shared/fog.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 
@@ -57,6 +58,13 @@ let buildGhost = null;                     // translucent preview in worldGroup
 let buildGhostKey = '';                    // memo: rebuild only when the snap changes
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
+
+// --- Fog of war (U4): GM paints reveal/hide on the global province-pitch
+// lattice; players only receive content inside revealed hexes (server-side).
+const fogMask = new FogMask();             // mirrors the server's revealed set
+const fogBrush = { mode: 'reveal', radius: 1 };
+let fogOverlay = null;                     // dim sheet while the tool is active
+let fogStroke = null;                      // Set of hexes touched this drag
 
 let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup;
 let ruler;
@@ -434,6 +442,9 @@ function initSocket() {
         hexTags = data.hexes || {};
         rebuildHexFills();
 
+        // Fog-of-war mask (unified world states carry the revealed set).
+        if (data.fog) fogMask.setList(data.fog);
+
         // Pocket metadata: name/dimensions drive the breadcrumb + boundary rect.
         currentMapMeta = data.meta || null;
         if (boundsRect) { scene.remove(boundsRect); boundsRect.geometry.dispose(); boundsRect = null; }
@@ -464,6 +475,8 @@ function initSocket() {
                 terrain.group.visible = true;
                 styleGroundForTerrain(plane, true);
                 syncWaterControls();
+                // The Fog tool may have been selected before this state landed.
+                if (fogOverlay) fogOverlay.setVisible(fogActive());
                 if (data.worldCenter) {
                     const c = data.worldCenter;   // fly to this layer's spot in the world
                     // Land with the floating origin already under it, so scene
@@ -530,6 +543,13 @@ function initSocket() {
             clearTimeout(regenTimer);
             regenTimer = setTimeout(() => terrain.regenerate(), 400);
         }
+    });
+
+    // Fog-of-war echo (our own strokes included — the mask flips here, not
+    // optimistically, so every GM tab stays in lockstep with the server).
+    socket.on('fog-updated', ({ hexes, revealed }) => {
+        if (!Array.isArray(hexes)) return;
+        for (const hk of hexes) fogMask.set(hk, revealed);
     });
 
     // A pocket map we requested is ready: drop its entry portal where the GM clicked.
@@ -622,6 +642,11 @@ function init() {
         findMesh: findObjectMesh,
         feetToWorld: ft => (ft / FEET_PER_GRID_CELL) * GRID_CELL_SIZE
     });
+
+    // Fog-of-war preview: a light version of the players' fog sheet, shown
+    // while the Fog tool is active so the GM sees what is hidden from whom.
+    fogOverlay = new FogOverlay(worldGroup, { opacity: 0.45, color: 0x151a24 });
+    fogOverlay.setVisible(false);
 
     // Show the correct grid (hex vs square) for the current layer
     showLayerGrid(currentMapKey);
@@ -740,6 +765,17 @@ function init() {
         clearBuildGhost();
     });
 
+    // --- Fog of war tool wiring ---
+    toolMenuButtons.fog = document.getElementById('btn-tool-fog');
+    toolMenuButtons.fog.addEventListener('click', () => setTool('fog'));
+    document.querySelectorAll('#fog-modes .brush-mode').forEach(btn => {
+        btn.addEventListener('click', () => setFogMode(btn.dataset.fmode));
+    });
+    document.getElementById('fog-radius').addEventListener('input', e => {
+        fogBrush.radius = +e.target.value;
+        document.getElementById('fog-radius-val').textContent = e.target.value;
+    });
+
     // Biome palette (hex layers).
     document.querySelectorAll('#biome-panel .biome-swatch').forEach(btn => {
         btn.addEventListener('click', () => setBiome(btn.dataset.biome));
@@ -767,10 +803,11 @@ function init() {
     // Debug handle for console/tooling inspection (visual bisection etc).
     // forceRender draws one frame even while the tab is hidden (rAF paused).
     window.__dbg = {
-        terrain, scene, camera, controls, plane, grid, renderer, worldGroup,
+        terrain, scene, camera, controls, plane, grid, renderer, worldGroup, fogMask,
         forceRender: () => { updateTerrainLOD(); renderer.render(scene, camera); }
     };
     initSocket();
+    window.__dbg.socket = socket; // headless testing: emit/inspect sync events
 }
 
 function onPointerDown(event) {
@@ -792,6 +829,13 @@ function onPointerDown(event) {
         const h = worldToHex(p.x, p.z);
         if (!hexInField(h.q, h.r)) return;
         socket.emit('update-hex', { q: h.q, r: h.r, biome: event.altKey ? null : currentBiome });
+        return;
+    }
+
+    // Fog tool: drag-paint reveal/hide on the global fog lattice.
+    if (fogActive()) {
+        fogStroke = new Set();
+        paintFogAt(event);
         return;
     }
 
@@ -948,6 +992,12 @@ function onPointerDown(event) {
 function onPointerMove(event) {
     ruler.trackMouse(event);
 
+    // Fog tool: keep painting along the drag.
+    if (fogStroke && fogActive()) {
+        paintFogAt(event);
+        return;
+    }
+
     // Terrain tool: stroke along the drag (fixed-spacing dabs so intensity doesn't
     // depend on mouse speed), or just move the brush cursor while hovering.
     if (terrainActive()) {
@@ -1006,6 +1056,9 @@ function onPointerMove(event) {
 
 function onPointerUp(event) {
     if (event.button !== 0) return;
+
+    // Fog stroke ends with the drag.
+    if (fogStroke) { fogStroke = null; return; }
 
     // Build drag: commit the dragged wall run / floor rectangle.
     if (buildDrag) {
@@ -1571,6 +1624,33 @@ function setBuildStyle(style) {
         b.classList.toggle('active', b.dataset.bstyle === style));
 }
 
+// --- Fog of war tool logic ---
+// Fog paints the unified world only (any zoom); pockets are never fogged.
+function fogActive() { return currentTool === 'fog' && !isPocket() && terrainIsUnified; }
+function setFogMode(mode) {
+    fogBrush.mode = mode;
+    document.querySelectorAll('#fog-modes .brush-mode').forEach(b =>
+        b.classList.toggle('active', b.dataset.fmode === mode));
+    updateHintBar();
+}
+// One dab of the fog brush: every lattice hex within the radius that isn't
+// already in the wanted state, batched into a single update-fog emit. The
+// per-stroke Set stops a drag from re-sending hexes it already touched (the
+// mask itself only flips when the server's fog-updated echo lands).
+function paintFogAt(event) {
+    const p = pointerToGround(event);
+    if (!p) return;
+    const h = fogHexAt(p.x, p.z);
+    const want = fogBrush.mode === 'reveal';
+    const batch = [];
+    for (const hk of hexesWithin(h.q, h.r, fogBrush.radius)) {
+        if (fogStroke.has(hk)) continue;
+        fogStroke.add(hk);
+        if (fogMask.has(hk) !== want) batch.push(hk);
+    }
+    if (batch.length && socket) socket.emit('update-fog', { hexes: batch, revealed: want });
+}
+
 // --- Terrain editor logic ---
 function terrainActive() { return currentTool === 'terrain' && isTacticalKey(); }
 function updateTerrainPanel() {
@@ -1584,6 +1664,11 @@ function updateTerrainPanel() {
     const buildPanel = document.getElementById('build-panel');
     if (buildPanel) buildPanel.classList.toggle('hidden', !(currentTool === 'build' && isTacticalKey()));
     if (currentTool !== 'build') { buildDrag = null; clearBuildGhost(); }
+    // Fog panel + preview sheet live and die with the Fog tool.
+    const fogPanel = document.getElementById('fog-panel');
+    if (fogPanel) fogPanel.classList.toggle('hidden', !(currentTool === 'fog' && !isPocket()));
+    if (fogOverlay) fogOverlay.setVisible(fogActive());
+    if (currentTool !== 'fog') fogStroke = null;
     if (terrain) terrain.setBrush({ visible: false });
     updateHintBar();
 }
@@ -1759,6 +1844,10 @@ function updateHintBar() {
                 : `Build · floor — LMB drag a rectangle of tiles · Esc cancel · Alt+click erase · ${cam}`;
     } else if (currentTool === 'build') {
         hint = `Build works on tactical maps — enter a province leaf or pocket first · ${cam}`;
+    } else if (fogActive()) {
+        hint = `Fog · ${fogBrush.mode} — LMB drag to paint 1-mile hexes · players only receive revealed regions · ${cam}`;
+    } else if (currentTool === 'fog') {
+        hint = `Fog works on the unified world — leave the pocket first · ${cam}`;
     } else if (currentTool === 'move') {
         hint = `Move — LMB select, LMB ground to drop · Del delete · ${cam}`;
     } else if (currentTool === 'ruler') {
@@ -1828,6 +1917,7 @@ function updateTerrainLOD() {
     }
     if (grass) grass.update(camera, controls, terrainIsUnified);
     if (trees) trees.update(camera, controls, terrainIsUnified);
+    if (fogOverlay) fogOverlay.update(fogMask, worldTarget.x, worldTarget.z, dist);
 }
 // Reflect the current water bodies in the panel (count readout).
 function syncWaterControls() {

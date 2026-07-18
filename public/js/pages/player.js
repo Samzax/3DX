@@ -14,6 +14,7 @@ import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { setupLoginModal } from '../shared/login.js';
 import { CombatTracker, CombatOverlays, deriveCombatStats, remainingFeet } from '../shared/combat.js';
+import { FogMask, FogOverlay, chunkFogHexKey } from '../shared/fog.js';
 
 let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
 let grass = null;   // instanced ground-cover grass (shared/grass.js)
@@ -58,6 +59,10 @@ let currentMapKey = 'world'; // players travel between maps via portals
 let terrainIsUnified = false; // is the loaded terrain the shared continuous world?
 let hexTree = {};            // GM biome tags (generator overrides), synced via map-state
 let regenTimer = null;       // debounce for biome-driven regeneration
+// Fog of war (U4): the server only sends content inside GM-revealed regions;
+// the mask mirrors the server and the overlay darkens everything outside it.
+const fogMask = new FogMask();
+let fogOverlay = null;       // created in init
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -82,6 +87,11 @@ function init() {
         findMesh: findObjectMesh,
         feetToWorld: ft => (ft / FEET_PER_GRID_CELL) * GRID_CELL_SIZE
     });
+
+    // Fog sheet over unrevealed regions (world coords; hidden until a unified
+    // map-state arrives — pockets are never fogged).
+    fogOverlay = new FogOverlay(worldGroup, { opacity: 0.94 });
+    fogOverlay.setVisible(false);
 
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
     renderer.domElement.addEventListener('pointermove', onPointerMove);
@@ -225,6 +235,7 @@ function updateTerrainLOD() {
     }
     if (grass) grass.update(camera, controls, terrainIsUnified);
     if (trees) trees.update(camera, controls, terrainIsUnified);
+    if (fogOverlay) fogOverlay.update(fogMask, worldTarget.x, worldTarget.z, dist);
 }
 
 function onPointerDown(event) {
@@ -873,6 +884,10 @@ function initSocket(username) {
             // same world locally, so they need the same tag tree.
             if (data.hexTree) { hexTree = data.hexTree; terrain.setBiomeOverrides(hexTree); }
             if (data.unified) {
+                // Fog of war: adopt the server's revealed set and show the fog
+                // sheet (the server already withheld hidden objects/chunks).
+                fogMask.setList(data.fog || []);
+                if (fogOverlay) fogOverlay.setVisible(true);
                 // One continuous world: load once, then fly between provinces.
                 if (!terrainIsUnified) {
                     terrain.generatorOn = true;
@@ -894,6 +909,8 @@ function initSocket(username) {
                     camera.position.set(c.x - o.x + 20, 30, c.z - o.z + 20);
                 }
             } else {
+                // Pockets are never fogged (entering one means you're inside).
+                if (fogOverlay) fogOverlay.setVisible(false);
                 // Pockets live near the true origin: pin the floating origin to 0.
                 // Generator OFF: pocket ground is implicit flat 0 plus edits.
                 setWorldOriginAt({ terrain, worldGroup }, 0, 0);
@@ -912,6 +929,23 @@ function initSocket(username) {
     // Live terrain edits from the GM (partial chunk payload).
     socket.on('terrain-updated', (data) => {
         if (terrain) { terrain.applyData(data); terrain.group.visible = true; styleGroundForTerrain(plane, true); }
+    });
+
+    // Fog of war: the GM revealed or hid regions. Revealed content (objects,
+    // terrain chunks) arrives via the normal object-added/terrain-updated
+    // events; on hide the server sends object deletes and we drop our copy of
+    // any GM-edited chunks there (the ground falls back to the generator).
+    socket.on('fog-updated', ({ hexes, revealed }) => {
+        if (!Array.isArray(hexes)) return;
+        for (const hk of hexes) fogMask.set(hk, revealed);
+        if (!revealed && terrain && terrainIsUnified) {
+            const hidden = new Set(hexes);
+            const del = {};
+            for (const [k, c] of terrain.chunks) {
+                if (!c.generated && hidden.has(chunkFogHexKey(k))) del[k] = null;
+            }
+            if (Object.keys(del).length) terrain.applyData({ chunks: del });
+        }
     });
 
     // GM painted/cleared a biome hex: the world regenerates under it.

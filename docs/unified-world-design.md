@@ -1,8 +1,12 @@
 # Unified Infinite World — Design
 
-> **Status (2026-07):** U1–U3 implemented and live. U4 (windowed
-> subscription / per-player fog of war) is still pending — `subscribe-region`
-> remains reserved.
+> **Status (2026-07):** U1–U4 implemented and live. U4 shipped as the
+> fog-of-war half of the merged decision below: a GM-painted reveal mask on a
+> global province-pitch hex lattice (`update-fog`/`fog-updated`,
+> `shared/fog.js`), with the server withholding objects and terrain edits
+> outside revealed hexes per player. Full windowed chunk *subscription*
+> (streaming sync for scale, `subscribe-region`) remains reserved for when
+> world size demands it — fog filtering already implements its gating half.
 
 ## The pivot
 
