@@ -6,8 +6,10 @@ import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
+import { loadSRD } from '../shared/srd.js';
+import { CombatTracker, CombatOverlays, deriveCombatStats } from '../shared/combat.js';
 import { buildWallRun, buildFloorPatch, disposeBuiltObject } from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { RulerTool } from '../shared/rulers.js';
@@ -65,6 +67,16 @@ let selectedObjectData = null;
 let menuButtons = {};
 
 let socket;
+
+// --- Combat mode (server-authoritative; the GM runs it from the tracker) ---
+let SRD = null;                 // loaded lazily: combat stat derivation only
+let pendingHomebrew = null;
+let allCharacters = [];         // GM sees every character (stat-fill fallback)
+let combatState = null;
+let combatTracker = null;
+let combatOverlays = null;
+let pendingAttack = null;       // { combatantId, attackIndex } while picking a target
+let dragStartPos = null;        // selected token's world position when the move began
 
 let currentTool = null;
 let currentMoveMode = 'standard';
@@ -356,6 +368,24 @@ function onDoubleClick(event) {
 function initSocket() {
     socket = io();
 
+    combatTracker = new CombatTracker({
+        container: document.getElementById('combat-tracker'),
+        socket, isGM: true, username: 'GM',
+        onPickTarget: beginTargetPick,
+        // Candidates for the tracker's "+ add to combat" select.
+        getMapObjects: () => objects.map(o => ({
+            id: o.userData.syncId,
+            type: o.userData.characterData ? 'character' : o.userData.objectType,
+            name: o.userData.characterData ? o.userData.characterData.name : (o.userData.objectType || 'object')
+        }))
+    });
+    const combatToggle = document.getElementById('btn-combat-toggle');
+    if (combatToggle) combatToggle.addEventListener('click', () => socket.emit('combat-start', {}));
+
+    socket.on('combat-updated', (combat) => setCombat(combat));
+    socket.on('combat-log', (entry) => { if (combatTracker) combatTracker.appendLog(entry); });
+    socket.on('combat-denied', ({ reason }) => { if (combatTracker) combatTracker.flash(reason || 'Not allowed'); });
+
     socket.on('connect', () => {
         console.log('Conectado ao servidor com ID:', socket.id);
         // Auto-login as GM on this single connection
@@ -372,11 +402,19 @@ function initSocket() {
     });
 
     socket.on('load-user-characters', (characters) => {
+        allCharacters = Array.isArray(characters) ? characters : [];
         loadCharactersToMenu(characters);
+        answerStatsPending(); // combat may be waiting on character stats
     });
 
     socket.on('character-updated', () => {
         socket.emit('get-characters'); // Refresh the menu
+    });
+
+    // Homebrew races/classes feed the SRD-based combat stat derivation.
+    socket.on('load-homebrew', (hb) => {
+        pendingHomebrew = hb;
+        if (SRD) { SRD.setHomebrew(hb); answerStatsPending(); }
     });
 
     // Full map state on connect / map switch
@@ -390,6 +428,7 @@ function initSocket() {
 
         data.objects.forEach(objData => createObjectFromData(objData.id, objData));
         data.rulers.forEach(rulerData => ruler.addFromData(rulerData.id, rulerData));
+        setCombat(data.combat || null); // rejoin an in-progress fight fully synced
 
         // Biome tags for this map's hexes (hex layers only render them).
         hexTags = data.hexes || {};
@@ -507,6 +546,8 @@ function initSocket() {
         if (!objects.find(o => o.userData.syncId === data.id)) {
             createObjectFromData(data.id, data);
         }
+        // Refresh the tracker's "+ add to combat" candidates.
+        if (combatTracker && combatState) combatTracker.setState(combatState);
     });
 
     socket.on('object-moved', (data) => {
@@ -574,6 +615,12 @@ function init() {
         scene: worldGroup, // ruler points/segments are world coords
         tooltip: document.getElementById('ruler-tooltip'),
         measure: (points) => isHexLayer() ? measurePath(points) : null
+    });
+
+    combatOverlays = new CombatOverlays({
+        worldGroup,
+        findMesh: findObjectMesh,
+        feetToWorld: ft => (ft / FEET_PER_GRID_CELL) * GRID_CELL_SIZE
     });
 
     // Show the correct grid (hex vs square) for the current layer
@@ -711,6 +758,7 @@ function init() {
         renderer, scene, camera, controls,
         onTick: () => {
             updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
+            if (combatOverlays) combatOverlays.tick(); // rings/badges track their tokens
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary
@@ -824,6 +872,22 @@ function onPointerDown(event) {
     }
     const clickedObject = objects.find(obj => obj === topLevelObject);
 
+    // Combat: with an attack pending, this click picks the target instead.
+    if (pendingAttack) {
+        const targetId = clickedObject && clickedObject.userData.syncId;
+        if (targetId && combatState && combatState.combatants[targetId] && socket) {
+            socket.emit('combat-action', {
+                combatantId: pendingAttack.combatantId, kind: 'attack',
+                targetId, attackIndex: pendingAttack.attackIndex
+            });
+        } else if (combatTracker) {
+            combatTracker.flash('Attack cancelled — that was not a combatant');
+        }
+        pendingAttack = null;
+        updateHintBar();
+        return;
+    }
+
     // Build surfaces usually read as GROUND for the placement tools — you drop
     // tokens ON a floor, measure across a room, release a move onto it. The
     // move tool can still grab one when nothing else is selected (to reposition
@@ -928,6 +992,7 @@ function onPointerMove(event) {
     if (currentTool === 'move' && selectedObject) {
         applyMove(selectedObject, snapToCurrentGrid(intersectPoint), currentMoveMode,
             (x, z, halfHeight) => groundY(x, z, halfHeight));
+        updateMoveCostTooltip(event); // combat: live «X ft — Y ft left»
     }
 
     if (currentTool === 'ruler' && ruler.points.length > 0) {
@@ -1122,7 +1187,11 @@ function onKeyDown(event) {
         return;
     }
     if (event.key === "Escape") {
-        if (buildDrag) {
+        if (pendingAttack) {
+            pendingAttack = null;
+            if (combatTracker) combatTracker.flash('Attack cancelled');
+            updateHintBar();
+        } else if (buildDrag) {
             buildDrag = null;
             clearBuildGhost();
         } else if (riverDraft) {
@@ -1227,6 +1296,7 @@ function createObjectFromData(id, data) {
 function selectObject(object) {
     deselectObject();
     selectedObject = object;
+    dragStartPos = object.position.clone(); // combat movement is measured from here
     if (!selectedObject.userData.characterData) {
         selectedObject.material = selectedMaterial;
     }
@@ -1241,6 +1311,70 @@ function deselectObject() {
         }
     }
     selectedObject = null;
+    dragStartPos = null;
+    hideMoveTooltip();
+}
+
+// --- Combat mode -------------------------------------------------------------
+
+function findObjectMesh(id) { return objects.find(o => o.userData.syncId === id); }
+
+// Every combat-updated re-applies the whole state on this screen.
+function setCombat(combat) {
+    combatState = combat;
+    if (combatTracker) combatTracker.setState(combat);
+    if (combatOverlays) combatOverlays.sync(combat);
+    answerStatsPending();
+    const toggle = document.getElementById('btn-combat-toggle');
+    if (toggle) toggle.classList.toggle('hidden', !!combat);
+    if (!combat) pendingAttack = null;
+    updateHintBar();
+}
+
+// GM fallback for statsPending combatants: the GM client has every character
+// (and the SRD once loaded), so a fight never stalls on an offline owner.
+// answeredStats stops re-sends while our write is still in flight (each
+// broadcast re-runs this pass before statsPending reads false).
+const answeredStats = new Set();
+function answerStatsPending() {
+    if (!combatState || !SRD || !socket) return;
+    for (const c of Object.values(combatState.combatants)) {
+        if (!c.statsPending || !c.charId || answeredStats.has(c.id)) continue;
+        const char = allCharacters.find(x => x.id === c.charId);
+        if (!char) continue;
+        answeredStats.add(c.id);
+        socket.emit('combat-set-stats', { combatantId: c.id, ...deriveCombatStats(char, SRD) });
+    }
+}
+
+function beginTargetPick(combatantId, attackIndex, attack) {
+    pendingAttack = { combatantId, attackIndex };
+    if (combatTracker) combatTracker.flash(`Pick a target for ${attack.name}: click a token (Esc cancels)`);
+    updateHintBar();
+}
+
+// Live «12 ft — 18 ft left» while dragging the active combatant. Reuses the
+// ruler tooltip element (move and ruler tools are mutually exclusive).
+function updateMoveCostTooltip(event) {
+    if (!dragStartPos || !selectedObject || !combatState || !combatState.started) return;
+    const c = combatState.combatants[selectedObject.userData.syncId];
+    if (!c || combatState.activeId !== c.id) return;
+    const el = document.getElementById('ruler-tooltip');
+    if (!el) return;
+    const feet = Math.hypot(selectedObject.position.x - dragStartPos.x,
+        selectedObject.position.z - dragStartPos.z) / GRID_CELL_SIZE * FEET_PER_GRID_CELL;
+    const left = c.speedFeet + c.dashFeet - c.movementUsedFeet;
+    el.textContent = `${Math.round(feet)} ft — ${Math.max(0, Math.round(left - feet))} ft left`;
+    el.style.color = feet > left + 0.5 ? '#ff6b6b' : '';
+    el.style.display = 'block';
+    el.style.left = (event.clientX + 14) + 'px';
+    el.style.top = (event.clientY + 14) + 'px';
+}
+
+function hideMoveTooltip() {
+    if (currentTool === 'ruler') return; // the ruler owns the tooltip right now
+    const el = document.getElementById('ruler-tooltip');
+    if (el) { el.style.display = 'none'; el.style.color = ''; }
 }
 
 // --- UI Management (Right Menu) ---
@@ -1602,7 +1736,9 @@ function updateHintBar() {
     if (!bar) return;
     const cam = 'RMB orbit · MMB pan · wheel zoom';
     let hint;
-    if (terrainActive()) {
+    if (pendingAttack) {
+        hint = `Combat · pick a target — LMB click a token · Esc cancel · ${cam}`;
+    } else if (terrainActive()) {
         const mode = terrainBrush.mode;
         if (mode === 'lake') {
             hint = `Water · lake — LMB pour · drag up/down = level · Alt+click delete · Ctrl+Z undo · ${cam}`;
@@ -1737,3 +1873,10 @@ try {
 } catch (e) {
     console.error('Fatal Error on Init:', e);
 }
+
+// SRD rules data, used only to derive combat stats for character combatants.
+loadSRD().then(srd => {
+    SRD = srd;
+    if (pendingHomebrew) SRD.setHomebrew(pendingHomebrew);
+    answerStatsPending(); // combat may have arrived before the SRD finished loading
+}).catch(e => console.error('SRD load failed (combat stat auto-fill disabled):', e));

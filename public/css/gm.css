@@ -158,3 +158,14 @@
 #biome-panel .biome-swatch:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 #terrain-panel .tp-reset { width: 100%; margin-top: 10px; padding: 7px; background: #5d2f2f; color: var(--text); border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; }
 #terrain-panel .tp-reset:hover { background: #733a3a; }
+
+/* --- Combat panel (bottom-right, below the object menu) --- */
+#object-menu { max-height: 42vh; }
+#combat-panel {
+  position: absolute; right: 10px; bottom: 34px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
+  z-index: 12;
+}
+#combat-panel #btn-combat-toggle { width: 200px; background: #5d3a2f; }
+#combat-panel #btn-combat-toggle:hover { background: #75492f; }
+#combat-panel #btn-combat-toggle.hidden { display: none; }
