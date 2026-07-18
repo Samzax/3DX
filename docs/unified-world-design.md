@@ -1,5 +1,9 @@
 # Unified Infinite World — Design
 
+> **Status (2026-07):** U1–U3 implemented and live. U4 (windowed
+> subscription / per-player fog of war) is still pending — `subscribe-region`
+> remains reserved.
+
 ## The pivot
 
 Today each tactical leaf (`world/a/b/c`) is its own island with its own socket

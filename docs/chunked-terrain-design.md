@@ -1,5 +1,9 @@
 # Chunked Terrain — Design
 
+> **Status (2026-07):** implemented; superseded in part by
+> `unified-world-design.md` (the per-leaf islands it describes were folded
+> into the one `@world` store). Kept for the chunk/payload format reference.
+
 Goal: replace the fixed 100×100-cell terrain island with a **virtually infinite, sparsely
 stored, streamed** tactical map. This is the foundation for: the infinite open world,
 per-chunk fog of war, biome-seeded terrain, and chunk-aware water v2.
