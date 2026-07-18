@@ -66,6 +66,13 @@ const fogBrush = { mode: 'reveal', radius: 1 };
 let fogOverlay = null;                     // dim sheet while the tool is active
 let fogStroke = null;                      // Set of hexes touched this drag
 
+// --- View tool: steer player cameras (camera-command → camera-goto relay).
+// target is 'all' or a lowercased username; action decides what a map click
+// sends (frame a ground point vs frame a clicked token).
+const viewCtl = { target: 'all', action: 'point', fly: true, lock: false };
+let playersRoster = [];                    // players-updated presence roster
+let viewStatusTimer = null;                // clears the panel status line
+
 let scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup;
 let ruler;
 let objects = [];
@@ -552,6 +559,12 @@ function initSocket() {
         for (const hk of hexes) fogMask.set(hk, revealed);
     });
 
+    // Presence roster (View tool): who's online and where.
+    socket.on('players-updated', ({ players }) => {
+        playersRoster = Array.isArray(players) ? players : [];
+        renderViewPlayers();
+    });
+
     // A pocket map we requested is ready: drop its entry portal where the GM clicked.
     socket.on('pocket-created', ({ key, name }) => {
         if (!pendingPortal) return;
@@ -776,6 +789,24 @@ function init() {
         document.getElementById('fog-radius-val').textContent = e.target.value;
     });
 
+    // --- View tool (steer player cameras) wiring ---
+    toolMenuButtons.view = document.getElementById('btn-tool-view');
+    toolMenuButtons.view.addEventListener('click', () => setTool('view'));
+    document.querySelectorAll('#view-actions .brush-mode').forEach(btn => {
+        btn.addEventListener('click', () => setViewAction(btn.dataset.vaction));
+    });
+    document.getElementById('view-fly').addEventListener('change', e => { viewCtl.fly = e.target.checked; });
+    document.getElementById('view-lock').addEventListener('change', e => { viewCtl.lock = e.target.checked; });
+    document.getElementById('view-bring').addEventListener('click', () => {
+        emitViewCommand(viewPoseFromHere(), 'My view');
+    });
+    document.getElementById('view-release').addEventListener('click', () => {
+        if (!socket) return;
+        socket.emit('camera-release', { target: viewCtl.target });
+        setViewStatus(`Released ${viewCtl.target === 'all' ? 'all players' : viewCtl.target}`);
+    });
+    renderViewPlayers(); // empty-roster placeholder until players-updated lands
+
     // Biome palette (hex layers).
     document.querySelectorAll('#biome-panel .biome-swatch').forEach(btn => {
         btn.addEventListener('click', () => setBiome(btn.dataset.biome));
@@ -836,6 +867,21 @@ function onPointerDown(event) {
     if (fogActive()) {
         fogStroke = new Set();
         paintFogAt(event);
+        return;
+    }
+
+    // View tool: a click steers the selected players' cameras there.
+    if (viewActive()) {
+        if (viewCtl.action === 'token') {
+            const t = pickSceneObject(event);
+            if (!t) { setViewStatus('No token under the cursor'); return; }
+            const name = (t.userData.characterData && t.userData.characterData.name) ||
+                         t.userData.objectType || 'object';
+            emitViewCommand(viewPoseAt(t.position), `Token "${name}"`);
+        } else {
+            const p = pointerToGround(event);
+            if (p) emitViewCommand(viewPoseAt(p), 'Point');
+        }
         return;
     }
 
@@ -1651,6 +1697,85 @@ function paintFogAt(event) {
     if (batch.length && socket) socket.emit('update-fog', { hexes: batch, revealed: want });
 }
 
+// --- View tool logic (steer player cameras) ---
+// Active everywhere: the server matches recipients by space (any unified key =
+// the one world; pockets match exactly), so the tool works wherever the GM is.
+function viewActive() { return currentTool === 'view'; }
+function setViewAction(a) {
+    viewCtl.action = a;
+    document.querySelectorAll('#view-actions .brush-mode').forEach(b =>
+        b.classList.toggle('active', b.dataset.vaction === a));
+    updateHintBar();
+}
+// Player rows from the presence roster (usernames are user input — textContent
+// only, never innerHTML). Selection falls back to 'all' if the player left.
+function renderViewPlayers() {
+    const box = document.getElementById('view-players');
+    if (!box) return;
+    const players = playersRoster.filter(p => !p.isGM);
+    if (viewCtl.target !== 'all' &&
+        !players.some(p => p.username.toLowerCase() === viewCtl.target)) {
+        viewCtl.target = 'all';
+    }
+    box.innerHTML = '';
+    const mkRow = (label, value, sub) => {
+        const b = document.createElement('button');
+        b.className = 'brush-mode view-player' + (viewCtl.target === value ? ' active' : '');
+        b.textContent = label;
+        if (sub) {
+            const s = document.createElement('span');
+            s.className = 'vp-sub';
+            s.textContent = sub;
+            b.appendChild(s);
+        }
+        b.addEventListener('click', () => { viewCtl.target = value; renderViewPlayers(); updateHintBar(); });
+        box.appendChild(b);
+    };
+    mkRow(players.length ? `All players (${players.length})` : 'All players (none online)', 'all');
+    for (const p of players) {
+        mkRow(p.username, p.username.toLowerCase(), isPocket(p.mapKey) ? 'pocket' : '');
+    }
+}
+// The GM's own camera as a world-space pose (what "Bring to my view" sends).
+function viewPoseFromHere() {
+    const o = terrain.worldOrigin;
+    return {
+        pos: { x: camera.position.x + o.x, y: camera.position.y, z: camera.position.z + o.z },
+        look: { x: controls.target.x + o.x, y: controls.target.y, z: controls.target.z + o.z }
+    };
+}
+// Frame a world point the way focusCameraOn lands next to a placed object.
+function viewPoseAt(p) {
+    return { pos: { x: p.x + 20, y: p.y + 30, z: p.z + 20 }, look: { x: p.x, y: p.y, z: p.z } };
+}
+function emitViewCommand(pose, what) {
+    if (!socket) return;
+    socket.emit('camera-command', {
+        target: viewCtl.target, pose,
+        mode: viewCtl.fly ? 'fly' : 'snap',
+        lock: viewCtl.lock
+    });
+    const who = viewCtl.target === 'all' ? 'all players' : viewCtl.target;
+    setViewStatus(`${what} → ${who}${viewCtl.lock ? ' (locked)' : ''}`);
+}
+function setViewStatus(msg) {
+    const el = document.getElementById('view-status');
+    if (!el) return;
+    el.textContent = msg;
+    clearTimeout(viewStatusTimer);
+    viewStatusTimer = setTimeout(() => { el.textContent = ''; }, 2500);
+}
+// Topmost synced object under the pointer (tokens/props; mirrors the pick in
+// onPointerDown's default branch).
+function pickSceneObject(event) {
+    castFromPointer(event, { renderer, camera, raycaster, mouse });
+    const hit = raycaster.intersectObjects(objects, true)[0];
+    if (!hit) return null;
+    let top = hit.object;
+    while (top.parent && top.parent !== scene && top.parent !== worldGroup) top = top.parent;
+    return objects.find(o => o === top) || null;
+}
+
 // --- Terrain editor logic ---
 function terrainActive() { return currentTool === 'terrain' && isTacticalKey(); }
 function updateTerrainPanel() {
@@ -1669,6 +1794,9 @@ function updateTerrainPanel() {
     if (fogPanel) fogPanel.classList.toggle('hidden', !(currentTool === 'fog' && !isPocket()));
     if (fogOverlay) fogOverlay.setVisible(fogActive());
     if (currentTool !== 'fog') fogStroke = null;
+    // View panel rides the same left slot.
+    const viewPanel = document.getElementById('view-panel');
+    if (viewPanel) viewPanel.classList.toggle('hidden', currentTool !== 'view');
     if (terrain) terrain.setBrush({ visible: false });
     updateHintBar();
 }
@@ -1848,6 +1976,11 @@ function updateHintBar() {
         hint = `Fog · ${fogBrush.mode} — LMB drag to paint 1-mile hexes · players only receive revealed regions · ${cam}`;
     } else if (currentTool === 'fog') {
         hint = `Fog works on the unified world — leave the pocket first · ${cam}`;
+    } else if (currentTool === 'view') {
+        const who = viewCtl.target === 'all' ? 'all players' : viewCtl.target;
+        hint = viewCtl.action === 'token'
+            ? `View · token — LMB click a token to frame it for ${who} · panel: bring / lock / release · ${cam}`
+            : `View · point — LMB click the ground to send ${who} there · panel: bring / lock / release · ${cam}`;
     } else if (currentTool === 'move') {
         hint = `Move — LMB select, LMB ground to drop · Del delete · ${cam}`;
     } else if (currentTool === 'ruler') {

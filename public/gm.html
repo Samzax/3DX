@@ -84,6 +84,10 @@
         <button id="btn-tool-fog" class="tool-button" title="Fog of war: reveal/hide world regions to players (unified world)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 17a4.5 4.5 0 1 0-1.1-8.86A6 6 0 1 0 6 14.5"></path><path d="M3 20h13M7 23h9"></path></svg>
         </button>
+
+        <button id="btn-tool-view" class="tool-button" title="View: steer player cameras (bring to your view, send to a point or token, lock)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+        </button>
     </div>
 
     <!-- --- Terrain editor panel (shown when the Terrain tool is active on a tactical map) --- -->
@@ -166,6 +170,28 @@
             <input type="range" id="fog-radius" min="0" max="6" step="1" value="1">
         </div>
         <div class="tp-hint">Players only receive what you reveal: tokens, props, buildings and terrain edits stay hidden elsewhere (1-mile cells). Drag to paint; works at any zoom. Pockets are never fogged.</div>
+    </div>
+
+    <!-- --- View panel (View tool: steer player cameras) --- -->
+    <div id="view-panel" class="hidden">
+        <h3>View</h3>
+        <div class="tp-label">Players</div>
+        <div class="tp-row" id="view-players"></div>
+        <div class="tp-label">Click sends to</div>
+        <div class="tp-row" id="view-actions">
+            <button class="brush-mode active" data-vaction="point" title="LMB a ground point: their camera frames it">Point</button>
+            <button class="brush-mode" data-vaction="token" title="LMB a token: their camera frames it">Token</button>
+        </div>
+        <div class="tp-slider">
+            <label><input type="checkbox" id="view-fly" checked> Smooth fly (off = instant snap)</label>
+        </div>
+        <div class="tp-slider">
+            <label><input type="checkbox" id="view-lock"> Lock their camera until released</label>
+        </div>
+        <button id="view-bring" class="tp-send" title="Send their camera to exactly what you see now">Bring to my view</button>
+        <button id="view-release" class="tp-release" title="Give locked players their camera back">Release lock</button>
+        <div id="view-status"></div>
+        <div class="tp-hint">Steers the selected players' cameras. Works on the world and in pockets (only players in the same space are reached). Very long jumps snap even in fly mode.</div>
     </div>
 
     <!-- --- Biome palette (terrain tool on hex layers: paint hexes) --- -->

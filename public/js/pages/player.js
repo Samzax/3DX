@@ -8,7 +8,7 @@ import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../sha
 import { Terrain } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, CameraFly, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
@@ -63,6 +63,9 @@ let regenTimer = null;       // debounce for biome-driven regeneration
 // the mask mirrors the server and the overlay darkens everything outside it.
 const fogMask = new FogMask();
 let fogOverlay = null;       // created in init
+// GM-directed camera (View control): the GM can fly/snap this view to a pose
+// and optionally lock the controls until released.
+let cameraFly = null;        // created in init
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -92,6 +95,13 @@ function init() {
     // map-state arrives — pockets are never fogged).
     fogOverlay = new FogOverlay(worldGroup, { opacity: 0.94 });
     fogOverlay.setVisible(false);
+
+    cameraFly = new CameraFly(camera, controls);
+    // The player's own camera input wins over an UNLOCKED GM flight (otherwise
+    // wheel/orbit compose with the fly and fight it). Locked views disable
+    // controls, so these can't break a lock.
+    renderer.domElement.addEventListener('wheel', () => { if (controls.enabled) cameraFly.cancel(); }, { passive: true });
+    renderer.domElement.addEventListener('pointerdown', (e) => { if (e.button !== 0 && controls.enabled) cameraFly.cancel(); });
 
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
     renderer.domElement.addEventListener('pointermove', onPointerMove);
@@ -178,9 +188,13 @@ function init() {
         if (e.target === hudOverlay) closeAllPanels();
     });
 
+    // Headless-testing handle (mirrors gm.js __dbg; socket attaches on login).
+    window.__dbg = { terrain, scene, camera, controls, worldGroup, fogMask, cameraFly };
+
     startRenderLoop({
         renderer, scene, camera, controls,
         onTick: () => {
+            if (cameraFly && terrain) cameraFly.tick(terrain.worldOrigin); // GM-directed flight owns the camera this frame
             updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
             if (combatOverlays) combatOverlays.tick(); // rings/badges track their tokens
             if (!terrain) return;
@@ -412,6 +426,14 @@ function sceneToWorld(p) {
 }
 function focusCameraOn(worldPos) {
     controls.target.set(worldPos.x - terrain.worldOrigin.x, worldPos.y, worldPos.z - terrain.worldOrigin.z);
+}
+
+// GM view lock: while locked the GM owns this camera — orbit/pan/zoom are
+// disabled (tools still work) and a banner says so.
+function setViewLock(locked) {
+    controls.enabled = !locked;
+    const banner = document.getElementById('view-lock-banner');
+    if (banner) banner.classList.toggle('hidden', !locked);
 }
 
 // --- Object Management ---
@@ -796,6 +818,7 @@ function setRulerColor(colorValue, clickedButton) {
 function initSocket(username) {
     socket = io();
     myUsername = username;
+    if (window.__dbg) window.__dbg.socket = socket; // headless testing
     combatTracker = new CombatTracker({
         container: document.getElementById('combat-tracker'),
         socket, isGM: false, username,
@@ -858,11 +881,41 @@ function initSocket(username) {
         if (a && a.id === id) renderHUD();
     });
 
+    // GM-directed camera (View control): fly or snap to a world-space pose the
+    // GM chose, optionally locking the controls until camera-unlock. Long jumps
+    // snap regardless of mode — a cross-continent glide would drag dozens of
+    // floating-origin rebases (and minutes of terrain streaming) behind it.
+    socket.on('camera-goto', ({ pose, mode, lock } = {}) => {
+        if (!pose || !pose.pos || !pose.look) return;
+        setViewLock(!!lock);
+        const origin = terrain.worldOrigin;
+        const dist = Math.hypot(pose.look.x - (controls.target.x + origin.x),
+                                pose.look.z - (controls.target.z + origin.z));
+        if (mode === 'snap' || dist > 20000) {
+            cameraFly.cancel();
+            // Re-seat the floating origin at the destination (mirrors the
+            // map-state worldCenter landing) so scene coords start near zero.
+            // Pockets keep their pinned origin — they live near 0 anyway.
+            const o = terrainIsUnified
+                ? setWorldOriginAt({ terrain, worldGroup }, pose.look.x, pose.look.z)
+                : origin;
+            camera.position.set(pose.pos.x - o.x, pose.pos.y, pose.pos.z - o.z);
+            controls.target.set(pose.look.x - o.x, pose.look.y, pose.look.z - o.z);
+        } else {
+            cameraFly.start(pose, origin);
+        }
+    });
+    socket.on('camera-unlock', () => setViewLock(false));
+
     // Full map state on connect
     socket.on('map-state', (data) => {
         // Ignore states for maps we're not on (e.g. the automatic 'world' join
         // that precedes our re-join after a reconnect).
         if (data.key && data.key !== currentMapKey) return;
+        // A map switch resets the camera context: abort any GM-directed flight
+        // and drop a stale view lock (the GM can re-lock on the new map).
+        if (cameraFly) cameraFly.cancel();
+        setViewLock(false);
         objects.forEach(obj => worldGroup.remove(obj));
         objects = [];
         ruler.removeSegments();

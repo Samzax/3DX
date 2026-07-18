@@ -169,6 +169,22 @@ function emitToRoom(key, exceptSocket, fn) {
   }
 }
 
+// Presence roster: every logged-in socket and where it is. Broadcast to the
+// whole server (usernames aren't secret); the GM View tool uses it to list
+// live players it can steer. Fired on login, join-map and disconnect.
+function broadcastPresence() {
+  const players = [];
+  for (const sock of io.sockets.sockets.values()) {
+    if (!sock.username) continue;
+    players.push({
+      username: sock.username,
+      mapKey: sock.currentMapKey || 'world',
+      isGM: isGM(sock.username)
+    });
+  }
+  io.emit('players-updated', { players });
+}
+
 // One-time migration: fold legacy per-province tactical islands into WORLD_KEY at
 // their composed world position (chunk-aligned), so the tactical layer becomes one
 // continuous world. Each island's chunk keys are relabeled by its chunk offset and
@@ -484,6 +500,7 @@ io.on('connection', (socket) => {
     // fog-filtered as an anonymous player. Now that the role is known, re-send
     // (the GM gets the unfiltered world; players get their owned-token pass).
     if (socket.currentMapKey) sendMapState(socket.currentMapKey);
+    broadcastPresence();
   });
 
   // Get characters (filtered by permission)
@@ -754,6 +771,7 @@ io.on('connection', (socket) => {
     if (roomKey === WORLD_KEY) ensureWorld();
     console.log(`[MAP] ${socket.username || socket.id} -> ${reqKey}${roomKey !== reqKey ? ' [' + roomKey + ']' : ''}`);
     sendMapState(roomKey, reqKey);
+    if (socket.username) broadcastPresence();
   });
 
   // Tag a hex on the current (hex-layer) map with a biome; null clears the tag.
@@ -1282,8 +1300,48 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- GM-directed player cameras (View control): thin, GM-authorized relay.
+  // The GM aims a world-space camera pose at chosen players; the server fans it
+  // out as 'camera-goto' (optionally locking their controls until
+  // 'camera-release' → 'camera-unlock'). Nothing persists — camera state is
+  // ephemeral. Target matching goes by SPACE, not raw room: a GM on any unified
+  // key (hex tiers keep their own Socket.IO rooms but show the same one world)
+  // reaches every player on a unified key; a GM inside a pocket reaches only
+  // that pocket's players.
+  const finitePoint = (p) => p && ['x', 'y', 'z'].every(k => Number.isFinite(Number(p[k])));
+  const numPoint = (p) => ({ x: Number(p.x), y: Number(p.y), z: Number(p.z) });
+  function forEachCameraTarget(target, fn) {
+    const gmKey = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const unified = isUnifiedKey(gmKey);
+    for (const sock of io.sockets.sockets.values()) {
+      if (sock === socket || !sock.username || isGM(sock.username)) continue;
+      const key = sock.currentMapKey || DEFAULT_MAP_KEY;
+      if (unified ? !isUnifiedKey(key) : key !== gmKey) continue;
+      if (target !== 'all' && sock.username.toLowerCase() !== target) continue;
+      fn(sock);
+    }
+  }
+  socket.on('camera-command', (payload) => {
+    if (!isGM(socket.username)) return;
+    const pose = payload && payload.pose;
+    if (!pose || !finitePoint(pose.pos) || !finitePoint(pose.look)) return;
+    const msg = {
+      pose: { pos: numPoint(pose.pos), look: numPoint(pose.look) },
+      mode: payload.mode === 'snap' ? 'snap' : 'fly',
+      lock: !!payload.lock
+    };
+    forEachCameraTarget(String(payload.target || 'all').toLowerCase(),
+      (sock) => sock.emit('camera-goto', msg));
+  });
+  socket.on('camera-release', (payload) => {
+    if (!isGM(socket.username)) return;
+    forEachCameraTarget(String((payload && payload.target) || 'all').toLowerCase(),
+      (sock) => sock.emit('camera-unlock'));
+  });
+
   socket.on('disconnect', () => {
     console.log(`[-] Client disconnected: ${socket.id} (${socket.username || 'unknown'})`);
+    if (socket.username) broadcastPresence();
   });
 });
 
