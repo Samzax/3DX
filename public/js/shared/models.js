@@ -5,14 +5,23 @@
 import * as THREE from 'three';
 import { GRID_CELL_SIZE } from './scene.js';
 import { buildWallRun, buildFloorPatch } from './structures.js';
+import { createRigCharacter } from './charmesh.js';
 
 export const defaultMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
 export const selectedMaterial = new THREE.MeshLambertMaterial({ color: 0xffff44, emissive: 0xaaaa00 });
 
-// --- Character models (per-part colors + proportions) ---
-const BASE_TORSO_HEIGHT = 1;
-const BASE_HEAD_RADIUS = 0.4;
-const BASE_ARM_LENGTH = 0.8;
+// --- Character models -------------------------------------------------------
+// Stylized low-poly adventurers built entirely from the saved character data:
+// the appearance sliders (height/build/headSize/armLength/legLength) shape the
+// body, appearance.colors dress it, the race adds features (elf ears, dwarf
+// beard, tiefling horns, half-orc tusks, dragonborn snout) and the equipment
+// adds a shield / weapon / metal-armor plating. The group origin sits at hip
+// height (whole body dropped by BODY_DROP) so characters already placed on maps
+// keep their stored seating; buildObjectFromData measures the true bottom for
+// halfHeight either way.
+
+const CHAR_SCALE = 0.4;
+const BODY_DROP = 0.95;
 
 export function charColors(charData) {
     const c = (charData.appearance && charData.appearance.colors) || {};
@@ -26,57 +35,231 @@ export function charColors(charData) {
     };
 }
 
+function shade(hex, k) {
+    return new THREE.Color(hex).multiplyScalar(k);
+}
+
 export function createCharacterModel(charData) {
     const modelGroup = new THREE.Group();
+    const body = new THREE.Group();
+    body.position.y = -BODY_DROP;
+    modelGroup.add(body);
+
+    const ap = charData.appearance || {};
+    const H = ap.height || 1, B = ap.build || 1, HS = ap.headSize || 1;
+    const AL = ap.armLength || 1, LL = ap.legLength || 1;
     const col = charColors(charData);
-    const skinMat = new THREE.MeshLambertMaterial({ color: col.skin });
-    const torsoMat = new THREE.MeshLambertMaterial({ color: col.torso });
-    const legsMat = new THREE.MeshLambertMaterial({ color: col.legs });
-    const hairMat = new THREE.MeshLambertMaterial({ color: col.hair });
+    const race = String(charData.race || '').toLowerCase();
+    const eq = charData.equipment || {};
+    const dragon = race.includes('dragonborn');
+
+    const lambert = (c) => new THREE.MeshLambertMaterial({ color: c });
+    const skinMat = lambert(col.skin);
+    const hairMat = lambert(col.hair);
+    const torsoMat = lambert(col.torso);
+    const legsMat = lambert(col.legs);
+    const tunicMat = lambert(shade(col.torso, 0.78));
+    const bootsMat = lambert(shade(col.legs, 0.55));
+    const noseMat = lambert(shade(col.skin, 0.86));
     const eyeMat = new THREE.MeshBasicMaterial({ color: col.eyes });
+    const leatherMat = lambert('#6b4a2f');
+    const steelMat = lambert('#c3ccd6');
+    const woodMat = lambert('#7a5a3a');
+    const goldMat = lambert('#d8b04a');
 
-    const add = (geo, mat, name) => { const m = new THREE.Mesh(geo, mat); m.name = name; modelGroup.add(m); return m; };
-    add(new THREE.CylinderGeometry(0.3, 0.3, BASE_TORSO_HEIGHT, 32), torsoMat, 'torso');
-    add(new THREE.SphereGeometry(BASE_HEAD_RADIUS, 32, 32), skinMat, 'head');
-    add(new THREE.SphereGeometry(BASE_HEAD_RADIUS * 1.02, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.55), hairMat, 'hair');
-    add(new THREE.SphereGeometry(0.05, 16, 16), eyeMat, 'leftEye');
-    add(new THREE.SphereGeometry(0.05, 16, 16), eyeMat, 'rightEye');
-    add(new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16), skinMat, 'leftArm');
-    add(new THREE.CylinderGeometry(0.08, 0.08, BASE_ARM_LENGTH, 16), skinMat, 'rightArm');
-    add(new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16), legsMat, 'leftLeg');
-    add(new THREE.CylinderGeometry(0.1, 0.1, 0.9, 16), legsMat, 'rightLeg');
+    const add = (parent, geo, mat) => {
+        const m = new THREE.Mesh(geo, mat);
+        m.castShadow = true;
+        parent.add(m);
+        return m;
+    };
 
-    updateCharacterAppearance(modelGroup, charData.appearance || {});
-    modelGroup.scale.set(0.4, 0.4, 0.4);
+    // Legs + boots. Feet rest on body-local y=0.
+    const legTopY = 0.9 * LL;
+    for (const side of [-1, 1]) {
+        const x = side * 0.16 * B;
+        const leg = add(body, new THREE.CylinderGeometry(0.10, 0.12, 1, 10), legsMat);
+        leg.scale.set(B, legTopY, B);
+        leg.position.set(x, legTopY / 2, 0);
+        const boot = add(body, new THREE.CylinderGeometry(0.13, 0.15, 0.26, 10), bootsMat);
+        boot.position.set(x, 0.13, 0);
+        const toe = add(body, new THREE.SphereGeometry(0.11, 10, 8), bootsMat);
+        toe.scale.set(1, 0.62, 1.2);
+        toe.position.set(x, 0.07, 0.13);
+    }
+
+    // Tunic skirt, torso (shoulders wider than waist), belt.
+    const skirt = add(body, new THREE.CylinderGeometry(0.29, 0.34, 0.2, 12), tunicMat);
+    skirt.scale.set(B, 1, B);
+    skirt.position.y = legTopY + 0.04;
+    const torso = add(body, new THREE.CylinderGeometry(0.34, 0.26, 1, 12), torsoMat);
+    torso.scale.set(B, H, B);
+    torso.position.y = legTopY + 0.1 + H * 0.5;
+    const shoulderY = legTopY + 0.1 + H;
+    const belt = add(body, new THREE.CylinderGeometry(0.30, 0.30, 0.1, 12), leatherMat);
+    belt.scale.set(B, 1, B);
+    belt.position.y = legTopY + 0.21;
+    const buckle = add(body, new THREE.BoxGeometry(0.1, 0.08, 0.05), goldMat);
+    buckle.position.set(0, legTopY + 0.21, 0.29 * B);
+    for (const side of [-1, 1]) {
+        const pad = add(body, new THREE.SphereGeometry(0.11, 10, 8), torsoMat);
+        pad.scale.set(1.2, 0.95, 1.1);
+        pad.position.set(side * 0.31 * B, shoulderY - 0.04, 0);
+    }
+
+    // Metal armor reads as a steel chest plate + pauldrons.
+    const armor = String(eq.armor || '');
+    if (/chain|plate|splint|scale-mail|ring/.test(armor)) {
+        const chest = add(body, new THREE.CylinderGeometry(0.355, 0.30, 0.5, 12), steelMat);
+        chest.scale.set(B, H, B);
+        chest.position.y = shoulderY - 0.3 * H;
+        for (const side of [-1, 1]) {
+            const p = add(body, new THREE.SphereGeometry(0.13, 10, 8), steelMat);
+            p.scale.set(1.25, 0.9, 1.15);
+            p.position.set(side * 0.33 * B, shoulderY - 0.02, 0);
+        }
+    }
+
+    // Neck + head.
+    const neck = add(body, new THREE.CylinderGeometry(0.09, 0.11, 0.2, 8), skinMat);
+    neck.position.y = shoulderY + 0.05;
+    const headR = 0.36 * HS;
+    const headCY = shoulderY + 0.1 + headR;
+    const head = add(body, new THREE.SphereGeometry(0.36, 20, 16), skinMat);
+    head.scale.setScalar(HS);
+    head.position.y = headCY;
+
+    for (const side of [-1, 1]) {
+        const eye = add(body, new THREE.SphereGeometry(0.048, 8, 8), eyeMat);
+        eye.scale.setScalar(HS);
+        eye.position.set(side * 0.13 * HS, headCY + 0.04 * HS, 0.33 * HS);
+    }
+    if (!dragon) {
+        const nose = add(body, new THREE.SphereGeometry(0.05, 8, 8), noseMat);
+        nose.scale.set(0.9 * HS, 1.1 * HS, HS);
+        nose.position.set(0, headCY - 0.03 * HS, 0.35 * HS);
+        const hair = add(body, new THREE.SphereGeometry(0.385, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.55), hairMat);
+        hair.scale.setScalar(HS);
+        hair.position.y = headCY + 0.015 * HS;
+        hair.rotation.x = -0.12; // fringe dips toward the brow
+        const nape = add(body, new THREE.SphereGeometry(0.3, 12, 10), hairMat);
+        nape.scale.set(0.9 * HS, 0.75 * HS, 0.7 * HS);
+        nape.position.set(0, headCY + 0.02 * HS, -0.16 * HS);
+    }
+
+    // Race features. Homebrew race slugs simply match nothing and stay plain.
+    if (/(^|-)elf/.test(race)) {
+        for (const side of [-1, 1]) {
+            const ear = add(body, new THREE.ConeGeometry(0.05, 0.22, 6), skinMat);
+            ear.scale.setScalar(HS);
+            ear.position.set(side * 0.37 * HS, headCY + 0.06 * HS, 0);
+            ear.rotation.z = side * -(Math.PI / 2 - 0.5); // tips angle up-and-out
+        }
+    } else if (race.includes('dwarf')) {
+        const beard = add(body, new THREE.ConeGeometry(0.19, 0.42, 8), hairMat);
+        beard.scale.setScalar(HS);
+        beard.rotation.x = Math.PI - 0.2; // apex down, flowing slightly forward
+        beard.position.set(0, headCY - 0.33 * HS, 0.15 * HS);
+    } else if (race.includes('orc')) {
+        for (const side of [-1, 1]) {
+            const tusk = add(body, new THREE.ConeGeometry(0.028, 0.1, 6), lambert('#e9e2cf'));
+            tusk.scale.setScalar(HS);
+            tusk.position.set(side * 0.09 * HS, headCY - 0.16 * HS, 0.29 * HS);
+            tusk.rotation.x = 0.25;
+        }
+    } else if (race.includes('tiefling')) {
+        for (const side of [-1, 1]) {
+            const horn = add(body, new THREE.ConeGeometry(0.06, 0.3, 6), lambert('#4a3038'));
+            horn.scale.setScalar(HS);
+            horn.position.set(side * 0.17 * HS, headCY + 0.32 * HS, -0.05 * HS);
+            horn.rotation.set(-0.35, 0, side * -0.45); // swept back and out
+        }
+    }
+    if (dragon) {
+        const snout = add(body, new THREE.BoxGeometry(0.22, 0.16, 0.26), skinMat);
+        snout.scale.setScalar(HS);
+        snout.position.set(0, headCY - 0.05 * HS, 0.38 * HS);
+        for (const side of [-1, 1]) {
+            const spike = add(body, new THREE.ConeGeometry(0.05, 0.22, 6), noseMat);
+            spike.scale.setScalar(HS);
+            spike.position.set(side * 0.14 * HS, headCY + 0.24 * HS, -0.16 * HS);
+            spike.rotation.x = -1.0;
+        }
+    }
+
+    // Arms: sleeve + forearm + hand hanging from shoulder pivots, tilted out a
+    // touch. Held gear counter-scales so build/arm sliders don't distort it.
+    let armL = null, armR = null;
+    for (const side of [-1, 1]) {
+        const arm = new THREE.Group();
+        arm.position.set(side * (0.34 * B + 0.04), shoulderY - 0.05, 0);
+        arm.rotation.z = side * 0.12;
+        arm.scale.set(B, AL, B);
+        body.add(arm);
+        const sleeve = add(arm, new THREE.CylinderGeometry(0.085, 0.075, 0.34, 8), torsoMat);
+        sleeve.position.y = -0.16;
+        const forearm = add(arm, new THREE.CylinderGeometry(0.068, 0.06, 0.42, 8), skinMat);
+        forearm.position.y = -0.52;
+        const hand = add(arm, new THREE.SphereGeometry(0.085, 8, 8), skinMat);
+        hand.position.y = -0.76;
+        if (side === -1) armL = arm; else armR = arm;
+    }
+
+    if (eq.shield) {
+        const shield = new THREE.Group();
+        shield.position.set(-0.13, -0.5, 0.03);
+        shield.rotation.z = Math.PI / 2; // disc axis along x, face outward
+        shield.scale.set(1 / AL, 1 / B, 1 / B);
+        armL.add(shield);
+        add(shield, new THREE.CylinderGeometry(0.3, 0.3, 0.045, 14), woodMat);
+        const rim = add(shield, new THREE.TorusGeometry(0.3, 0.028, 8, 20), steelMat);
+        rim.rotation.x = Math.PI / 2;
+        const boss = add(shield, new THREE.SphereGeometry(0.07, 10, 8), steelMat);
+        boss.position.y = 0.04;
+    }
+
+    const weapon = (Array.isArray(eq.weapons) && eq.weapons[0]) ? String(eq.weapons[0]) : '';
+    if (weapon) {
+        const grip = new THREE.Group();
+        grip.position.set(0, -0.76, 0.03);
+        grip.rotation.x = 0.2; // rests slightly forward
+        grip.scale.set(1 / B, 1 / AL, 1 / B);
+        armR.add(grip);
+        if (/bow/.test(weapon)) {
+            const bow = add(grip, new THREE.TorusGeometry(0.42, 0.025, 6, 16, Math.PI), woodMat);
+            bow.rotation.z = -Math.PI / 2; // chord vertical, bulge outward
+        } else if (/staff|wand/.test(weapon)) {
+            const shaft = add(grip, new THREE.CylinderGeometry(0.032, 0.032, 1.5, 8), woodMat);
+            shaft.position.y = 0.15;
+            const orb = add(grip, new THREE.SphereGeometry(0.075, 10, 8),
+                new THREE.MeshLambertMaterial({ color: 0x6fd3c3, emissive: 0x1e4f46 }));
+            orb.position.y = 0.97;
+        } else if (/axe/.test(weapon)) {
+            const haft = add(grip, new THREE.CylinderGeometry(0.03, 0.03, 0.9, 8), woodMat);
+            haft.position.y = 0.25;
+            const head_ = add(grip, new THREE.BoxGeometry(0.04, 0.22, 0.26), steelMat);
+            head_.position.set(0, 0.62, 0.13);
+        } else { // sword
+            const blade = add(grip, new THREE.BoxGeometry(0.07, 0.55, 0.02), steelMat);
+            blade.position.y = 0.36;
+            const guard = add(grip, new THREE.BoxGeometry(0.2, 0.045, 0.05), goldMat);
+            guard.position.y = 0.07;
+            const pommel = add(grip, new THREE.SphereGeometry(0.045, 8, 8), goldMat);
+            pommel.position.y = -0.1;
+        }
+    }
+
+    modelGroup.scale.setScalar(CHAR_SCALE);
     return modelGroup;
 }
 
-export function updateCharacterAppearance(modelGroup, appearance) {
-    const H = appearance.height || 1;
-    const B = appearance.build || 1;
-    const HS = appearance.headSize || 1;
-    const AL = appearance.armLength || 1;
-    const LL = appearance.legLength || 1;
-    const g = (n) => modelGroup.getObjectByName(n);
-    const torso = g('torso'), head = g('head'), hair = g('hair'),
-          leftEye = g('leftEye'), rightEye = g('rightEye'),
-          leftArm = g('leftArm'), rightArm = g('rightArm'),
-          leftLeg = g('leftLeg'), rightLeg = g('rightLeg');
-
-    torso.scale.set(B, H, B);
-    torso.position.y = (BASE_TORSO_HEIGHT * H) / 2 - 0.5;
-    head.scale.set(HS, HS, HS);
-    const hr = BASE_HEAD_RADIUS * HS;
-    head.position.y = (BASE_TORSO_HEIGHT * H) + hr - 0.5;
-    if (hair) { hair.scale.set(HS, HS, HS); hair.position.y = head.position.y; }
-    leftEye.position.set(-0.13 * HS, head.position.y + 0.1 * HS, hr - 0.05);
-    rightEye.position.set(0.13 * HS, head.position.y + 0.1 * HS, hr - 0.05);
-    leftArm.scale.set(B, AL, B); rightArm.scale.set(B, AL, B);
-    const ay = torso.position.y + (BASE_TORSO_HEIGHT * H / 2) - (BASE_ARM_LENGTH * AL / 2);
-    leftArm.position.set(-0.4 * B, ay, 0); rightArm.position.set(0.4 * B, ay, 0);
-    leftLeg.scale.set(B, LL, B); rightLeg.scale.set(B, LL, B);
-    const ly = torso.position.y - (BASE_TORSO_HEIGHT * H / 2);
-    leftLeg.position.set(-0.15 * B, ly, 0); rightLeg.position.set(0.15 * B, ly, 0);
+// Free the GPU resources of a model built here (creator preview rebuilds on
+// every appearance tweak; synced map objects are handled by the pages).
+export function disposeModel(root) {
+    root.traverse(o => {
+        if (o.geometry) o.geometry.dispose();
+        if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose());
+    });
 }
 
 // Simple decorative props for the folded geometry a heightmap can't do.
@@ -148,13 +331,21 @@ export function buildObjectFromData(id, data) {
             break;
         case 'character':
             if (data.characterData) {
-                objectMesh = createCharacterModel(data.characterData);
-                // Seat the model on its feet: the group origin sits above the
-                // soles (and the offset varies with build/leg length), so measure
-                // the actual bottom instead of guessing from height. groundY adds
-                // this back so position.y + box.min.y lands the feet on the ground.
-                const box = new THREE.Box3().setFromObject(objectMesh);
-                halfHeight = -box.min.y;
+                // EXPERIMENT: rigged GLTF character. The procedural model shows
+                // instantly as a placeholder and swaps out inside the same group
+                // once the shared assets arrive (position/selection unaffected).
+                // Both seat their soles at -0.38, the procedural foot depth.
+                halfHeight = 0.38;
+                objectMesh = createRigCharacter(data.characterData, {
+                    footY: -0.38,
+                    onReady: (g) => {
+                        const ph = g.userData.placeholder;
+                        if (ph) { g.remove(ph); disposeModel(ph); delete g.userData.placeholder; }
+                    }
+                });
+                const ph = createCharacterModel(data.characterData);
+                objectMesh.add(ph);
+                objectMesh.userData.placeholder = ph;
             }
             break;
         case 'cave':

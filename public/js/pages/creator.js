@@ -5,6 +5,8 @@ import {
   abilityMod, fmtMod, proficiencyBonus
 } from '../shared/srd.js';
 import { setupLoginModal } from '../shared/login.js';
+import { createCharacterModel, disposeModel } from '../shared/models.js';
+import { createRigCharacter, releaseRigCharacter, tickRigCharacters } from '../shared/charmesh.js';
 
 let SRD = null;
 let pendingHomebrew = null;
@@ -458,62 +460,34 @@ function renderRail() {
 }
 
 /* ---------- 3D preview ---------- */
-let scene, camera, renderer, controls, model, mats;
+let scene, camera, renderer, controls, model;
 function initPreview() {
   const canvas = $('preview-canvas');
   const w = canvas.clientWidth || 300, h = 300;
   scene = new THREE.Scene(); scene.background = new THREE.Color(0x2b2b2b);
-  camera = new THREE.PerspectiveCamera(75, w/h, 0.1, 1000); camera.position.set(0,1,2.6); camera.lookAt(0,0.5,0);
+  camera = new THREE.PerspectiveCamera(75, w/h, 0.1, 1000); camera.position.set(0,0.7,1.3); camera.lookAt(0,0.45,0);
   renderer = new THREE.WebGLRenderer({ canvas, antialias:true }); renderer.setSize(w,h); renderer.setPixelRatio(window.devicePixelRatio);
-  controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0,0.5,0); controls.enableDamping=true; controls.enablePan=false; controls.minDistance=1.6; controls.maxDistance=5;
-  scene.add(new THREE.AmbientLight(0xffffff,0.8));
-  const dl = new THREE.DirectionalLight(0xffffff,1); dl.position.set(2,5,3); scene.add(dl);
+  controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0,0.45,0); controls.enableDamping=true; controls.enablePan=false; controls.minDistance=0.8; controls.maxDistance=4;
+  scene.add(new THREE.HemisphereLight(0xfff4e0, 0x445566, 0.9));
+  const dl = new THREE.DirectionalLight(0xffffff,0.9); dl.position.set(2,5,3); scene.add(dl);
+  renderer.outputEncoding = THREE.sRGBEncoding; // PBR character textures need gamma out
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(10,10), new THREE.MeshStandardMaterial({color:0x333333}));
-  ground.rotation.x=-Math.PI/2; ground.position.y=-0.5; scene.add(ground);
+  ground.rotation.x=-Math.PI/2; scene.add(ground);
   buildModel();
-  (function loop(){ requestAnimationFrame(loop); controls.update(); renderer.render(scene,camera); })();
+  (function loop(){ requestAnimationFrame(loop); tickRigCharacters(); controls.update(); renderer.render(scene,camera); })();
   window.addEventListener('resize', () => { const ww=canvas.clientWidth||300; renderer.setSize(ww,300); camera.aspect=ww/300; camera.updateProjectionMatrix(); });
 }
+// EXPERIMENT: rigged GLTF character (charmesh.js) instead of the procedural
+// model. Rebuild+release on every tweak; the procedural builder stays one
+// import away as the fallback.
 function buildModel() {
-  if (model) scene.remove(model);
-  model = new THREE.Group();
-  mats = {
-    skin:new THREE.MeshLambertMaterial(), torso:new THREE.MeshLambertMaterial(),
-    legs:new THREE.MeshLambertMaterial(), hair:new THREE.MeshLambertMaterial(),
-    eye:new THREE.MeshBasicMaterial({color:0x111111})
-  };
-  const mk = (geo,mat,name)=>{ const m=new THREE.Mesh(geo,mat); m.name=name; model.add(m); return m; };
-  mk(new THREE.CylinderGeometry(0.3,0.3,1,24), mats.torso, 'torso');
-  mk(new THREE.SphereGeometry(0.4,24,24), mats.skin, 'head');
-  mk(new THREE.SphereGeometry(0.41,20,16,0,Math.PI*2,0,Math.PI*0.55), mats.hair, 'hair');
-  mk(new THREE.SphereGeometry(0.05,12,12), mats.eye, 'eyeL');
-  mk(new THREE.SphereGeometry(0.05,12,12), mats.eye, 'eyeR');
-  mk(new THREE.CylinderGeometry(0.08,0.08,0.8,12), mats.skin, 'armL');
-  mk(new THREE.CylinderGeometry(0.08,0.08,0.8,12), mats.skin, 'armR');
-  mk(new THREE.CylinderGeometry(0.1,0.1,0.9,12), mats.legs, 'legL');
-  mk(new THREE.CylinderGeometry(0.1,0.1,0.9,12), mats.legs, 'legR');
-  scene.add(model); model.position.y = 0.5;
-  updateModel();
+  if (model) { scene.remove(model); if (model.userData.rigCharacter) releaseRigCharacter(model); else disposeModel(model); }
+  model = createRigCharacter(
+    { appearance: char.appearance, race: char.race, equipment: char.equipment },
+    { footY: 0 });
+  scene.add(model);
 }
-function updateModel() {
-  if (!model) return;
-  const ap = char.appearance, c = ap.colors;
-  mats.skin.color.set(c.skin); mats.torso.color.set(c.torso); mats.legs.color.set(c.legs);
-  mats.hair.color.set(c.hair); mats.eye.color.set(c.eyes);
-  const g = n => model.getObjectByName(n);
-  const H=ap.height, B=ap.build, HS=ap.headSize, AL=ap.armLength, LL=ap.legLength;
-  const torso=g('torso'); torso.scale.set(B,H,B); torso.position.y = H/2 - 0.5;
-  const head=g('head'); head.scale.set(HS,HS,HS); const hr=0.4*HS; head.position.y = H + hr - 0.5;
-  const hair=g('hair'); hair.scale.set(HS,HS,HS); hair.position.y = head.position.y;
-  const eL=g('eyeL'), eR=g('eyeR'); const ey=head.position.y+0.08*HS, ez=hr-0.04;
-  eL.position.set(-0.13*HS,ey,ez); eR.position.set(0.13*HS,ey,ez);
-  const aL=g('armL'), aR=g('armR'); aL.scale.set(B,AL,B); aR.scale.set(B,AL,B);
-  const ay = torso.position.y + (H/2) - (0.8*AL/2);
-  aL.position.set(-0.4*B,ay,0); aR.position.set(0.4*B,ay,0);
-  const lL=g('legL'), lR=g('legR'); lL.scale.set(B,LL,B); lR.scale.set(B,LL,B);
-  const ly = torso.position.y - (H/2) - (0.9*LL/2) + 0.45;
-  lL.position.set(-0.15*B,ly,0); lR.position.set(0.15*B,ly,0);
-}
+function updateModel() { if (renderer) buildModel(); }
 
 /* ---------- Save / load ---------- */
 function buildSaveObject() {

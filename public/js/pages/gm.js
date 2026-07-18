@@ -8,6 +8,7 @@ import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE } from '../shared/scene.js';
 import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
+import { tickRigCharacters } from '../shared/charmesh.js';
 import { buildWallRun, buildFloorPatch, disposeBuiltObject } from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { RulerTool } from '../shared/rulers.js';
@@ -711,6 +712,7 @@ function init() {
         renderer, scene, camera, controls,
         onTick: () => {
             updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
+            tickRigCharacters();                                           // character idle/walk clips
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary
