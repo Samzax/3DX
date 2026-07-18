@@ -129,10 +129,6 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
 - Sparse foam speckle on near-sea-level flats; faint seam at the fine-chunk
   window edge in some light.
 - Legacy world map at origin has old-generator terrain baked as edited chunks.
-- Test leftovers from the tile-brush session: a "Build Demo" pocket
-  (`pocket/f656e732`, reachable via a portal at the center of tactical
-  `world/0,0/0,0/0,0`) holding a sample stone room + wood floor + scruffy
-  ruin — walk in to eyeball the tile brush, delete the portal when done.
 - `public/js/shared/structures.js` key map entry: wall/floor mesh builders
   (`buildWallRun`/`buildFloorPatch`), seeded `buildRand`, `BUILD_STYLES`,
   `disposeBuiltObject` (ghost cleanup). GM tool logic lives in gm.js
