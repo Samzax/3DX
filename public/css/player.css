@@ -17,8 +17,7 @@
   pointer-events: none;
 }
 
-#move-submenu .menu-button,
-#ruler-submenu .menu-button {
+.menu-button {
   display: block;
   width: 100%;
   padding: 10px;
@@ -32,18 +31,35 @@
   text-align: left;
   transition: background-color 0.2s;
 }
-#move-submenu .menu-button:hover,
-#ruler-submenu .menu-button:hover {
+.menu-button:hover {
   background-color: #777;
 }
-#move-submenu .menu-button:last-child,
-#ruler-submenu .menu-button:last-child {
+.menu-button:last-child {
   margin-bottom: 0;
 }
-#move-submenu .menu-button.active,
-#ruler-submenu .menu-button.active {
+.menu-button.active {
   background-color: #007bff;
   font-weight: bold;
+}
+
+/* --- Character menu (right): mirrors the GM's #object-menu --- */
+#character-menu {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background-color: var(--panel-bg);
+  padding: 15px;
+  border-radius: var(--panel-radius);
+  border: 1px solid var(--panel-border);
+  width: 200px;
+  z-index: 10;
+  max-height: 42vh;
+  overflow-y: auto;
+}
+#character-menu h2 {
+  margin-top: 0;
+  color: var(--text);
+  font-size: 16px;
 }
 
 /* --- Player HUD (bottom) --- */
