@@ -185,6 +185,40 @@ function broadcastPresence() {
   io.emit('players-updated', { players });
 }
 
+// Character-instance index (player right-menu "Instances" tab): every placed
+// character token across every map — where it sits and who spawned it. Players
+// get only their own characters (own tokens are never fog-hidden, so this
+// leaks nothing new); the GM gets everything.
+function characterInstancesFor(username) {
+  const instances = [];
+  for (const key of Object.keys(maps)) {
+    for (const obj of Object.values(maps[key].objects || {})) {
+      if (obj.type !== 'character' || !obj.characterData) continue;
+      if (!isGM(username) && obj.characterData.owner !== username) continue;
+      const meta = maps[key].meta || {};
+      instances.push({
+        id: obj.id,
+        mapKey: key,
+        mapName: meta.kind === 'pocket' ? (meta.name || 'Pocket') : 'World',
+        charId: obj.characterData.id || null,
+        charName: obj.characterData.name || 'Unnamed',
+        color: obj.characterData.color || null,
+        owner: obj.characterData.owner || null,
+        addedBy: obj.addedBy || null,
+        position: obj.position || { x: 0, y: 0, z: 0 }
+      });
+    }
+  }
+  return instances;
+}
+// Live refresh: whenever a character token is added/moved/deleted anywhere,
+// every logged-in socket gets its (personalized) instance list again.
+function pushCharacterInstances() {
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.username) sock.emit('character-instances', { instances: characterInstancesFor(sock.username) });
+  }
+}
+
 // One-time migration: fold legacy per-province tactical islands into WORLD_KEY at
 // their composed world position (chunk-aligned), so the tactical layer becomes one
 // continuous world. Each island's chunk keys are relabeled by its chunk offset and
@@ -491,6 +525,9 @@ io.on('connection', (socket) => {
       canAccessCharacter(socket.username, char)
     );
     socket.emit('load-user-characters', accessibleChars);
+
+    // Seed the Instances tab (kept live by pushCharacterInstances afterwards).
+    socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
 
     // Send all homebrew (custom races/classes are shared content)
     socket.emit('load-homebrew', {
@@ -825,18 +862,40 @@ io.on('connection', (socket) => {
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
     const map = getMap(key);
     const id = data.id || crypto.randomUUID();
-    const newObject = { ...data, id: id };
+    // addedBy is server-stamped (never trusted from the client): the Instances
+    // tab shows who actually spawned each token.
+    const newObject = { ...data, id: id, addedBy: socket.username || null };
     map.objects[id] = newObject;
     saveMaps();
     if (!isUnifiedKey(key)) {
       io.to(key).emit('object-added', newObject);
-      return;
+    } else {
+      // Fog of war: only players who can see the spot learn the object exists.
+      socket.emit('object-added', newObject); // the author always gets the echo
+      emitToRoom(key, socket, (sock) => {
+        if (objectVisibleTo(sock.username, newObject)) sock.emit('object-added', newObject);
+      });
     }
-    // Fog of war: only players who can see the spot learn the object exists.
-    socket.emit('object-added', newObject); // the author always gets the echo
-    emitToRoom(key, socket, (sock) => {
-      if (objectVisibleTo(sock.username, newObject)) sock.emit('object-added', newObject);
-    });
+    if (newObject.type === 'character') pushCharacterInstances();
+    // A character/token dropped onto a map with a combat joins the fight —
+    // players place their own character and roll initiative themselves.
+    const combat = map.combat;
+    if (combat && !combat.combatants[id]) {
+      const c = seedCombatant(newObject);
+      if (c) {
+        combat.combatants[c.id] = c;
+        if (combat.started) combat.order.push(c.id); // end of round until initiative is rolled
+        pushLog(key, combat, { kind: 'info', actorName: c.name, text: `${c.name} joins the fight` });
+        broadcastCombat(key);
+      }
+    }
+  });
+
+  // Player right-menu "Instances" tab: on-demand refresh of this user's placed
+  // character tokens across all maps (GM: everyone's), with location + spawner.
+  socket.on('get-character-instances', () => {
+    if (!socket.username) return;
+    socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
   });
 
   socket.on('move-object', (data) => {
@@ -890,6 +949,9 @@ io.on('connection', (socket) => {
         else if (was && !now) sock.emit('object-deleted', { id: obj.id });
       });
     }
+    // Moves are click-to-drop (not per-frame drags), so a live location
+    // refresh for the Instances tab is cheap.
+    if (obj.type === 'character') pushCharacterInstances();
     if (c) broadcastCombat(key);
   });
 
@@ -897,9 +959,11 @@ io.on('connection', (socket) => {
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
     const map = getMap(key);
     if (map.objects[data.id]) {
+      const wasCharacter = map.objects[data.id].type === 'character';
       delete map.objects[data.id];
       saveMaps();
       io.to(key).emit('object-deleted', data);
+      if (wasCharacter) pushCharacterInstances();
       // A deleted token leaves the fight too.
       if (map.combat && map.combat.combatants[data.id]) {
         const name = map.combat.combatants[data.id].name;

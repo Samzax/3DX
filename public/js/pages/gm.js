@@ -88,6 +88,8 @@ let socket;
 let SRD = null;                 // loaded lazily: combat stat derivation only
 let pendingHomebrew = null;
 let allCharacters = [];         // GM sees every character (stat-fill fallback)
+let characterInstances = [];    // every placed character token across all maps (Instances tab)
+let pendingFocus = null;        // world position to land on once the next map-state arrives
 let combatState = null;
 let combatTracker = null;
 let combatOverlays = null;
@@ -427,6 +429,13 @@ function initSocket() {
         socket.emit('get-characters'); // Refresh the menu
     });
 
+    // Instances tab: every placed character token across every map (the GM sees
+    // all owners). Seeded at login, re-pushed live on any add/move/delete.
+    socket.on('character-instances', (data) => {
+        characterInstances = (data && Array.isArray(data.instances)) ? data.instances : [];
+        renderInstanceList();
+    });
+
     // Homebrew races/classes feed the SRD-based combat stat derivation.
     socket.on('load-homebrew', (hb) => {
         pendingHomebrew = hb;
@@ -524,6 +533,10 @@ function initSocket() {
                 syncWaterControls();
             }
         }
+
+        // Instances-tab travel: we entered this map to find a token — land on it
+        // (after the worldCenter landing above so the descent wins).
+        if (pendingFocus) { focusCameraOn(pendingFocus); pendingFocus = null; }
     });
 
     // Live terrain edits (echo to other GM tabs; players handle this too).
@@ -690,6 +703,10 @@ function init() {
     menuButtons['portal-new'].addEventListener('click', () => setSelectedObjectType('portal-new'));
     menuButtons['portal-link'].addEventListener('click', () => setSelectedObjectType('portal-link'));
     // Characters are loaded from the server via Socket.IO (see initSocket).
+
+    // Characters section tabs: Spawn (place a character) | Instances (placed tokens).
+    document.getElementById('char-tab-spawn').addEventListener('click', () => setCharacterTab('spawn'));
+    document.getElementById('char-tab-instances').addEventListener('click', () => setCharacterTab('instances'));
 
     // --- Tool Menu Listeners (Left) ---
     toolMenuButtons.move = document.getElementById('btn-tool-move');
@@ -1532,6 +1549,76 @@ function loadCharactersToMenu(characters) {
             setSelectedObjectType('character', char);
         });
         listContainer.appendChild(charBtn);
+    });
+}
+
+// --- Characters section tabs: Spawn (place a character) | Instances ---
+function setCharacterTab(tab) {
+    document.getElementById('char-tab-spawn').classList.toggle('active', tab === 'spawn');
+    document.getElementById('char-tab-instances').classList.toggle('active', tab === 'instances');
+    document.getElementById('character-button-list').classList.toggle('hidden', tab !== 'spawn');
+    document.getElementById('character-instance-list').classList.toggle('hidden', tab !== 'instances');
+    if (tab === 'instances' && socket) socket.emit('get-character-instances'); // fresh on open
+}
+
+// Tactical path of the province containing a world position (inverse of
+// pathWorldCenter): each tier's hex is found relative to the accumulated
+// centers of the tiers above it.
+function worldToTacticalPath(x, z) {
+    let key = 'world', cx = 0, cz = 0;
+    for (let d = 0; d < TACTICAL_DEPTH; d++) {
+        const h = worldToHexAtTier(d, x - cx, z - cz);
+        key += `/${h.q},${h.r}`;
+        const c = hexCenterAtTier(d, h.q, h.r);
+        cx += c.x; cz += c.z;
+    }
+    return key;
+}
+
+// Click an instance row: focus the token if its room is already loaded,
+// otherwise enter its map first ('@world' tokens land on their containing
+// province) and descend onto it once map-state arrives.
+function gotoInstance(inst) {
+    if (!inst) return;
+    const pos = inst.position || { x: 0, y: 0, z: 0 };
+    const sameRoom = inst.mapKey === currentMapKey ||
+        (inst.mapKey === '@world' && !isPocket(currentMapKey) && isTacticalKey(currentMapKey));
+    if (sameRoom) { focusCameraOn(pos); return; }
+    pendingFocus = { ...pos };
+    enterMap(inst.mapKey === '@world' ? worldToTacticalPath(pos.x, pos.z) : inst.mapKey);
+}
+
+function renderInstanceList() {
+    const list = document.getElementById('character-instance-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!characterInstances.length) {
+        list.innerHTML = '<p style="font-size: 12px; color: #999;">No character tokens on any map yet.</p>';
+        return;
+    }
+    characterInstances.forEach(inst => {
+        const row = document.createElement('button');
+        row.className = 'instance-row';
+        row.title = 'Click: jump to this token';
+        if (inst.color) row.style.borderLeftColor = inst.color;
+
+        const name = document.createElement('div');
+        name.className = 'inst-name';
+        name.textContent = inst.charName || 'Unnamed';
+        if (inst.color) name.style.color = inst.color;
+
+        const loc = document.createElement('div');
+        loc.className = 'inst-loc';
+        const p = inst.position || {};
+        loc.textContent = `${inst.mapName || inst.mapKey} (${Math.round(p.x || 0)}, ${Math.round(p.z || 0)})`;
+
+        const by = document.createElement('div');
+        by.className = 'inst-by';
+        by.textContent = `${inst.owner || 'unowned'} · spawned by ${inst.addedBy || 'unknown'}`;
+
+        row.append(name, loc, by);
+        row.addEventListener('click', () => gotoInstance(inst));
+        list.appendChild(row);
     });
 }
 

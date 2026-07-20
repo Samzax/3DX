@@ -474,6 +474,8 @@ function initPreview() {
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(10,10), new THREE.MeshStandardMaterial({color:0x333333}));
   ground.rotation.x=-Math.PI/2; scene.add(ground);
   buildModel();
+  // Headless-testing handle (mirrors gm.js/player.js __dbg).
+  window.__dbg = { get scene(){return scene;}, get camera(){return camera;}, get renderer(){return renderer;}, get model(){return model;} };
   (function loop(){ requestAnimationFrame(loop); tickRigCharacters(); controls.update(); renderer.render(scene,camera); })();
   window.addEventListener('resize', () => { const ww=canvas.clientWidth||300; renderer.setSize(ww,300); camera.aspect=ww/300; camera.updateProjectionMatrix(); });
 }

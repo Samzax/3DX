@@ -52,6 +52,10 @@ let moveSubMenuButtons = {};
 let moveSubMenu;
 let isDraggingHeight = false;
 
+let placeCharacter = null; // character being placed (place tool armed via the right menu)
+let characterInstances = []; // my placed tokens across all maps (Instances tab), server-pushed
+let pendingFocus = null;     // world position to jump to once the next map-state lands
+
 let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
 let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
@@ -153,6 +157,10 @@ function init() {
         [moveSubMenu, toolMenuButtons.move],
         [rulerSubMenu, toolMenuButtons.ruler]
     ]);
+
+    // --- Character menu tabs (right): Spawn | Instances ---
+    document.getElementById('char-tab-spawn').addEventListener('click', () => setCharacterTab('spawn'));
+    document.getElementById('char-tab-instances').addEventListener('click', () => setCharacterTab('instances'));
 
     // --- HUD panel logic ---
     const hudOverlay = document.getElementById('hud-panel-overlay');
@@ -336,6 +344,9 @@ function onPointerDown(event) {
             case 'ruler':
                 ruler.click(ruler.snap(intersectPoint), emitRuler);
                 break;
+            case 'place':
+                placeCharacterAt(intersectPoint);
+                break;
         }
     }
 }
@@ -371,6 +382,17 @@ function onPointerMove(event) {
         ruler.updateTooltip(previewPoints, false);
     } else if (currentTool === 'ruler') {
         ruler.updateTooltip([], false, true); // show "0 ft" at the cursor
+    }
+
+    if (currentTool === 'place' && placeCharacter) {
+        // Reuse the ruler tooltip as the placement hint (the tools are exclusive).
+        const el = document.getElementById('ruler-tooltip');
+        if (el) {
+            el.textContent = `Place ${placeCharacter.name || 'character'} — click the ground (Esc cancels)`;
+            el.style.display = 'block';
+            el.style.left = (event.clientX + 14) + 'px';
+            el.style.top = (event.clientY + 14) + 'px';
+        }
     }
 }
 
@@ -411,7 +433,9 @@ function onKeyDown(event) {
             if (combatTracker) combatTracker.flash('Attack cancelled');
             return;
         }
-        if (currentTool === 'ruler' && ruler.points.length > 0) {
+        if (currentTool === 'place') {
+            setTool('move'); // also drops placeCharacter (see setTool)
+        } else if (currentTool === 'ruler' && ruler.points.length > 0) {
             ruler.clearInProgress();
         } else if (isDraggingHeight) {
             isDraggingHeight = false;
@@ -436,6 +460,147 @@ function setViewLock(locked) {
     controls.enabled = !locked;
     const banner = document.getElementById('view-lock-banner');
     if (banner) banner.classList.toggle('hidden', !locked);
+}
+
+// --- Character menu (right): place your own character on the map ---
+function myTokenFor(charId) {
+    return objects.find(o => o.userData.characterData && o.userData.characterData.id === charId);
+}
+
+// Click a character button: arm the place tool with it (click again to cancel);
+// if its token is already on this map, jump the camera to it instead.
+function armPlaceCharacter(char) {
+    if (!char) return;
+    if (currentTool === 'place' && placeCharacter && placeCharacter.id === char.id) {
+        setTool('move'); // toggle off (also drops placeCharacter, see setTool)
+        return;
+    }
+    const existing = myTokenFor(char.id);
+    if (existing) { focusCameraOn(existing.position); return; } // already here: jump to it
+    placeCharacter = char;
+    setTool('place');
+    syncCharacterMenuActive();
+}
+
+// Mirrors the GM's loadCharactersToMenu: one button per character, colored.
+function renderCharacterMenu() {
+    const listContainer = document.getElementById('character-button-list');
+    if (!listContainer) return;
+    listContainer.innerHTML = '';
+
+    if (!myCharacters.length) {
+        listContainer.innerHTML = '<p style="font-size: 12px; color: #999;">No characters found. Create one in the Character Creator!</p>';
+        return;
+    }
+
+    myCharacters.forEach(char => {
+        const charBtn = document.createElement('button');
+        charBtn.className = 'menu-button';
+        charBtn.textContent = char.name || 'Unnamed';
+        charBtn.title = 'Click: place on the map (or jump to the token)';
+        charBtn.style.color = char.color;
+        charBtn.style.fontWeight = 'bold';
+        charBtn.style.borderLeft = `5px solid ${char.color}`;
+        charBtn.dataset.charId = char.id;
+        charBtn.addEventListener('click', () => armPlaceCharacter(char));
+        listContainer.appendChild(charBtn);
+    });
+    syncCharacterMenuActive();
+}
+
+function syncCharacterMenuActive() {
+    document.querySelectorAll('#character-button-list .menu-button').forEach(btn => {
+        btn.classList.toggle('active', !!placeCharacter && btn.dataset.charId === placeCharacter.id);
+    });
+}
+
+// --- Character menu tabs: Spawn (place tokens) | Instances (where they are) ---
+function setCharacterTab(tab) {
+    document.getElementById('char-tab-spawn').classList.toggle('active', tab === 'spawn');
+    document.getElementById('char-tab-instances').classList.toggle('active', tab === 'instances');
+    document.getElementById('character-button-list').classList.toggle('hidden', tab !== 'spawn');
+    document.getElementById('character-instance-list').classList.toggle('hidden', tab !== 'instances');
+    if (tab === 'instances' && socket) socket.emit('get-character-instances'); // fresh on open
+}
+
+// Tactical paths share the '@world' room server-side; mirror that routing so
+// "already on this map" checks match the room the server actually joined us to.
+function roomKeyOf(key) {
+    return /^world(\/-?\d+,-?\d+){3}$/.test(key) ? '@world' : key;
+}
+
+// Snap the orbit target to a world position and re-seat the camera beside it
+// (same fresh viewpoint as portal travel; on the unified world the floating
+// origin catches up via maybeRebaseWorld over the next frames).
+function jumpCameraTo(worldPos) {
+    if (cameraFly) cameraFly.cancel();
+    focusCameraOn(worldPos);
+    camera.position.set(controls.target.x + 20, controls.target.y + 30, controls.target.z + 20);
+}
+
+// Click an instance row: fly to the token if its map is already loaded,
+// otherwise travel there (join its map, then jump once map-state lands).
+function gotoInstance(inst) {
+    if (!inst || !socket) return;
+    const pos = inst.position || { x: 0, y: 0, z: 0 };
+    if (inst.mapKey === currentMapKey || inst.mapKey === roomKeyOf(currentMapKey)) {
+        jumpCameraTo(pos);
+        return;
+    }
+    currentMapKey = inst.mapKey;
+    pendingFocus = { ...pos };
+    socket.emit('join-map', { key: inst.mapKey });
+}
+
+function renderInstanceList() {
+    const list = document.getElementById('character-instance-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!characterInstances.length) {
+        list.innerHTML = '<p style="font-size: 12px; color: #999;">No characters on any map yet.</p>';
+        return;
+    }
+    characterInstances.forEach(inst => {
+        const row = document.createElement('button');
+        row.className = 'instance-row';
+        row.title = 'Click: jump to this token';
+        if (inst.color) row.style.borderLeftColor = inst.color;
+
+        const name = document.createElement('div');
+        name.className = 'inst-name';
+        name.textContent = inst.charName || 'Unnamed';
+        if (inst.color) name.style.color = inst.color;
+
+        const loc = document.createElement('div');
+        loc.className = 'inst-loc';
+        const p = inst.position || {};
+        loc.textContent = `${inst.mapName || inst.mapKey} (${Math.round(p.x || 0)}, ${Math.round(p.z || 0)})`;
+
+        const by = document.createElement('div');
+        by.className = 'inst-by';
+        by.textContent = `Spawned by ${inst.addedBy || 'unknown'}`;
+
+        row.append(name, loc, by);
+        row.addEventListener('click', () => gotoInstance(inst));
+        list.appendChild(row);
+    });
+}
+
+function placeCharacterAt(worldPoint) {
+    if (!placeCharacter || !socket) return;
+    if (myTokenFor(placeCharacter.id)) { setTool('move'); return; } // arrived meanwhile (e.g. GM placed it)
+    const heightScale = (placeCharacter.appearance && placeCharacter.appearance.height) || 1;
+    const halfHeight = (1 * heightScale) / 2 * 0.4;
+    const snapped = snapToGrid(worldPoint);
+    // Seat the token on the terrain surface (flat y=0 in terrainless pockets).
+    const base = (terrain && terrain.group.visible) ? terrain.sampleHeight(snapped.x, snapped.z) : 0;
+    socket.emit('add-object', {
+        type: 'character',
+        characterData: placeCharacter,
+        position: { x: snapped.x, y: base + halfHeight, z: snapped.z }
+    });
+    placeCharacter = null;
+    setTool('move');
 }
 
 // --- Object Management ---
@@ -779,10 +944,12 @@ function setTool(toolName) {
     if (toolName !== 'ruler') {
         ruler.hideTooltip();
     }
+    if (toolName !== 'place') placeCharacter = null;
     currentTool = toolName;
     for (const key in toolMenuButtons) {
         toolMenuButtons[key].classList.toggle('active', key === toolName);
     }
+    syncCharacterMenuActive();
 }
 
 // --- Move Tool ---
@@ -847,7 +1014,15 @@ function initSocket(username) {
             activeCharId = myCharacters[0] ? myCharacters[0].id : null;
         }
         renderHUD();
+        renderCharacterMenu();
         answerStatsPending(); // combat may have arrived before the characters
+    });
+
+    // Instances tab: where my character tokens sit, across every map. Pushed
+    // by the server on any character add/move/delete and re-requested on tab open.
+    socket.on('character-instances', (data) => {
+        characterInstances = (data && Array.isArray(data.instances)) ? data.instances : [];
+        renderInstanceList();
     });
 
     socket.on('load-homebrew', (hb) => {
@@ -861,12 +1036,14 @@ function initSocket(username) {
         if (i >= 0) myCharacters[i] = char;
         else if (char.owner === username || (username && username.toLowerCase() === 'gm')) myCharacters.push(char);
         renderHUD();
+        renderCharacterMenu();
     });
 
     socket.on('character-deleted', (charId) => {
         myCharacters = myCharacters.filter(c => c.id !== charId);
         if (activeCharId === charId) activeCharId = myCharacters[0] ? myCharacters[0].id : null;
         renderHUD();
+        renderCharacterMenu();
     });
 
     // --- Combat sync ---
@@ -979,6 +1156,10 @@ function initSocket(username) {
                 styleGroundForTerrain(plane, hasTerrain);
             }
         }
+
+        // Instances-tab travel: we joined this map to find a token — jump to it
+        // (after the terrain/worldCenter landing above so the jump wins).
+        if (pendingFocus) { jumpCameraTo(pendingFocus); pendingFocus = null; }
     });
 
     // Live terrain edits from the GM (partial chunk payload).

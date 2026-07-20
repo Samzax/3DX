@@ -119,6 +119,57 @@ body {
   z-index: 1; /* Send 3D scene to back */
 }
 
+/* --- Character menu tabs (right menu, gm+player): Spawn | Instances --- */
+#character-menu-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.char-tab {
+  flex: 1;
+  padding: 6px 0;
+  background-color: #3a3a44;
+  color: #cbd0d8;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.char-tab:hover {
+  background-color: #4a4a55;
+}
+.char-tab.active {
+  background-color: #007bff;
+  color: #fff;
+}
+
+/* Instance rows: one placed token — who, where, spawned by; click jumps to it */
+.instance-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background-color: #2a2a31;
+  border: none;
+  border-left: 5px solid #888;
+  border-radius: 5px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  color: #fff;
+  transition: background-color 0.2s;
+}
+.instance-row:hover {
+  background-color: #3a3a44;
+}
+.instance-row:last-child {
+  margin-bottom: 0;
+}
+.inst-name { font-weight: bold; font-size: 13px; }
+.inst-loc { font-size: 11px; color: #9aa0aa; margin-top: 2px; }
+.inst-by { font-size: 11px; color: #6b7280; }
+
 /* --- Left tool menu --- */
 #tool-menu {
   position: absolute;
