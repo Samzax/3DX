@@ -723,10 +723,14 @@ function renderInstanceList() {
     });
     instanceGroups.forEach(group => group.sort((a, b) => String(a.id).localeCompare(String(b.id))));
     characterInstances.forEach(inst => {
-        const row = document.createElement('button');
+        const row = document.createElement('div');
         row.className = 'instance-row';
-        row.title = 'Click: jump to this token';
         if (inst.color) row.style.borderLeftColor = inst.color;
+
+        const main = document.createElement('button');
+        main.className = 'instance-row-main';
+        main.type = 'button';
+        main.title = 'Click: jump to this token';
 
         const name = document.createElement('div');
         name.className = 'inst-name';
@@ -744,8 +748,22 @@ function renderInstanceList() {
         by.className = 'inst-by';
         by.textContent = `Spawned by ${inst.addedBy || 'unknown'}`;
 
-        row.append(name, loc, by);
-        row.addEventListener('click', () => gotoInstance(inst));
+        main.append(name, loc, by);
+        main.addEventListener('click', () => gotoInstance(inst));
+
+        const remove = document.createElement('button');
+        remove.className = 'instance-row-delete';
+        remove.type = 'button';
+        remove.title = 'Delete this character token';
+        remove.setAttribute('aria-label', `Delete ${inst.charName || 'character token'}`);
+        remove.textContent = '×';
+        remove.addEventListener('click', event => {
+            event.stopPropagation();
+            if (!socket || !confirm(`Delete ${inst.charName || 'this character token'} from ${inst.mapName || inst.mapKey}?`)) return;
+            socket.emit('delete-character-instance', { id: inst.id, mapKey: inst.mapKey });
+        });
+
+        row.append(main, remove);
         list.appendChild(row);
     });
 }

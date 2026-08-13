@@ -957,6 +957,37 @@ io.on('connection', (socket) => {
     socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
   });
 
+  // Remove a character token from the Instances tab. Unlike delete-object,
+  // this accepts the token's map key so it can remove a token without first
+  // navigating to that map. Players may remove only their own tokens; the GM
+  // may remove any character token.
+  socket.on('delete-character-instance', (payload) => {
+    if (!socket.username || !payload || !payload.id) return;
+    const requestedKey = payload.mapKey ? String(payload.mapKey) : (socket.currentMapKey || DEFAULT_MAP_KEY);
+    const key = stateKey(requestedKey);
+    const map = getMap(key);
+    const id = String(payload.id);
+    const obj = map.objects[id];
+    if (!obj || obj.type !== 'character' || (!isGM(socket.username) && !ownsObject(socket.username, obj))) {
+      return;
+    }
+
+    delete map.objects[id];
+    saveMaps();
+    const event = { id };
+    if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', event));
+    else io.to(key).emit('object-deleted', event);
+    pushCharacterInstances();
+
+    // A deleted token leaves the fight too.
+    if (map.combat && map.combat.combatants[id]) {
+      const name = map.combat.combatants[id].name;
+      removeCombatant(key, map.combat, id);
+      pushLog(key, map.combat, { kind: 'info', actorName: name, text: `${name} was removed from the map` });
+      broadcastCombat(key);
+    }
+  });
+
   // Context-inspector edits for generic scene objects. Object identity and
   // geometry stay immutable here; only presentation fields are patchable.
   socket.on('update-object', (payload) => {
@@ -1065,17 +1096,20 @@ io.on('connection', (socket) => {
   socket.on('delete-object', (data) => {
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
-    if (map.objects[data.id]) {
-      const wasCharacter = map.objects[data.id].type === 'character';
-      delete map.objects[data.id];
+    const id = data && data.id ? String(data.id) : '';
+    const obj = id ? map.objects[id] : null;
+    if (obj && (isGM(socket.username) || ownsObject(socket.username, obj))) {
+      const wasCharacter = obj.type === 'character';
+      delete map.objects[id];
       saveMaps();
-      if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', data));
-      else io.to(key).emit('object-deleted', data);
+      const event = { id };
+      if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', event));
+      else io.to(key).emit('object-deleted', event);
       if (wasCharacter) pushCharacterInstances();
       // A deleted token leaves the fight too.
-      if (map.combat && map.combat.combatants[data.id]) {
-        const name = map.combat.combatants[data.id].name;
-        removeCombatant(key, map.combat, data.id);
+      if (map.combat && map.combat.combatants[id]) {
+        const name = map.combat.combatants[id].name;
+        removeCombatant(key, map.combat, id);
         pushLog(key, map.combat, { kind: 'info', actorName: name, text: `${name} was removed from the map` });
         broadcastCombat(key);
       }

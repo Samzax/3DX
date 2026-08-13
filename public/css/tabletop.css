@@ -147,16 +147,14 @@ body {
 
 /* Instance rows: one placed token — who, where, spawned by; click jumps to it */
 .instance-row {
-  display: block;
+  display: flex;
+  align-items: stretch;
   width: 100%;
-  text-align: left;
   background-color: #2a2a31;
-  border: none;
+  border: 1px solid transparent;
   border-left: 5px solid #888;
   border-radius: 5px;
-  padding: 8px 10px;
   margin-bottom: 8px;
-  cursor: pointer;
   color: #fff;
   transition: background-color 0.2s;
 }
@@ -165,6 +163,37 @@ body {
 }
 .instance-row:last-child {
   margin-bottom: 0;
+}
+.instance-row-main {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}
+.instance-row-main:focus-visible,
+.instance-row-delete:focus-visible {
+  outline: 2px solid #7db7ff;
+  outline-offset: -2px;
+}
+.instance-row-delete {
+  flex: 0 0 30px;
+  align-self: stretch;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  color: #aeb4c0;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.instance-row-delete:hover {
+  background: #6a2f38;
+  color: #fff;
 }
 .inst-name { font-weight: bold; font-size: 13px; }
 .inst-loc { font-size: 11px; color: #9aa0aa; margin-top: 2px; }
