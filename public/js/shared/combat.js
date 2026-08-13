@@ -54,9 +54,49 @@ export function deriveCombatStats(char, SRD) {
         name: 'Unarmed Strike', attack: mods.str + prof,
         damage: String(Math.max(1, 1 + mods.str)), damageType: 'bludgeoning', ranged: false, rangeFt: 5
     });
+    const saveProfs = SRD.saveProficiencies(classes);
+    const saves = {};
+    for (const a of ABILITIES) saves[a] = mods[a] + (saveProfs.has(a) ? prof : 0);
+
+    const casterClass = classes.find(c => SRD.isCaster(c.class));
+    let spellAtk = 0, spellDC = 8, spells = [];
+    let slots = { 1:0,2:0,3:0,4:0,5:0,6:0,7:0,8:0,9:0 };
+    if (casterClass) {
+        const abil = SRD.spellcastingAbility(casterClass.class);
+        const cmod = (abil && mods[abil]) || 0;
+        spellAtk = prof + cmod;
+        spellDC  = 8 + prof + cmod;
+        slots = SRD.spellSlots(classes).slots;
+        const totLvl = SRD.totalLevel(classes);
+        const maxSlot = Object.keys(slots).reduce((m, l) => slots[l] > 0 ? Math.max(m, +l) : m, 0);
+        for (const idx of (char.spells || [])) {
+            const sp = SRD.get('spells', idx);
+            if (!sp || !sp.damage) continue;
+            const lvl = sp.level || 0;
+            if (lvl > 0 && lvl > maxSlot) continue;
+            let dice = null;
+            if (lvl === 0) {
+                const tbl = sp.damage.damage_at_character_level || {};
+                const ks = Object.keys(tbl).map(Number).sort((a, b) => a - b);
+                const pick = ks.filter(k => k <= totLvl).pop() ?? ks[0];
+                dice = pick != null ? tbl[pick] : null;
+            } else {
+                dice = (sp.damage.damage_at_slot_level || {})[String(lvl)] || null;
+            }
+            if (!dice) continue;
+            const damageType = ((sp.damage.damage_type && sp.damage.damage_type.name) || '').toLowerCase();
+            if (sp.attack_type) {
+                spells.push({ name: sp.name, level: lvl, attackType: sp.attack_type === 'melee' ? 'melee' : 'ranged', damage: dice, damageType });
+            } else if (sp.dc && (sp.dc.dc_success === 'half' || sp.dc.dc_success === 'none')) {
+                const saveAbility = (sp.dc.dc_type && sp.dc.dc_type.index) || 'dex';
+                spells.push({ name: sp.name, level: lvl, saveAbility, saveSuccess: sp.dc.dc_success, damage: dice, damageType });
+            }
+        }
+        spells = spells.slice(0, 20).map((s, i) => ({ ...s, spellIndex: i }));
+    }
     return {
         ac: acInfo.ac, speedFeet: SRD.speed(char.race), initMod: mods.dex,
-        maxHP: SRD.maxHP(classes, mods.con), attacks
+        maxHP: SRD.maxHP(classes, mods.con), attacks, saves, spellAtk, spellDC, slots, spells
     };
 }
 
@@ -65,7 +105,7 @@ function cssColor(c) {
     return String(c || '#dd4444');
 }
 
-const LOG_ICONS = { info: '•', initiative: '🎲', attack: '⚔', action: '✦', turn: '▶', damage: '💥' };
+const LOG_ICONS = { info: '•', initiative: '🎲', attack: '⚔', cast: '✨', action: '✦', turn: '▶', damage: '💥' };
 
 // --- Initiative tracker + combat log -----------------------------------------
 // One instance per screen. setState(combat|null) re-renders everything;
@@ -73,15 +113,17 @@ const LOG_ICONS = { info: '•', initiative: '🎲', attack: '⚔', action: '✦
 // delegated through data-act attributes; the page supplies onPickTarget to run
 // its 3D target-pick flow when an attack button is pressed.
 export class CombatTracker {
-    constructor({ container, socket, isGM, username, onPickTarget, getMapObjects }) {
+    constructor({ container, socket, isGM, username, onPickTarget, onFocusCombatant, getMapObjects }) {
         this.container = container;
         this.socket = socket;
         this.isGM = !!isGM;
         this.username = username;
         this.onPickTarget = onPickTarget || (() => {});
+        this.onFocusCombatant = onFocusCombatant || (() => {});
         this.getMapObjects = getMapObjects || (() => []);
         this.state = null;
         this.flashTimer = null;
+        this.logOpen = false;
         container.classList.add('combat-tracker');
         container.addEventListener('click', (e) => this.onClick(e));
         container.addEventListener('change', (e) => this.onChange(e));
@@ -89,11 +131,32 @@ export class CombatTracker {
 
     canControl(c) { return this.isGM || (!!c.owner && c.owner === this.username); }
 
+    displayName(c) {
+        const object = this.getMapObjects().find(candidate => candidate.id === c.id);
+        return (object && object.name) || c.name;
+    }
+
     setState(combat) {
         this.state = combat;
         if (!combat) { this.container.classList.add('hidden'); this.container.innerHTML = ''; return; }
         this.container.classList.remove('hidden');
         this.render();
+        if (combat.activeId) {
+            const activeId = String(combat.activeId);
+            requestAnimationFrame(() => {
+                const row = [...this.container.querySelectorAll('[data-row]')]
+                    .find(candidate => candidate.dataset.row === activeId);
+                const scroller = this.container.querySelector('.ct-rows');
+                const center = () => {
+                    if (!row || !scroller || String(this.state?.activeId) !== activeId) return;
+                    scroller.scrollLeft = row.offsetLeft - (scroller.clientWidth - row.offsetWidth) / 2;
+                };
+                center();
+                // The active card widens with a short CSS transition; center it
+                // once more after that transition so its actions never clip.
+                setTimeout(center, 220);
+            });
+        }
     }
 
     appendLog(entry) {
@@ -133,9 +196,16 @@ export class CombatTracker {
 
     rowHTML(c, idx) {
         const s = this.state;
+        const displayName = this.displayName(c);
         const active = s.started && s.activeId === c.id;
         const mine = this.canControl(c);
         const hp = c.hp ? `${c.hp.current}/${c.maxHP}` : `—/${c.maxHP}`;
+        const hpCurrent = c.hp && typeof c.hp.current === 'number' ? c.hp.current : c.maxHP;
+        const hpPct = Math.max(0, Math.min(100, Math.round((hpCurrent / Math.max(1, c.maxHP)) * 100)));
+        const moveTotal = Math.max(0, c.speedFeet + c.dashFeet);
+        const movePct = moveTotal > 0
+            ? Math.max(0, Math.min(100, Math.round((remainingFeet(c) / moveTotal) * 100)))
+            : 0;
         const badges = (c.effects || []).map(e => {
             const glyph = (EFFECTS[e.key] && EFFECTS[e.key].glyph) || '●';
             const rm = this.isGM ? ` data-act="fx-remove" data-id="${escHtml(c.id)}" data-key="${escHtml(e.key)}"` : '';
@@ -153,6 +223,16 @@ export class CombatTracker {
             if (!c.actionUsed) {
                 buttons += (c.attacks || []).map((a, i) =>
                     `<button class="btn-combat atk" data-act="attack" data-id="${escHtml(c.id)}" data-atk="${i}" title="${fmtMod(a.attack)} to hit · ${escHtml(a.damage)} ${escHtml(a.damageType)}">⚔ ${escHtml(a.name)}</button>`).join('');
+                if (c.spells && c.spells.length) {
+                    buttons += `<button class="btn-combat" data-act="cast-menu" data-id="${escHtml(c.id)}">✨ Cast</button>`
+                        + `<span data-cast-menu="${escHtml(c.id)}" hidden>`
+                        + c.spells.map((spell, i) => {
+                            const disabled = spell.level > 0 && (c.slots?.[spell.level] || 0) < 1 ? ' disabled' : '';
+                            const level = spell.level === 0 ? 'Cantrip' : `L${spell.level}`;
+                            return `<button class="btn-combat" data-act="cast" data-id="${escHtml(c.id)}" data-spell="${i}"${disabled}>${escHtml(spell.name)} — ${level} · ${escHtml(spell.damage)} ${escHtml(spell.damageType)}</button>`;
+                        }).join('')
+                        + `</span>`;
+                }
                 buttons += `<button class="btn-combat" data-act="dash" data-id="${escHtml(c.id)}">💨 Dash</button>`
                     + `<button class="btn-combat" data-act="dodge" data-id="${escHtml(c.id)}">🛡 Dodge</button>`
                     + `<button class="btn-combat" data-act="disengage" data-id="${escHtml(c.id)}">↪ Disengage</button>`;
@@ -177,16 +257,20 @@ export class CombatTracker {
         }
 
         const initVal = c.initiative == null ? '—' : String(c.initiative);
-        return `<div class="combat-row${active ? ' active' : ''}${c.statsPending ? ' pending' : ''}" data-row="${escHtml(c.id)}">
+        return `<div class="combat-row${active ? ' active' : ''}${mine ? ' mine' : ''}${c.statsPending ? ' pending' : ''}" data-row="${escHtml(c.id)}"${active ? ' aria-current="true"' : ''}>
             <div class="cr-main">
                 <span class="cr-marker">${active ? '▶' : (s.started ? (idx + 1) : '')}</span>
-                <span class="cr-name" style="border-left-color:${cssColor(c.color)}">${escHtml(c.name)}${c.statsPending ? ' <span class="tag">…stats</span>' : ''}</span>
+                <button class="cr-name cr-focus" data-act="focus" data-id="${escHtml(c.id)}" style="border-left-color:${cssColor(c.color)}" title="Focus ${escHtml(displayName)} on the map">${escHtml(displayName)}${c.statsPending ? ' <span class="tag">…stats</span>' : ''}</button>
                 <span class="cr-init" title="Initiative">🎲 ${this.isGM ? `<span class="ce" data-act="edit" data-id="${escHtml(c.id)}" data-field="initiative">${escHtml(initVal)}</span>` : escHtml(initVal)}</span>
                 <span class="cr-stat" title="Armor Class">AC ${ed('ac', c.ac, 'Armor Class')}</span>
                 <span class="cr-stat" title="Hit Points">HP ${ed('hp', hp, 'Hit Points (cur or cur/max)')}</span>
                 <span class="cr-stat" title="Speed">${ed('speed', c.speedFeet, 'Speed (feet)')} ft</span>
                 ${active ? `<span class="cr-move" title="Movement left this turn">${remainingFeet(c)} ft left</span>` : ''}
                 ${badges}
+                <span class="cr-progress" aria-hidden="true">
+                    <span class="cr-progress-track" title="HP ${hp}"><span style="--progress:${hpPct}%"></span></span>
+                    <span class="cr-progress-track move" title="${remainingFeet(c)} feet of movement left"><span style="--progress:${movePct}%"></span></span>
+                </span>
             </div>
             ${buttons || gmTools ? `<div class="cr-actions">${buttons}${gmTools}</div>` : ''}
         </div>`;
@@ -204,6 +288,7 @@ export class CombatTracker {
                 : `<button class="btn-combat" data-act="gm-begin" title="Auto-rolls missing initiative">Begin ▶</button>`)
                 + `<button class="btn-combat danger" data-act="gm-end">End Combat</button>`;
         }
+        const logToggle = `<button class="btn-combat" data-act="toggle-log" aria-pressed="${this.logOpen}">${this.logOpen ? 'Hide log' : `Log (${(s.log || []).length})`}</button>`;
         const rows = order.map((id, i) => this.rowHTML(s.combatants[id], i)).join('')
             || '<p class="muted">No combatants.</p>';
         let gmAdd = '';
@@ -218,11 +303,11 @@ export class CombatTracker {
         }
         const log = (s.log || []).map(l => this.logLineHTML(l)).join('');
         this.container.innerHTML = `
-            <div class="ct-header"><span class="ct-title">⚔ ${escHtml(title)}</span><span class="ct-btns">${gmHeader}</span></div>
+            <div class="ct-header"><span class="ct-title">⚔ ${escHtml(title)}</span><span class="ct-btns">${logToggle}${gmHeader}</span></div>
             <div class="combat-flash"></div>
             <div class="ct-rows">${rows}</div>
             ${gmAdd ? `<div class="ct-footer">${gmAdd}</div>` : ''}
-            <div class="combat-log">${log}</div>`;
+            <div class="combat-log${this.logOpen ? '' : ' hidden'}">${log}</div>`;
         const logEl = this.container.querySelector('.combat-log');
         if (logEl) logEl.scrollTop = logEl.scrollHeight;
     }
@@ -240,9 +325,30 @@ export class CombatTracker {
             case 'attack': {
                 const c = this.state && this.state.combatants[id];
                 const i = Number(btn.dataset.atk);
-                if (c && c.attacks[i]) this.onPickTarget(id, i, c.attacks[i]);
+                if (c && c.attacks[i]) this.onPickTarget(id, i, c.attacks[i], 'attack');
                 break;
             }
+            case 'cast-menu': {
+                const row = btn.closest('[data-row]');
+                const menu = row && row.querySelector('[data-cast-menu]');
+                if (menu) menu.hidden = !menu.hidden;
+                break;
+            }
+            case 'cast': {
+                const c = this.state && this.state.combatants[id];
+                const i = Number(btn.dataset.spell);
+                if (c && c.spells && c.spells[i] && !btn.disabled) {
+                    const menu = btn.closest('[data-cast-menu]');
+                    if (menu) menu.hidden = true;
+                    this.onPickTarget(id, i, c.spells[i], 'cast');
+                }
+                break;
+            }
+            case 'toggle-log':
+                this.logOpen = !this.logOpen;
+                this.render();
+                break;
+            case 'focus': this.onFocusCombatant(id); break;
             case 'set-turn': emit('combat-set-turn', { combatantId: id }); break;
             case 'remove': emit('combat-remove-combatant', { combatantId: id }); break;
             case 'move-up': case 'move-down': {

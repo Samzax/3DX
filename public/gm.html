@@ -6,6 +6,7 @@
     <title>3D Virtual Tabletop (Mestre - Sincronizado)</title>
     <link rel="stylesheet" href="/css/tabletop.css">
     <link rel="stylesheet" href="/css/gm.css">
+    <link rel="stylesheet" href="/css/workspace.css">
 
     <!-- Import Map for Three.js (must stay inline) -->
     <script type="importmap">
@@ -39,10 +40,35 @@
     <!-- This container holds the 3D scene -->
     <div id="scene-container"></div>
 
+    <!-- Shared tabletop shell: location and role stay stable while tools change. -->
+    <header id="workspace-topbar">
+        <div class="workspace-brand">
+            <span class="workspace-logo">3D</span>
+            <span class="workspace-product">3DX Tabletop</span>
+            <span class="workspace-role">Game Master</span>
+        </div>
+        <div class="workspace-context">
+            <span id="workspace-mode" class="workspace-mode">Explore</span>
+            <div id="workspace-location-label" class="workspace-location">World</div>
+        </div>
+        <div class="workspace-actions">
+            <span id="workspace-user" class="workspace-user">GM</span>
+            <button class="workspace-top-button workspace-optional-action" data-workspace-studio="/" data-workspace-studio-title="Character Studio">Studio</button>
+            <button id="btn-workspace-library" class="workspace-top-button" data-workspace-open="object-menu" data-workspace-title="Library">Library</button>
+            <button id="btn-workspace-encounter" class="workspace-top-button" aria-expanded="false">Encounter</button>
+            <button id="btn-workspace-help" class="workspace-top-button workspace-help-button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+        </div>
+    </header>
+
     <!-- --- Tool Menu (Left) --- -->
     <div id="tool-menu">
+        <div class="workspace-rail-label">Create</div>
+        <button id="btn-tool-library" class="tool-button" data-label="Library" title="Objects and characters (L)">
+            <span class="workspace-library-icon">+</span>
+        </button>
+        <div class="workspace-rail-label">Map</div>
         <div id="tool-move-wrapper" style="position: relative;">
-            <button id="btn-tool-move" class="tool-button" title="Move Tool (Hold for options)">
+            <button id="btn-tool-move" class="tool-button" data-label="Move" title="Move Tool (M · hold for options)">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
             </button>
             <div id="move-submenu">
@@ -53,7 +79,7 @@
             </div>
         </div>
 
-        <button id="btn-tool-ruler" class="tool-button" title="Ruler Tool (Hold for options)">
+        <button id="btn-tool-ruler" class="tool-button" data-label="Measure" title="Ruler Tool (R · hold for options)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="21" x2="21" y2="3"></line><path d="M11.5 12.5l3 3"></path><path d="M8.5 15.5l3 3"></path><path d="M5.5 18.5l3 3"></path><path d="M12.5 11.5l3-3"></path><path d="M15.5 8.5l3-3"></path><path d="M18.5 5.5l3-3"></path></svg>
         </button>
         <div id="ruler-submenu" class="tool-submenu">
@@ -73,21 +99,37 @@
             </div>
         </div>
 
-        <button id="btn-tool-terrain" class="tool-button" title="Terrain (tactical maps only)">
+        <div class="workspace-rail-label">World</div>
+        <button id="btn-tool-terrain" class="tool-button" data-label="Terrain" title="Terrain (T · tactical maps only)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20l5-9 4 5 3-4 6 8z"></path></svg>
         </button>
 
-        <button id="btn-tool-build" class="tool-button" title="Build: tile-brush walls &amp; floors (tactical maps only)">
+        <button id="btn-tool-build" class="tool-button" data-label="Build" title="Build (B): tile-brush walls &amp; floors on tactical maps">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1"></rect><path d="M3 9.3h18M3 14.6h18M9 4v5.3M15 9.3v5.3M9 14.6V20"></path></svg>
         </button>
 
-        <button id="btn-tool-fog" class="tool-button" title="Fog of war: reveal/hide world regions to players (unified world)">
+        <button id="btn-tool-fog" class="tool-button" data-label="Fog" title="Fog of war (G): reveal/hide world regions to players">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 17a4.5 4.5 0 1 0-1.1-8.86A6 6 0 1 0 6 14.5"></path><path d="M3 20h13M7 23h9"></path></svg>
         </button>
 
-        <button id="btn-tool-view" class="tool-button" title="View: steer player cameras (bring to your view, send to a point or token, lock)">
+        <button id="btn-tool-view" class="tool-button" data-label="Direct" title="Direct players (V): send cameras to a point, token, or your view">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
         </button>
+    </div>
+
+    <!-- Existing tool panels are adopted into this single context inspector. -->
+    <aside id="workspace-inspector" aria-label="Context inspector">
+        <div class="workspace-inspector-header">
+            <div><span class="workspace-inspector-kicker">Inspector</span><span id="workspace-inspector-title">Library</span></div>
+            <button id="workspace-inspector-close" title="Close inspector" aria-label="Close inspector">&times;</button>
+        </div>
+        <div id="workspace-inspector-body"></div>
+    </aside>
+
+    <!-- Filled from the selected scene object. It occupies the same inspector
+         as tools, so selection never creates another floating window. -->
+    <div id="selection-panel" class="hidden" aria-live="polite">
+        <div id="selection-content"></div>
     </div>
 
     <!-- --- Terrain editor panel (shown when the Terrain tool is active on a tactical map) --- -->
@@ -191,7 +233,7 @@
         <button id="view-bring" class="tp-send" title="Send their camera to exactly what you see now">Bring to my view</button>
         <button id="view-release" class="tp-release" title="Give locked players their camera back">Release lock</button>
         <div id="view-status"></div>
-        <div class="tp-hint">Steers the selected players' cameras. Works on the world and in pockets (only players in the same space are reached). Very long jumps snap even in fly mode.</div>
+        <div class="tp-hint">Point and Token steer selected players already in this space. Bring to my view also moves them to your world tier or pocket. Very long jumps snap even in fly mode.</div>
     </div>
 
     <!-- --- Biome palette (terrain tool on hex layers: paint hexes) --- -->
@@ -240,17 +282,37 @@
         </div>
     </div>
 
-    <!-- --- Combat panel (bottom-right): start button + initiative tracker --- -->
-    <div id="combat-panel">
-        <button id="btn-combat-toggle" class="menu-button">⚔ Start Combat</button>
-        <div id="combat-tracker" class="hidden"></div>
-    </div>
+    <!-- Encounter is a workspace dock instead of a detached floating window. -->
+    <section id="encounter-dock" class="is-collapsed" aria-label="Encounter workspace">
+        <div class="workspace-dock-bar">
+            <span class="workspace-dock-title">Encounter</span>
+            <span id="workspace-encounter-label" class="workspace-dock-status">Ready to start</span>
+            <button id="workspace-dock-collapse" aria-expanded="false">Show</button>
+        </div>
+        <div class="workspace-dock-content">
+            <div id="combat-panel">
+                <button id="btn-combat-toggle" class="menu-button">Start Encounter</button>
+                <div id="combat-tracker" class="hidden"></div>
+            </div>
+        </div>
+    </section>
 
     <!-- --- Ruler Tooltip --- -->
     <div id="ruler-tooltip">0 ft</div>
 
     <!-- --- Status hint bar (bottom-center): live mouse/keyboard bindings --- -->
     <div id="hint-bar"></div>
+
+    <!-- Character creation and homebrew stay inside the tabletop context. -->
+    <div id="workspace-studio" class="hidden" aria-hidden="true">
+        <div class="workspace-studio-shell">
+            <div class="workspace-studio-header">
+                <span id="workspace-studio-title">Character Studio</span>
+                <button id="workspace-studio-close" title="Return to tabletop" aria-label="Return to tabletop">&times;</button>
+            </div>
+            <iframe id="workspace-studio-frame" title="Character Studio"></iframe>
+        </div>
+    </div>
 
     <script type="module" src="/js/pages/gm.js"></script>
 </body>

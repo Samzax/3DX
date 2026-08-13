@@ -6,6 +6,7 @@
     <title>3D VTT - Player Screen</title>
     <link rel="stylesheet" href="/css/tabletop.css">
     <link rel="stylesheet" href="/css/player.css">
+    <link rel="stylesheet" href="/css/workspace.css">
 
     <!-- Import Map for Three.js (must stay inline) -->
     <script type="importmap">
@@ -40,10 +41,30 @@
     <!-- This container holds the 3D scene -->
     <div id="scene-container"></div>
 
+    <header id="workspace-topbar">
+        <div class="workspace-brand">
+            <span class="workspace-logo">3D</span>
+            <span class="workspace-product">3DX Tabletop</span>
+            <span class="workspace-role">Player</span>
+        </div>
+        <div class="workspace-context">
+            <span id="workspace-mode" class="workspace-mode">Explore</span>
+            <span id="workspace-location-label" class="workspace-location">Shared world</span>
+        </div>
+        <div class="workspace-actions">
+            <span id="workspace-user" class="workspace-user"></span>
+            <button class="workspace-top-button workspace-optional-action" data-workspace-studio="/" data-workspace-studio-title="Character Studio">Studio</button>
+            <button id="btn-workspace-characters" class="workspace-top-button" data-workspace-open="character-menu" data-workspace-title="Characters">Characters</button>
+            <button id="btn-workspace-encounter" class="workspace-top-button hidden" aria-expanded="false">Encounter</button>
+            <button id="btn-workspace-help" class="workspace-top-button workspace-help-button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+        </div>
+    </header>
+
     <!-- --- Tool Menu (Left) --- -->
     <div id="tool-menu">
+        <div class="workspace-rail-label">Map</div>
         <div id="tool-move-wrapper" style="position: relative;">
-            <button id="btn-tool-move" class="tool-button" title="Move Tool (Hold for options)">
+            <button id="btn-tool-move" class="tool-button" data-label="Move" title="Move Tool (M · hold for options)">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
             </button>
             <div id="move-submenu">
@@ -54,7 +75,7 @@
             </div>
         </div>
 
-        <button id="btn-tool-ruler" class="tool-button" title="Ruler Tool (Hold for options)">
+        <button id="btn-tool-ruler" class="tool-button" data-label="Measure" title="Ruler Tool (R · hold for options)">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="21" x2="21" y2="3"></line><path d="M11.5 12.5l3 3"></path><path d="M8.5 15.5l3 3"></path><path d="M5.5 18.5l3 3"></path><path d="M12.5 11.5l3-3"></path><path d="M15.5 8.5l3-3"></path><path d="M18.5 5.5l3-3"></path></svg>
         </button>
         <div id="ruler-submenu" class="tool-submenu">
@@ -71,6 +92,21 @@
                 <button id="btn-ruler-snap-corner" class="menu-button">Snap: Corner</button>
             </div>
         </div>
+    </div>
+
+    <!-- Character library and sheet tabs share one context inspector. -->
+    <aside id="workspace-inspector" aria-label="Character inspector">
+        <div class="workspace-inspector-header">
+            <div><span class="workspace-inspector-kicker">Character</span><span id="workspace-inspector-title">Characters</span></div>
+            <button id="workspace-inspector-close" title="Close inspector" aria-label="Close inspector">&times;</button>
+        </div>
+        <div id="workspace-inspector-nav"></div>
+        <div id="workspace-inspector-body"></div>
+    </aside>
+
+    <!-- Read-only for other creatures; owned characters open their full sheet. -->
+    <div id="selection-panel" class="hidden" aria-live="polite">
+        <div id="selection-content"></div>
     </div>
 
     <!-- --- Character Menu (Right): Spawn tab places your characters, Instances
@@ -97,15 +133,25 @@
 
     <!-- --- Player HUD (Bottom) --- -->
     <div id="player-hud">
+        <button class="hud-button active" data-panel="character-menu">Library</button>
         <button class="hud-button" data-panel="char-panel">Character</button>
         <button class="hud-button" data-panel="inv-panel">Inventory</button>
         <button class="hud-button" data-panel="spells-panel">Spells</button>
         <button class="hud-button" data-panel="actions-panel">Actions</button>
-        <button class="hud-button end-turn hidden" id="btn-end-turn">■ End Turn</button>
     </div>
 
-    <!-- --- Combat: initiative tracker + log (bottom-right, shown in combat) --- -->
-    <div id="combat-tracker" class="hidden"></div>
+    <!-- Encounter lives in a shared bottom dock. -->
+    <section id="encounter-dock" class="hidden is-collapsed" aria-label="Encounter workspace">
+        <div class="workspace-dock-bar">
+            <span class="workspace-dock-title">Encounter</span>
+            <span id="workspace-encounter-label" class="workspace-dock-status">Waiting for the GM</span>
+            <button class="hud-button end-turn hidden" id="btn-end-turn">End Turn</button>
+            <button id="workspace-dock-collapse" aria-expanded="false">Show</button>
+        </div>
+        <div class="workspace-dock-content">
+            <div id="combat-tracker" class="hidden"></div>
+        </div>
+    </section>
 
     <!-- --- HUD Panel Modals --- -->
     <div id="hud-panel-overlay" class="hidden">
@@ -136,6 +182,18 @@
             <h3>Actions</h3>
             <div id="actions-content"><p class="muted">No character loaded.</p></div>
             <button class="close-panel-btn">Close</button>
+        </div>
+    </div>
+
+    <div id="hint-bar"></div>
+
+    <div id="workspace-studio" class="hidden" aria-hidden="true">
+        <div class="workspace-studio-shell">
+            <div class="workspace-studio-header">
+                <span id="workspace-studio-title">Character Studio</span>
+                <button id="workspace-studio-close" title="Return to tabletop" aria-label="Return to tabletop">&times;</button>
+            </div>
+            <iframe id="workspace-studio-frame" title="Character Studio"></iframe>
         </div>
     </div>
 

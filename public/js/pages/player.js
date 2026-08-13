@@ -9,13 +9,15 @@ import { Terrain } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, CameraFly, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
-import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
+import { buildObjectFromData, applyMove } from '../shared/models.js';
 import { tickRigCharacters } from '../shared/charmesh.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { setupLoginModal } from '../shared/login.js';
-import { CombatTracker, CombatOverlays, deriveCombatStats, remainingFeet } from '../shared/combat.js';
+import { CombatTracker, CombatOverlays, deriveCombatStats, remainingFeet, EFFECTS } from '../shared/combat.js';
 import { FogMask, FogOverlay, chunkFogHexKey } from '../shared/fog.js';
+import { createTabletopWorkspace } from '../shared/workspace.js';
+import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData } from '../shared/object-ui.js';
 
 let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
 let grass = null;   // instanced ground-cover grass (shared/grass.js)
@@ -36,14 +38,20 @@ let selectedObject = null;
 
 let socket = null; // created on login
 let myUsername = null;
+let workspace = null;
+let objectNameplates = null;
+let selectionReturnContext = null;
+let selectionOwnsInspector = false;
 
 // --- Combat mode (server-authoritative, synced via combat-updated) ---
 let combatState = null;
 let combatTracker = null;
 let pendingAttack = null;       // { combatantId, attackIndex } while picking a target
+let pendingSpell = null;        // { combatantId, spellIndex } while picking a target
 let dragStartPos = null;        // selected token's world position when the move began
 let combatOverlays = null;      // turn/range rings + effect badges (created in init)
 let closeAllPanels = () => {};  // assigned in init (needs the HUD overlay refs)
+let showCharacterPanel = () => {}; // assigned in init; shared by cards + tabs
 
 let currentTool = null;
 let currentMoveMode = 'standard';
@@ -55,6 +63,7 @@ let isDraggingHeight = false;
 let placeCharacter = null; // character being placed (place tool armed via the right menu)
 let characterInstances = []; // my placed tokens across all maps (Instances tab), server-pushed
 let pendingFocus = null;     // world position to jump to once the next map-state lands
+let pendingViewPose = null;  // GM-directed camera pose to apply after a relocate join
 
 let rulerSubMenu, rulerSubMenuButtons = {};
 let rulerSnapSubMenuButtons = {};
@@ -75,8 +84,36 @@ let cameraFly = null;        // created in init
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
 function init() {
+    workspace = createTabletopWorkspace({
+        panels: {
+            'character-menu': { title: 'Characters', kicker: 'Your roster' },
+            'selection-panel': { title: 'Selection', kicker: 'Map object' },
+            'hud-panel-overlay': { title: 'Character', kicker: 'Character' }
+        },
+        defaultPanel: 'character-menu',
+        dockVisible: false,
+        onInspectorClose: () => {
+            if (selectionOwnsInspector && ['selection-panel', 'hud-panel-overlay'].includes(workspace?.currentPanel())) {
+                selectionReturnContext = null;
+                selectionOwnsInspector = false;
+            }
+            if (workspace) workspace.setMode({ move: 'Move', ruler: 'Measure', place: 'Place' }[currentTool] || 'Explore');
+        },
+        shortcuts: [
+            { key: 'M', label: 'Move your selected character' },
+            { key: 'R', label: 'Measure distance' },
+            { key: 'C', label: 'Open your character library' },
+            { key: 'A', label: 'Open character actions' },
+            { key: 'E', label: 'Show or hide the encounter dock' },
+            { key: '.', label: 'Focus the selected token' },
+            { key: 'Esc', label: 'Cancel placement, targeting or selection' },
+            { key: '?', label: 'Show this shortcut reference' }
+        ]
+    });
+
     ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup } =
         createTabletopScene(document.getElementById('scene-container')));
+    objectNameplates = new ObjectNameplates();
 
     // Tactical terrain (GM-authored heightmap + water); hidden until a terrain arrives.
     terrain = new Terrain();
@@ -167,25 +204,39 @@ function init() {
     const hudButtons = document.querySelectorAll('#player-hud .hud-button');
     const closeButtons = document.querySelectorAll('.close-panel-btn');
 
-    hudButtons.forEach(button => {
-        button.addEventListener('click', () => {
-            const panelId = button.dataset.panel;
-            document.querySelectorAll('.hud-panel').forEach(p => p.classList.add('hidden'));
+    showCharacterPanel = (panelId) => {
+        // Character work supersedes an armed placement gesture. Other map
+        // tools remain selected underneath and resume when the inspector closes.
+        if (currentTool === 'place') {
+            placeCharacter = null;
+            currentTool = null;
+            for (const key in toolMenuButtons) toolMenuButtons[key].classList.remove('active');
+            syncCharacterMenuActive();
+        }
+        if (workspace) workspace.setMode(panelId === 'character-menu' ? 'Characters' : 'Character');
+        renderHUD(); // refresh sheet from latest character data
+        document.querySelectorAll('.hud-panel').forEach(p => p.classList.add('hidden'));
+        hudButtons.forEach(button => button.classList.toggle('active', button.dataset.panel === panelId));
 
-            renderHUD(); // refresh sheet from latest character data
+        if (panelId === 'character-menu') {
+            hudOverlay.style.display = 'none';
+            if (workspace) workspace.showPanel('character-menu', 'Characters');
+            return;
+        }
 
-            // Show overlay: must drop the `hidden` class (display:none !important)
-            // AND set display, since the class would otherwise override the inline style.
-            hudOverlay.classList.remove('hidden');
-            hudOverlay.style.display = 'flex';
-            document.getElementById(panelId).classList.remove('hidden');
-        });
-    });
+        const panel = document.getElementById(panelId);
+        if (!panel) return;
+        hudOverlay.style.display = 'flex';
+        if (workspace) workspace.showPanel('hud-panel-overlay', panel.querySelector('h3')?.textContent || 'Character');
+        panel.classList.remove('hidden');
+    };
+
+    hudButtons.forEach(button => button.addEventListener('click', () => showCharacterPanel(button.dataset.panel)));
+    const topCharacters = document.getElementById('btn-workspace-characters');
+    if (topCharacters) topCharacters.addEventListener('click', () => showCharacterPanel('character-menu'));
 
     closeAllPanels = function () {
-        hudOverlay.classList.add('hidden');
-        hudOverlay.style.display = 'none';
-        document.querySelectorAll('.hud-panel').forEach(p => p.classList.add('hidden'));
+        if (workspace) workspace.closeInspector();
     };
 
     document.getElementById('btn-end-turn').addEventListener('click', () => {
@@ -193,9 +244,7 @@ function init() {
     });
 
     closeButtons.forEach(btn => btn.addEventListener('click', closeAllPanels));
-    hudOverlay.addEventListener('click', (e) => {
-        if (e.target === hudOverlay) closeAllPanels();
-    });
+    updatePlayerHintBar();
 
     // Headless-testing handle (mirrors gm.js __dbg; socket attaches on login).
     window.__dbg = { terrain, scene, camera, controls, worldGroup, fogMask, cameraFly };
@@ -268,6 +317,11 @@ function onPointerDown(event) {
 
     if (isDraggingHeight) {
         isDraggingHeight = false;
+        if (selectedObject && playerOwnsObject(selectedObject) && selectedObject.userData.syncId && socket) {
+            const position = { x: selectedObject.position.x, y: selectedObject.position.y, z: selectedObject.position.z };
+            updateObjectPositionData(selectedObject);
+            socket.emit('move-object', { id: selectedObject.userData.syncId, position });
+        }
         deselectObject();
         return;
     }
@@ -301,21 +355,44 @@ function onPointerDown(event) {
             combatTracker.flash('Attack cancelled — that was not a combatant');
         }
         pendingAttack = null;
+        updatePlayerHintBar();
+        return;
+    }
+    if (pendingSpell) {
+        const targetId = clickedObject && clickedObject.userData.syncId;
+        if (targetId && combatState && combatState.combatants[targetId] && socket) {
+            socket.emit('combat-action', {
+                combatantId: pendingSpell.combatantId, kind: 'cast',
+                spellIndex: pendingSpell.spellIndex, targetId
+            });
+        } else if (combatTracker) {
+            combatTracker.flash('Spell cancelled — that was not a combatant');
+        }
+        pendingSpell = null;
+        updatePlayerHintBar();
         return;
     }
 
     if (clickedObject && !buildAsGround) {
         // Combat: combatant tokens are locked to their owner, on their turn.
-        const deny = combatSelectDenied(clickedObject);
-        if (deny) { if (combatTracker) combatTracker.flash(deny); return; }
+        const deny = currentTool === 'move' ? combatSelectDenied(clickedObject) : null;
+        if (deny) {
+            selectObject(clickedObject, { openInspector: true });
+            if (combatTracker) combatTracker.flash(deny);
+            return;
+        }
+        if (currentTool === 'move' && !playerOwnsObject(clickedObject)) {
+            selectObject(clickedObject, { openInspector: true });
+            return;
+        }
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
-            selectObject(clickedObject);
+            selectObject(clickedObject, { openInspector: false });
             isDraggingHeight = true;
         } else {
             if (selectedObject === clickedObject) {
                 deselectObject();
             } else {
-                selectObject(clickedObject);
+                selectObject(clickedObject, { openInspector: currentTool !== 'move' });
             }
         }
     } else if (firstIntersect.object.name === "tabletop" || buildAsGround) {
@@ -323,11 +400,14 @@ function onPointerDown(event) {
 
         switch (currentTool) {
             case 'move':
-                if (selectedObject) {
+                if (selectedObject && playerOwnsObject(selectedObject)) {
                     // Emit the move to the server (shared map)
                     const docId = selectedObject.userData.syncId;
                     if (docId && socket) {
                         const finalPosition = snapToGrid(selectedObject.position);
+                        selectedObject.position.x = finalPosition.x;
+                        selectedObject.position.z = finalPosition.z;
+                        updateObjectPositionData(selectedObject);
                         socket.emit('move-object', {
                             id: docId,
                             position: {
@@ -339,6 +419,8 @@ function onPointerDown(event) {
                     }
                     focusCameraOn(selectedObject.position);
                     deselectObject();
+                } else if (selectedObject) {
+                    deselectObject();
                 }
                 break;
             case 'ruler':
@@ -346,6 +428,9 @@ function onPointerDown(event) {
                 break;
             case 'place':
                 placeCharacterAt(intersectPoint);
+                break;
+            default:
+                if (selectedObject) deselectObject();
                 break;
         }
     }
@@ -369,7 +454,7 @@ function onPointerMove(event) {
     if (intersects.length === 0) return;
     const intersectPoint = sceneToWorld(intersects[0].point);
 
-    if (currentTool === 'move' && selectedObject) {
+    if (currentTool === 'move' && selectedObject && playerOwnsObject(selectedObject)) {
         // Players keep the object's current height, clamped above the ground.
         applyMove(selectedObject, snapToGrid(intersectPoint), currentMoveMode,
             (x, z, halfHeight, currentY) => Math.max(currentY, halfHeight));
@@ -426,11 +511,30 @@ function onContextMenu(event) {
 }
 
 function onKeyDown(event) {
+    const tag = event.target && event.target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || event.target?.isContentEditable) return;
+
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat) {
+        const key = event.key.toLowerCase();
+        if (key === 'm') { event.preventDefault(); setMoveMode('standard'); return; }
+        if (key === 'r') { event.preventDefault(); setRulerMode(ruler.mode); return; }
+        if (key === 'c') { event.preventDefault(); showCharacterPanel('character-menu'); return; }
+        if (key === 'a') { event.preventDefault(); showCharacterPanel('actions-panel'); return; }
+        if (key === 'e') { event.preventDefault(); workspace?.toggleDock(); return; }
+        if (event.key === '.' && selectedObject) { event.preventDefault(); jumpCameraTo(selectedObject.position); return; }
+    }
+
     // No delete for players
     if (event.key === "Escape") {
         if (pendingAttack) {
             pendingAttack = null;
             if (combatTracker) combatTracker.flash('Attack cancelled');
+            updatePlayerHintBar();
+            return;
+        } else if (pendingSpell) {
+            pendingSpell = null;
+            if (combatTracker) combatTracker.flash('Spell cancelled');
+            updatePlayerHintBar();
             return;
         }
         if (currentTool === 'place') {
@@ -443,6 +547,27 @@ function onKeyDown(event) {
         } else if (selectedObject) {
             deselectObject();
         }
+    }
+}
+
+function updatePlayerHintBar() {
+    const bar = document.getElementById('hint-bar');
+    if (!bar) return;
+    const cam = 'RMB orbit · MMB pan · wheel zoom';
+    if (pendingAttack || pendingSpell) {
+        bar.textContent = `Pick a combat target · click a token · Esc cancel · ${cam}`;
+    } else if (currentTool === 'place' && placeCharacter) {
+        bar.textContent = `Place ${placeCharacter.name || 'character'} · click the ground · Esc cancel · ${cam}`;
+    } else if (currentTool === 'move') {
+        bar.textContent = selectedObject && playerOwnsObject(selectedObject)
+            ? `Move ${objectIdentity(selectedObject, objects).displayName} · click the ground to drop · ${cam}`
+            : `Move · click one of your character tokens · ${cam}`;
+    } else if (currentTool === 'ruler') {
+        bar.textContent = `Measure · click to add points · right-click restart · Esc cancel · ${cam}`;
+    } else if (selectedObject) {
+        bar.textContent = `${objectIdentity(selectedObject, objects).displayName} selected · . focus · Esc clear · ${cam}`;
+    } else {
+        bar.textContent = `Click a token to inspect · C characters · M move · R measure · ${cam}`;
     }
 }
 
@@ -463,23 +588,28 @@ function setViewLock(locked) {
 }
 
 // --- Character menu (right): place your own character on the map ---
-function myTokenFor(charId) {
-    return objects.find(o => o.userData.characterData && o.userData.characterData.id === charId);
-}
-
-// Click a character button: arm the place tool with it (click again to cancel);
-// if its token is already on this map, jump the camera to it instead.
+// Click a character button: select it for the HUD and arm placement for a new
+// token instance (click again to cancel). Spawn selection is deliberately
+// camera-neutral; the Instances tab is the explicit "jump to token" control.
 function armPlaceCharacter(char) {
     if (!char) return;
+    activeCharId = char.id;
+    renderHUD();
+    // Selecting a character means the player is taking control — stop any
+    // in-progress GM-directed flight (unlocked only, mirroring the wheel/pointer
+    // handlers) so it can't keep dragging the camera back to the GM's view.
+    if (controls.enabled) {
+        if (cameraFly) cameraFly.cancel();
+        pendingViewPose = null;
+    }
     if (currentTool === 'place' && placeCharacter && placeCharacter.id === char.id) {
         setTool('move'); // toggle off (also drops placeCharacter, see setTool)
         return;
     }
-    const existing = myTokenFor(char.id);
-    if (existing) { focusCameraOn(existing.position); return; } // already here: jump to it
     placeCharacter = char;
     setTool('place');
     syncCharacterMenuActive();
+    if (workspace) workspace.closeInspector();
 }
 
 // Mirrors the GM's loadCharactersToMenu: one button per character, colored.
@@ -489,27 +619,43 @@ function renderCharacterMenu() {
     listContainer.innerHTML = '';
 
     if (!myCharacters.length) {
-        listContainer.innerHTML = '<p style="font-size: 12px; color: #999;">No characters found. Create one in the Character Creator!</p>';
+        listContainer.innerHTML = '<div class="workspace-empty">You do not have a character yet.<br><button class="workspace-primary" data-workspace-studio="/">Create your first character</button></div>';
         return;
     }
 
     myCharacters.forEach(char => {
-        const charBtn = document.createElement('button');
-        charBtn.className = 'menu-button';
-        charBtn.textContent = char.name || 'Unnamed';
-        charBtn.title = 'Click: place on the map (or jump to the token)';
-        charBtn.style.color = char.color;
-        charBtn.style.fontWeight = 'bold';
-        charBtn.style.borderLeft = `5px solid ${char.color}`;
-        charBtn.dataset.charId = char.id;
-        charBtn.addEventListener('click', () => armPlaceCharacter(char));
-        listContainer.appendChild(charBtn);
+        const card = document.createElement('div');
+        card.className = 'character-card';
+        card.style.setProperty('--character-color', char.color || '#7f8a99');
+
+        const main = document.createElement('button');
+        main.className = 'character-card-main';
+        const classes = (char.classes || []).map(c => `${c.class || 'class'} ${c.level || 1}`).join(' / ');
+        main.innerHTML = '<span class="character-card-name"></span><span class="character-card-meta"></span>';
+        main.querySelector('.character-card-name').textContent = char.name || 'Unnamed';
+        main.querySelector('.character-card-meta').textContent = classes || char.race || 'Character';
+        main.title = 'Open character sheet';
+        main.addEventListener('click', () => {
+            activeCharId = char.id;
+            renderHUD();
+            showCharacterPanel('char-panel');
+        });
+
+        const place = document.createElement('button');
+        place.className = 'character-card-place';
+        place.textContent = 'Place';
+        place.title = 'Place another token instance';
+        place.dataset.charId = char.id;
+        place.addEventListener('click', () => armPlaceCharacter(char));
+
+        card.append(main, place);
+        listContainer.appendChild(card);
     });
     syncCharacterMenuActive();
 }
 
 function syncCharacterMenuActive() {
-    document.querySelectorAll('#character-button-list .menu-button').forEach(btn => {
+    document.querySelectorAll('#character-button-list .character-card-place').forEach(btn => {
         btn.classList.toggle('active', !!placeCharacter && btn.dataset.charId === placeCharacter.id);
     });
 }
@@ -530,18 +676,27 @@ function roomKeyOf(key) {
 }
 
 // Snap the orbit target to a world position and re-seat the camera beside it
-// (same fresh viewpoint as portal travel; on the unified world the floating
-// origin catches up via maybeRebaseWorld over the next frames).
+// (same fresh viewpoint as portal travel). On the unified world we re-seat the
+// floating origin at the destination first, so we land there exactly however
+// far the origin sat before (e.g. left at the GM's look point by a "Bring to my
+// view") — not relying on maybeRebaseWorld to inch there over later frames.
 function jumpCameraTo(worldPos) {
     if (cameraFly) cameraFly.cancel();
+    if (terrainIsUnified) setWorldOriginAt({ terrain, worldGroup }, worldPos.x, worldPos.z);
     focusCameraOn(worldPos);
-    camera.position.set(controls.target.x + 20, controls.target.y + 30, controls.target.z + 20);
+    camera.position.set(controls.target.x + 8, controls.target.y + 12, controls.target.z + 8);
 }
 
 // Click an instance row: fly to the token if its map is already loaded,
 // otherwise travel there (join its map, then jump once map-state lands).
 function gotoInstance(inst) {
-    if (!inst || !socket) return;
+    // A locked GM view stays authoritative. Spawn selection remains available
+    // for the HUD, but explicit camera travel waits until the GM releases it.
+    if (!inst || !socket || !controls.enabled) return;
+    if (selectedObject) deselectObject({ restoreContext: false });
+    if (workspace) workspace.closeInspector();
+    if (cameraFly) cameraFly.cancel();
+    pendingViewPose = null;
     const pos = inst.position || { x: 0, y: 0, z: 0 };
     if (inst.mapKey === currentMapKey || inst.mapKey === roomKeyOf(currentMapKey)) {
         jumpCameraTo(pos);
@@ -560,6 +715,13 @@ function renderInstanceList() {
         list.innerHTML = '<p style="font-size: 12px; color: #999;">No characters on any map yet.</p>';
         return;
     }
+    const instanceGroups = new Map();
+    characterInstances.forEach(inst => {
+        const key = inst.charId || `${inst.owner || ''}:${inst.charName || ''}`;
+        if (!instanceGroups.has(key)) instanceGroups.set(key, []);
+        instanceGroups.get(key).push(inst);
+    });
+    instanceGroups.forEach(group => group.sort((a, b) => String(a.id).localeCompare(String(b.id))));
     characterInstances.forEach(inst => {
         const row = document.createElement('button');
         row.className = 'instance-row';
@@ -568,7 +730,9 @@ function renderInstanceList() {
 
         const name = document.createElement('div');
         name.className = 'inst-name';
-        name.textContent = inst.charName || 'Unnamed';
+        const group = instanceGroups.get(inst.charId || `${inst.owner || ''}:${inst.charName || ''}`) || [inst];
+        const ordinal = group.indexOf(inst) + 1;
+        name.textContent = `${inst.charName || 'Unnamed'}${group.length > 1 ? ` · ${ordinal} of ${group.length}` : ''}`;
         if (inst.color) name.style.color = inst.color;
 
         const loc = document.createElement('div');
@@ -588,7 +752,6 @@ function renderInstanceList() {
 
 function placeCharacterAt(worldPoint) {
     if (!placeCharacter || !socket) return;
-    if (myTokenFor(placeCharacter.id)) { setTool('move'); return; } // arrived meanwhile (e.g. GM placed it)
     const heightScale = (placeCharacter.appearance && placeCharacter.appearance.height) || 1;
     const halfHeight = (1 * heightScale) / 2 * 0.4;
     const snapped = snapToGrid(worldPoint);
@@ -609,29 +772,130 @@ function createObjectFromData(id, data) {
     if (mesh) {
         worldGroup.add(mesh); // synced positions are world coords
         objects.push(mesh);
+        if (objectNameplates) objectNameplates.sync(objects);
     }
 }
 
-function selectObject(object) {
-    deselectObject();
+function playerOwnsObject(object) {
+    const char = object?.userData?.characterData;
+    return !!(char && myUsername && char.owner === myUsername);
+}
+
+function playerModeLabel() {
+    return ({ move: 'Move', ruler: 'Measure', place: 'Place' })[currentTool] || 'Explore';
+}
+
+function playerSelectionMetric(label, value) {
+    return `<div class="selection-metric"><span>${escHtml(label)}</span><strong>${escHtml(value)}</strong></div>`;
+}
+
+function renderPlayerSelectionInspector({ open = true } = {}) {
+    const object = selectedObject;
+    const content = document.getElementById('selection-content');
+    if (!object || !content) return;
+    const id = object.userData.syncId;
+    const data = object.userData.objectData || {};
+    const char = object.userData.characterData || null;
+    const type = char ? 'character' : (object.userData.objectType || data.type || 'object');
+    const identity = objectIdentity(object, objects);
+    const combatant = combatState && combatState.combatants[id];
+    const owner = char?.owner || '';
+    const ownerLabel = /^gm$/i.test(owner) ? 'the GM' : owner;
+    const typeLabel = char ? 'Character token' : ({ token: 'Creature token', portal: 'Portal', cave: 'Cave', arch: 'Rock arch', cube: 'Object', sphere: 'Object' }[type] || 'Map object');
+    const effects = (combatant?.effects || []).map(effect => EFFECTS[effect.key]?.label || effect.label || effect.key);
+    const classes = (char?.classes || []).map(entry => `${entry.class || 'class'} ${entry.level || 1}`).join(' / ');
+    const meta = [typeLabel, identity.instanceText, owner ? `Controlled by ${ownerLabel}` : '', char?.race || '', classes].filter(Boolean).join(' · ');
+
+    const combatHTML = combatant ? `<div class="selection-section">
+        <div class="selection-section-title"><span>Encounter</span><span>${combatState.started && combatState.activeId === id ? 'Active turn' : `Round ${combatState.round || '—'}`}</span></div>
+        <div class="selection-metrics">
+            ${playerSelectionMetric('HP', `${combatant.hp?.current ?? '—'}/${combatant.maxHP}`)}
+            ${playerSelectionMetric('AC', combatant.ac)}
+            ${playerSelectionMetric('Speed', `${combatant.speedFeet} ft`)}
+            ${playerSelectionMetric('Initiative', combatant.initiative ?? '—')}
+            ${playerSelectionMetric('Movement', combatState.activeId === id ? `${remainingFeet(combatant)} ft` : '—')}
+            ${playerSelectionMetric('Conditions', effects.length || 0)}
+        </div>
+        ${effects.length ? `<div class="selection-effects" style="margin-top:8px">${effects.map(effect => `<span class="selection-effect active">${escHtml(effect)}</span>`).join('')}</div>` : ''}
+    </div>` : '';
+
+    const note = char
+        ? `${ownerLabel === 'the GM' ? 'The GM' : (ownerLabel || 'The GM')} controls this character. Its game details are read-only here.`
+        : 'The GM controls this map object. You can inspect it and focus your camera without changing it.';
+    content.innerHTML = `<div class="selection-hero" style="--selection-color:${escHtml(identity.color)}">
+            <span class="selection-color"></span>
+            <div><span class="selection-name">${escHtml(identity.displayName)}</span><span class="selection-meta">${escHtml(meta)}</span></div>
+        </div>
+        ${combatHTML}
+        <div class="selection-section">
+            <div class="selection-section-title"><span>Location</span></div>
+            <div class="selection-metrics">
+                ${playerSelectionMetric('X', Math.round(object.position.x))}
+                ${playerSelectionMetric('Y', Number(object.position.y).toFixed(1))}
+                ${playerSelectionMetric('Z', Math.round(object.position.z))}
+            </div>
+        </div>
+        <div class="selection-section"><div class="selection-readonly">${escHtml(note)}</div>
+            <div class="selection-actions">
+                <button type="button" class="selection-button primary wide" data-player-selection-act="focus">Focus camera</button>
+                ${type === 'portal' && object.userData.portalTarget ? '<button type="button" class="selection-button wide" data-player-selection-act="portal">Enter portal</button>' : ''}
+            </div>
+        </div>`;
+
+    content.querySelectorAll('[data-player-selection-act]').forEach(button => button.addEventListener('click', () => {
+        if (selectedObject !== object) return;
+        if (button.dataset.playerSelectionAct === 'focus') jumpCameraTo(object.position);
+        if (button.dataset.playerSelectionAct === 'portal' && socket && object.userData.portalTarget) {
+            currentMapKey = object.userData.portalTarget;
+            socket.emit('join-map', { key: currentMapKey });
+        }
+    }));
+
+    if (open && workspace) {
+        workspace.showPanel('selection-panel', identity.displayName, typeLabel);
+        if (currentTool == null) workspace.setMode('Inspect');
+    }
+}
+
+function selectObject(object, { openInspector = true } = {}) {
+    if (!object) return;
+    if (!selectedObject && workspace && openInspector) {
+        selectionReturnContext = { panel: workspace.currentPanel(), open: workspace.isInspectorOpen() };
+    }
+    if (selectedObject) deselectObject({ restoreContext: false, preserveReturn: true });
     selectedObject = object;
     dragStartPos = object.position.clone(); // combat movement is measured from here
-    if (!selectedObject.userData.characterData) {
-        selectedObject.material = selectedMaterial;
+    setObjectSelected(object, true);
+    selectionOwnsInspector = openInspector;
+
+    const char = object.userData.characterData;
+    if (openInspector && char && playerOwnsObject(object)) {
+        activeCharId = char.id;
+        renderHUD();
+        showCharacterPanel('char-panel');
+    } else if (openInspector) {
+        renderPlayerSelectionInspector({ open: true });
     }
+    updatePlayerHintBar();
 }
 
-function deselectObject() {
-    if (selectedObject && !selectedObject.userData.characterData) {
-        if (!selectedObject.material) {
-            selectedObject.material = defaultMaterial.clone();
-        } else {
-            selectedObject.material = defaultMaterial;
-        }
-    }
+function deselectObject({ restoreContext = true, preserveReturn = false } = {}) {
+    if (selectedObject) setObjectSelected(selectedObject, false);
     selectedObject = null;
     dragStartPos = null;
     hideMoveTooltip();
+    const selectionPanels = new Set(['selection-panel', 'hud-panel-overlay']);
+    if (restoreContext && selectionOwnsInspector && workspace && selectionPanels.has(workspace.currentPanel())) {
+        const context = selectionReturnContext;
+        if (context?.open && context.panel && !selectionPanels.has(context.panel)) workspace.showPanel(context.panel);
+        else workspace.closeInspector();
+        workspace.setMode(playerModeLabel());
+    }
+    if (!preserveReturn) {
+        selectionReturnContext = null;
+        selectionOwnsInspector = false;
+    }
+    updatePlayerHintBar();
 }
 
 // --- Combat mode -------------------------------------------------------------
@@ -652,6 +916,8 @@ function combatSelectDenied(obj) {
 
 // Every combat-updated re-applies the whole state: tracker, overlays, HUD.
 function setCombat(combat) {
+    const previousActiveId = combatState && combatState.activeId;
+    const hadCombat = !!combatState;
     combatState = combat;
     if (combatTracker) combatTracker.setState(combat);
     answerStatsPending();
@@ -662,7 +928,23 @@ function setCombat(combat) {
         const active = combat && combat.started && combat.combatants[combat.activeId];
         endBtn.classList.toggle('hidden', !(active && active.owner === myUsername));
     }
-    if (!combat) { pendingAttack = null; hideMoveTooltip(); }
+    if (workspace) {
+        workspace.setDockVisible(!!combat);
+        const active = combat?.started && combat.combatants[combat.activeId];
+        const activeObject = active && findObjectMesh(active.id);
+        const activeName = activeObject ? objectIdentity(activeObject, objects).displayName : active?.name;
+        const myTurn = !!(active && active.owner === myUsername);
+        const gathering = combat && !combat.started ? `${Object.keys(combat.combatants).length} combatants · Roll initiative` : '';
+        const status = !combat ? 'Waiting for the GM'
+            : myTurn ? `Your turn · ${remainingFeet(active)} ft left`
+                : active ? `Round ${combat.round} · ${activeName}`
+                    : gathering || `Round ${combat.round || '—'}`;
+        workspace.setEncounterStatus(status, !!combat, myTurn);
+        if (combat && (!hadCombat || (myTurn && previousActiveId !== combat.activeId))) workspace.setDockExpanded(true);
+    }
+    if (!combat) { pendingAttack = null; pendingSpell = null; hideMoveTooltip(); }
+    if (selectedObject && !playerOwnsObject(selectedObject)) renderPlayerSelectionInspector({ open: false });
+    updatePlayerHintBar();
 }
 
 // Character combatants join with statsPending: their owner's client answers
@@ -681,9 +963,19 @@ function answerStatsPending() {
 }
 
 function beginTargetPick(combatantId, attackIndex, attack) {
+    pendingSpell = null;
     pendingAttack = { combatantId, attackIndex };
     closeAllPanels();
     if (combatTracker) combatTracker.flash(`Pick a target for ${attack.name}: click a token (Esc cancels)`);
+    updatePlayerHintBar();
+}
+
+function beginSpellPick(combatantId, spellIndex, spell) {
+    pendingAttack = null;
+    pendingSpell = { combatantId, spellIndex };
+    closeAllPanels();
+    if (combatTracker) combatTracker.flash(`Pick a target for ${spell.name}: click a token (Esc cancels)`);
+    updatePlayerHintBar();
 }
 
 // Live «12 ft — 18 ft left» while dragging the active combatant. Reuses the
@@ -807,7 +1099,14 @@ function renderCharPanel(char, d) {
         return `<div class="row-item"><span>${isProf ? '●' : '<span style="color:#555">○</span>'} ${escHtml(sk.name)} <span class="tag">${ab}</span></span><b>${fmtMod(bonus)}</b></div>`;
     }).join('');
 
-    cc.innerHTML = `${selectorHTML(char.id)}
+    const selectedToken = selectedObject?.userData?.characterData?.id === char.id && playerOwnsObject(selectedObject)
+        ? objectIdentity(selectedObject, objects) : null;
+    const tokenContext = selectedToken ? `<div class="selection-token-context">
+        <span>${escHtml(selectedToken.displayName)} · selected on this map</span>
+        <span><button class="selection-button" type="button" data-owned-token-act="focus">Focus</button> <button class="selection-button" type="button" data-owned-token-act="instances">Instances</button> <button class="selection-button primary" type="button" data-owned-token-act="move">Move</button></span>
+    </div>` : '';
+
+    cc.innerHTML = `${tokenContext}${selectorHTML(char.id)}
         <div class="metrics-row">${metrics}</div>
         <div class="stat-bar-group">
             <label>Hit Points</label>
@@ -833,6 +1132,16 @@ function renderCharPanel(char, d) {
         if (v === 'full') setCurrentHP(char, d.maxHP, d.maxHP);
         else setCurrentHP(char, getCurrentHP(char, d.maxHP) + (+v), d.maxHP);
         renderCharPanel(char, d);
+    });
+    cc.querySelectorAll('[data-owned-token-act]').forEach(button => button.onclick = () => {
+        if (!selectedObject || !playerOwnsObject(selectedObject)) return;
+        if (button.dataset.ownedTokenAct === 'focus') jumpCameraTo(selectedObject.position);
+        if (button.dataset.ownedTokenAct === 'move') setTool('move', { preserveSelection: true });
+        if (button.dataset.ownedTokenAct === 'instances') {
+            deselectObject({ restoreContext: false });
+            setCharacterTab('instances');
+            showCharacterPanel('character-menu');
+        }
     });
 }
 
@@ -890,15 +1199,24 @@ function renderActionsPanel(char, d) {
     const active = combatState && combatState.started && combatState.combatants[combatState.activeId];
     if (active && active.owner === myUsername && !combatantDown(active)) {
         const c = active;
+        const activeObject = findObjectMesh(c.id);
+        const activeLabel = activeObject ? objectIdentity(activeObject, objects).displayName : c.name;
         const dis = c.actionUsed ? 'disabled' : '';
         const atkBtns = (c.attacks || []).map((a, i) =>
             `<button class="btn-combat atk" data-combat-atk="${i}" ${dis}>⚔ ${escHtml(a.name)} <span class="tag">${fmtMod(a.attack)} · ${escHtml(a.damage)} ${escHtml(a.damageType)}</span></button>`
         ).join('') || '<p class="muted">No attacks.</p>';
+        const spellBtns = (c.spells || []).map((spell, i) => {
+            const spellDis = c.actionUsed || (spell.level > 0 && (c.slots?.[spell.level] || 0) < 1) ? 'disabled' : '';
+            const level = spell.level === 0 ? 'Cantrip' : `L${spell.level}`;
+            return `<button class="btn-combat" data-combat-spell="${i}" ${spellDis}>✨ ${escHtml(spell.name)} <span class="tag">${level} · ${escHtml(spell.damage)} ${escHtml(spell.damageType)}</span></button>`;
+        }).join('') || '<p class="muted">No spells.</p>';
         ac.innerHTML = `
-            <div class="row-item"><span>▶ ${escHtml(c.name)}'s turn — Round ${combatState.round}</span><b>${remainingFeet(c)} ft left</b></div>
+            <div class="row-item"><span>▶ ${escHtml(activeLabel)}'s turn — Round ${combatState.round}</span><b>${remainingFeet(c)} ft left</b></div>
             ${c.actionUsed ? '<p class="muted">Action used this turn — you can still move, then end your turn.</p>' : ''}
             <h4>Attacks</h4>
             <div class="combat-actions-list">${atkBtns}</div>
+            <h4>Spells</h4>
+            <div class="combat-actions-list">${spellBtns}</div>
             <h4>Other Actions</h4>
             <div class="combat-actions-list">
                 <button class="btn-combat" data-combat-act="dash" ${dis}>💨 Dash <span class="tag">+${c.speedFeet} ft move</span></button>
@@ -910,6 +1228,10 @@ function renderActionsPanel(char, d) {
             const i = +btn.dataset.combatAtk;
             if (c.attacks[i]) beginTargetPick(c.id, i, c.attacks[i]);
         });
+        ac.querySelectorAll('[data-combat-spell]').forEach(btn => btn.onclick = () => {
+            const i = +btn.dataset.combatSpell;
+            if (c.spells[i]) beginSpellPick(c.id, i, c.spells[i]);
+        });
         ac.querySelectorAll('[data-combat-act]').forEach(btn => btn.onclick = () => {
             const act = btn.dataset.combatAct;
             if (!socket) return;
@@ -920,8 +1242,10 @@ function renderActionsPanel(char, d) {
     }
 
     // Outside combat (or waiting for the turn): the reference list.
+    const activeObject = active && findObjectMesh(active.id);
+    const activeLabel = activeObject ? objectIdentity(activeObject, objects).displayName : active?.name;
     const waiting = combatState && combatState.started
-        ? `<p class="muted">⚔ Combat — waiting for ${escHtml(active ? active.name : '…')}'s turn.</p>` : '';
+        ? `<p class="muted">⚔ Combat — waiting for ${escHtml(activeLabel || '…')}'s turn.</p>` : '';
     const eq = char.equipment || {};
     const attacks = (eq.weapons || []).map(wi => {
         const w = SRD.get('equipment', wi); if (!w) return '';
@@ -937,7 +1261,8 @@ function renderActionsPanel(char, d) {
 }
 
 // --- UI Management (Left Menu) ---
-function setTool(toolName) {
+function setTool(toolName, { preserveSelection = false } = {}) {
+    if (selectedObject && !preserveSelection) deselectObject({ restoreContext: false });
     if (currentTool === 'ruler' && toolName !== 'ruler') {
         ruler.clearAll(() => { if (socket) socket.emit('clear-rulers'); });
     }
@@ -949,7 +1274,12 @@ function setTool(toolName) {
     for (const key in toolMenuButtons) {
         toolMenuButtons[key].classList.toggle('active', key === toolName);
     }
+    if (workspace) {
+        workspace.setMode({ move: 'Move', ruler: 'Measure', place: 'Place' }[toolName] || 'Explore');
+        workspace.closeInspector();
+    }
     syncCharacterMenuActive();
+    updatePlayerHintBar();
 }
 
 // --- Move Tool ---
@@ -991,7 +1321,20 @@ function initSocket(username) {
     combatTracker = new CombatTracker({
         container: document.getElementById('combat-tracker'),
         socket, isGM: false, username,
-        onPickTarget: beginTargetPick
+        onPickTarget: (id, index, item, mode) => mode === 'cast'
+            ? beginSpellPick(id, index, item)
+            : beginTargetPick(id, index, item),
+        onFocusCombatant: (id) => {
+            const object = findObjectMesh(id);
+            if (!object) return;
+            selectObject(object, { openInspector: false });
+            jumpCameraTo(object.position);
+        },
+        getMapObjects: () => objects.map(object => ({
+            id: object.userData.syncId,
+            name: objectIdentity(object, objects).displayName,
+            type: object.userData.characterData ? 'character' : object.userData.objectType
+        }))
     });
 
     socket.on('connect', () => {
@@ -1004,6 +1347,7 @@ function initSocket(username) {
 
     socket.on('login-success', (userData) => {
         console.log('Jogador autenticado:', userData);
+        if (workspace) workspace.setUser(userData.username);
         login.hide();
     });
 
@@ -1064,8 +1408,7 @@ function initSocket(username) {
     // GM chose, optionally locking the controls until camera-unlock. Long jumps
     // snap regardless of mode — a cross-continent glide would drag dozens of
     // floating-origin rebases (and minutes of terrain streaming) behind it.
-    socket.on('camera-goto', ({ pose, mode, lock } = {}) => {
-        if (!pose || !pose.pos || !pose.look) return;
+    function applyViewPose(pose, mode, lock) {
         setViewLock(!!lock);
         const origin = terrain.worldOrigin;
         const dist = Math.hypot(pose.look.x - (controls.target.x + origin.x),
@@ -1083,18 +1426,52 @@ function initSocket(username) {
         } else {
             cameraFly.start(pose, origin);
         }
+    }
+    socket.on('camera-goto', ({ pose, mode, lock, mapKey } = {}) => {
+        if (!pose || !pose.pos || !pose.look) return;
+        // A GM command supersedes an unfinished Instances jump. If another map
+        // state is already in flight, retain the newest GM pose and apply it
+        // only after that state has loaded instead of briefly steering the old
+        // scene and then being overwritten by the join response.
+        const waitingForMap = !!pendingFocus || !!pendingViewPose;
+        pendingFocus = null;
+        // Relocate: the GM is on another map/tier — join it and land on the pose
+        // once that map-state arrives (mirrors focusInstance's pendingFocus).
+        if (mapKey && (mapKey !== currentMapKey || waitingForMap)) {
+            const needsJoin = mapKey !== currentMapKey;
+            currentMapKey = mapKey;
+            pendingViewPose = { pose, mode, lock };
+            setViewLock(!!lock);
+            if (needsJoin) socket.emit('join-map', { key: mapKey });
+            return;
+        }
+        pendingViewPose = null;
+        applyViewPose(pose, mode, lock);
     });
-    socket.on('camera-unlock', () => setViewLock(false));
+    socket.on('camera-unlock', () => {
+        // Release also updates a relocation that is still waiting on map-state;
+        // otherwise its stale lock flag would re-lock the player on arrival.
+        if (pendingViewPose) pendingViewPose.lock = false;
+        setViewLock(false);
+    });
 
     // Full map state on connect
     socket.on('map-state', (data) => {
         // Ignore states for maps we're not on (e.g. the automatic 'world' join
         // that precedes our re-join after a reconnect).
         if (data.key && data.key !== currentMapKey) return;
+        if (workspace) {
+            const location = data.meta && data.meta.name
+                ? data.meta.name
+                : (data.unified ? 'Shared world' : (data.key || 'World'));
+            workspace.setLocation(location);
+        }
         // A map switch resets the camera context: abort any GM-directed flight
         // and drop a stale view lock (the GM can re-lock on the new map).
         if (cameraFly) cameraFly.cancel();
         setViewLock(false);
+        if (selectedObject) deselectObject();
+        if (objectNameplates) objectNameplates.clear(objects);
         objects.forEach(obj => worldGroup.remove(obj));
         objects = [];
         ruler.removeSegments();
@@ -1160,6 +1537,9 @@ function initSocket(username) {
         // Instances-tab travel: we joined this map to find a token — jump to it
         // (after the terrain/worldCenter landing above so the jump wins).
         if (pendingFocus) { jumpCameraTo(pendingFocus); pendingFocus = null; }
+        // A GM "Bring to my view" that crossed maps: land on the pose now that
+        // the target map is loaded (snap — we just teleported here).
+        if (pendingViewPose) { applyViewPose(pendingViewPose.pose, 'snap', pendingViewPose.lock); pendingViewPose = null; }
     });
 
     // Live terrain edits from the GM (partial chunk payload).
@@ -1207,15 +1587,27 @@ function initSocket(username) {
         const object = objects.find(o => o.userData.syncId === data.id);
         if (object) {
             object.position.set(data.position.x, data.position.y, data.position.z);
+            updateObjectPositionData(object);
+            if (selectedObject === object && !playerOwnsObject(object)) renderPlayerSelectionInspector({ open: false });
         }
+    });
+
+    socket.on('object-updated', ({ id, patch } = {}) => {
+        const object = objects.find(o => o.userData.syncId === id);
+        if (!object || !patch) return;
+        updateObjectPresentation(object, patch);
+        if (objectNameplates) objectNameplates.sync(objects);
+        if (selectedObject === object && !playerOwnsObject(object)) renderPlayerSelectionInspector({ open: false });
     });
 
     socket.on('object-deleted', (data) => {
         const object = objects.find(o => o.userData.syncId === data.id);
         if (object) {
             if (selectedObject === object) deselectObject();
+            if (objectNameplates) objectNameplates.removeFrom(object);
             worldGroup.remove(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
+            if (objectNameplates) objectNameplates.sync(objects);
         }
     });
 

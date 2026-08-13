@@ -169,6 +169,22 @@ function emitToRoom(key, exceptSocket, fn) {
   }
 }
 
+// The unified world is ONE logical map: every zoom lens (world, world/q,r,
+// world/q,r/q,r) and the tactical store share WORLD_KEY's objects + combat.
+// Pockets keep their own store.
+function stateKey(key) { return isUnifiedKey(key) ? WORLD_KEY : key; }
+
+// Emit to every socket currently viewing the unified world (any lens), not just
+// one room. Per-socket so fog filtering can decide what each player receives.
+function emitToUnified(exceptSocket, fn) {
+  for (const sock of io.sockets.sockets.values()) {
+    if (exceptSocket && sock.id === exceptSocket.id) continue;
+    if (!sock.username) continue;
+    if (!isUnifiedKey(sock.currentMapKey || '')) continue;
+    fn(sock);
+  }
+}
+
 // Presence roster: every logged-in socket and where it is. Broadcast to the
 // whole server (usernames aren't secret); the GM View tool uses it to list
 // live players it can steer. Fired on login, join-map and disconnect.
@@ -292,6 +308,27 @@ migrateTacticalToWorld();
   }
 }
 
+// One-time migration: hex-lens rooms (world, world/q,r, world/q,r/q,r) used to
+// keep their own objects; the unified world now holds ALL objects on WORLD_KEY.
+// Fold any stragglers in verbatim (already at true world coords — no offset),
+// then clear the lens store. Idempotent.
+function migrateUnifiedLensObjects() {
+  const world = getMap(WORLD_KEY);
+  let moved = 0;
+  for (const key of Object.keys(maps)) {
+    if (key === WORLD_KEY || !isUnifiedKey(key)) continue;
+    const m = maps[key];
+    for (const oid of Object.keys(m.objects || {})) {
+      if (!world.objects[oid]) { world.objects[oid] = m.objects[oid]; moved++; }
+    }
+    m.objects = {};
+    if (m.combat && !world.combat) world.combat = m.combat; // a stray lens combat joins the world
+    if (m.combat) delete m.combat;
+  }
+  if (moved) { saveMaps(); console.log(`[MIGRATE] Folded ${moved} lens object(s) into ${WORLD_KEY}.`); }
+}
+migrateUnifiedLensObjects();
+
 let charactersDB = loadJSON('characters.json', {});
 
 // Custom homebrew content (shared): { races: {index:..}, classes: {index:..} }
@@ -324,6 +361,15 @@ function canAccessCharacter(username, character) {
   return isGM(username) || character.owner === username;
 }
 
+// Character lists are role-scoped in one place so every request path gives the
+// GM the complete roster while players only receive their own characters.
+function charactersAccessibleTo(username) {
+  const characters = Object.values(charactersDB);
+  return isGM(username) ? characters : characters.filter(char =>
+    canAccessCharacter(username, char)
+  );
+}
+
 // ===== Combat (turn-based encounters) =====
 // Combat state lives at maps[roomKey].combat and persists with the map. The
 // server is the single source of truth: it rolls every die and enforces turn
@@ -345,6 +391,23 @@ function rollDamage(expr, crit) {
   const rolls = [];
   for (let i = 0; i < count; i++) rolls.push(rollDie(sides));
   return { expr: String(expr), rolls, total: Math.max(0, rolls.reduce((a, b) => a + b, 0) + mod) };
+}
+
+// Roll a saving throw for a target combatant vs a DC. Reusable primitive.
+function rollSave(target, ability, dc) {
+  const die = rollDie(20);
+  const mod = (target.saves && typeof target.saves[ability] === 'number') ? target.saves[ability] : 0;
+  const total = die + mod;
+  return { d20: [die], used: die, mod, total, vs: dc, success: total >= dc };
+}
+
+// Apply damage to a combatant, mirroring the attack branch's HP write-back exactly.
+function applyDamageToTarget(target, amount) {
+  const cur = (target.hp && typeof target.hp.current === 'number') ? target.hp.current : target.maxHP;
+  const next = Math.max(0, cur - amount);
+  if (target.kind === 'character' && target.charId && charactersDB[target.charId]) applyCharacterHP(target.charId, next); // mirrors into target.hp + persists + emits hp-updated
+  else setCombatantHP(target, next);
+  return next;
 }
 
 function fmtSigned(n) { return (n < 0 ? '- ' : '+ ') + Math.abs(n); }
@@ -400,13 +463,16 @@ function pushLog(key, combat, entry) {
   entry.round = combat.round;
   combat.log.push(entry);
   if (combat.log.length > 100) combat.log.splice(0, combat.log.length - 100);
-  io.to(key).emit('combat-log', entry);
+  if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('combat-log', entry));
+  else io.to(key).emit('combat-log', entry);
   return entry;
 }
 
 function broadcastCombat(key) {
   saveMaps();
-  io.to(key).emit('combat-updated', (maps[key] && maps[key].combat) || null);
+  const state = (maps[key] && maps[key].combat) || null;
+  if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('combat-updated', state));
+  else io.to(key).emit('combat-updated', state);
 }
 
 // Build a combatant from a map object. Characters join with statsPending until
@@ -414,7 +480,12 @@ function broadcastCombat(key) {
 function seedCombatant(obj) {
   const base = {
     id: obj.id, initiative: null,
-    movementUsedFeet: 0, dashFeet: 0, actionUsed: false, effects: []
+    movementUsedFeet: 0, dashFeet: 0, actionUsed: false, effects: [],
+    saves: { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0 },
+    spellAtk: 0,
+    spellDC: 8,
+    slots: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0 },
+    spells: []
   };
   if (obj.type === 'character' && obj.characterData) {
     const cd = obj.characterData;
@@ -431,7 +502,7 @@ function seedCombatant(obj) {
   }
   if (obj.type === 'token') {
     return {
-      ...base, kind: 'token', name: 'Token', color: obj.color || 0xdd4444,
+      ...base, kind: 'token', name: String(obj.name || 'Token').slice(0, 40), color: obj.color || 0xdd4444,
       charId: null, owner: null, statsPending: false,
       ac: 12, speedFeet: 30, initMod: 0, maxHP: 10, hp: { current: 10 },
       attacks: [{ name: 'Strike', attack: 2, damage: '1d6', damageType: 'bludgeoning', ranged: false, rangeFt: 5 }]
@@ -521,10 +592,7 @@ io.on('connection', (socket) => {
     });
 
     // Send accessible characters
-    const accessibleChars = Object.values(charactersDB).filter(char => 
-      canAccessCharacter(socket.username, char)
-    );
-    socket.emit('load-user-characters', accessibleChars);
+    socket.emit('load-user-characters', charactersAccessibleTo(socket.username));
 
     // Seed the Instances tab (kept live by pushCharacterInstances afterwards).
     socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
@@ -549,10 +617,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const accessibleChars = Object.values(charactersDB).filter(char => 
-      canAccessCharacter(socket.username, char)
-    );
-    socket.emit('load-user-characters', accessibleChars);
+    socket.emit('load-user-characters', charactersAccessibleTo(socket.username));
   });
 
   // Save character
@@ -592,10 +657,7 @@ io.on('connection', (socket) => {
     socket.emit('character-saved-success', charData);
 
     // Send updated character list
-    const accessibleChars = Object.values(charactersDB).filter(char => 
-      canAccessCharacter(socket.username, char)
-    );
-    socket.emit('load-user-characters', accessibleChars);
+    socket.emit('load-user-characters', charactersAccessibleTo(socket.username));
 
     // Notify all clients about character update (for GM/player screens)
     io.emit('character-updated', charData);
@@ -627,10 +689,7 @@ io.on('connection', (socket) => {
     saveJSON('characters.json', charactersDB);
 
     // Send updated list
-    const accessibleChars = Object.values(charactersDB).filter(c => 
-      canAccessCharacter(socket.username, c)
-    );
-    socket.emit('load-user-characters', accessibleChars);
+    socket.emit('load-user-characters', charactersAccessibleTo(socket.username));
 
     // Notify all clients
     io.emit('character-deleted', charId);
@@ -771,7 +830,7 @@ io.on('connection', (socket) => {
     }
     // Fog of war: players only receive objects and terrain edits inside
     // revealed regions of the unified world (pockets are never fogged).
-    let objectsOut = Object.values(m.objects);
+    let objectsOut = Object.values(unified ? getMap(WORLD_KEY).objects : m.objects);
     let terrainOut = m.terrain || null;
     if (unified && !gm) {
       objectsOut = objectsOut.filter(o => objectVisibleTo(socket.username, o));
@@ -785,7 +844,7 @@ io.on('connection', (socket) => {
       meta: m.meta || null,
       hexes: m.hexes || {},
       biome: resolveBiome(ctx),
-      combat: m.combat || null,
+      combat: (unified ? getMap(WORLD_KEY).combat : m.combat) || null,
       ...extra
     });
   }
@@ -859,7 +918,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('add-object', (data) => {
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
     const id = data.id || crypto.randomUUID();
     // addedBy is server-stamped (never trusted from the client): the Instances
@@ -872,7 +931,7 @@ io.on('connection', (socket) => {
     } else {
       // Fog of war: only players who can see the spot learn the object exists.
       socket.emit('object-added', newObject); // the author always gets the echo
-      emitToRoom(key, socket, (sock) => {
+      emitToUnified(socket, (sock) => {
         if (objectVisibleTo(sock.username, newObject)) sock.emit('object-added', newObject);
       });
     }
@@ -898,10 +957,58 @@ io.on('connection', (socket) => {
     socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
   });
 
+  // Context-inspector edits for generic scene objects. Object identity and
+  // geometry stay immutable here; only presentation fields are patchable.
+  socket.on('update-object', (payload) => {
+    if (!isGM(socket.username)) return;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const map = getMap(key);
+    const obj = payload && map.objects[payload.id];
+    if (!obj) return;
+    const requested = payload.patch || {};
+    const patch = {};
+    if (requested.name != null) {
+      const name = String(requested.name).trim().slice(0, 40);
+      if (name) patch.name = name;
+    }
+    if (requested.color != null) {
+      const raw = requested.color;
+      if (typeof raw === 'number' && Number.isFinite(raw)) {
+        patch.color = Math.max(0, Math.min(0xffffff, Math.round(raw)));
+      } else if (/^#[0-9a-f]{6}$/i.test(String(raw))) {
+        patch.color = String(raw);
+      }
+    }
+    if (!Object.keys(patch).length) return;
+    Object.assign(obj, patch);
+    saveMaps();
+    const event = { id: obj.id, patch };
+    if (isUnifiedKey(key)) {
+      emitToUnified(null, (sock) => {
+        if (objectVisibleTo(sock.username, obj)) sock.emit('object-updated', event);
+      });
+    } else {
+      io.to(key).emit('object-updated', event);
+    }
+    const combatant = map.combat && map.combat.combatants[obj.id];
+    if (combatant) {
+      if (patch.name != null) combatant.name = patch.name;
+      if (patch.color != null) combatant.color = patch.color;
+      broadcastCombat(key);
+    }
+  });
+
   socket.on('move-object', (data) => {
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
     if (!map.objects[data.id]) return;
+    // Players manipulate only their own character instances. The GM remains
+    // authoritative for generic tokens, creatures, props and structures.
+    if (!isGM(socket.username) && !ownsObject(socket.username, map.objects[data.id])) {
+      socket.emit('object-moved', { id: data.id, position: map.objects[data.id].position });
+      socket.emit('combat-denied', { reason: 'You can only move your own character' });
+      return;
+    }
     // In a started combat, combatant tokens move only on their turn, only by
     // their owner (GM excepted), and only within the turn's movement budget.
     const combat = map.combat;
@@ -937,7 +1044,7 @@ io.on('connection', (socket) => {
       // Fog of war: an object crossing the reveal boundary pops into (full
       // object) or out of (delete) existence for players — hidden objects
       // simply don't exist on their side.
-      emitToRoom(key, socket, (sock) => {
+      emitToUnified(socket, (sock) => {
         if (isGM(sock.username) || ownsObject(sock.username, obj)) {
           sock.emit('object-moved', data);
           return;
@@ -956,13 +1063,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('delete-object', (data) => {
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
     if (map.objects[data.id]) {
       const wasCharacter = map.objects[data.id].type === 'character';
       delete map.objects[data.id];
       saveMaps();
-      io.to(key).emit('object-deleted', data);
+      if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', data));
+      else io.to(key).emit('object-deleted', data);
       if (wasCharacter) pushCharacterInstances();
       // A deleted token leaves the fight too.
       if (map.combat && map.combat.combatants[data.id]) {
@@ -986,14 +1094,14 @@ io.on('connection', (socket) => {
 
   socket.on('combat-start', () => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
     if (map.combat) return combatDeny('Combat already running');
     const combat = map.combat = {
       active: true, started: false, round: 0, activeId: null,
       order: [], combatants: {}, log: []
     };
-    for (const obj of Object.values(map.objects)) {
+    for (const obj of Object.values(getMap(stateKey(key)).objects)) {
       const c = seedCombatant(obj);
       if (c) combat.combatants[c.id] = c;
     }
@@ -1003,7 +1111,7 @@ io.on('connection', (socket) => {
 
   socket.on('combat-end', () => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     if (!getCombat(key)) return;
     delete maps[key].combat;
     broadcastCombat(key); // emits null → clients tear down
@@ -1014,7 +1122,7 @@ io.on('connection', (socket) => {
   // combat-update-combatant. (Accepting repeats would echo forever: every
   // broadcast triggers the clients' auto-fill pass again.)
   socket.on('combat-set-stats', (payload) => {
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && combat.combatants[payload.combatantId];
     if (!c || !canControl(c)) return;
@@ -1033,13 +1141,33 @@ io.on('connection', (socket) => {
         rangeFt: clampInt(a && a.rangeFt, 5, 600, 5)
       }));
     }
+    const ABILS = ['str','dex','con','int','wis','cha'];
+    c.saves = {};
+    for (const a of ABILS) c.saves[a] = clampInt(payload.saves && payload.saves[a], -10, 20, 0);
+    c.spellAtk = clampInt(payload.spellAtk, -10, 30, 0);
+    c.spellDC  = clampInt(payload.spellDC, 1, 40, 8);
+    c.slots = {};
+    for (let l = 1; l <= 9; l++) c.slots[l] = clampInt(payload.slots && payload.slots[l], 0, 20, 0);
+    if (Array.isArray(payload.spells)) {
+      c.spells = payload.spells.slice(0, 20).map((s, i) => {
+        const base = {
+          name: String((s && s.name) || 'Spell').slice(0, 40),
+          level: clampInt(s && s.level, 0, 9, 0),
+          damage: String((s && s.damage) || '1d4').slice(0, 20),
+          damageType: String((s && s.damageType) || '').slice(0, 20),
+          spellIndex: i
+        };
+        if (s && s.saveAbility) return { ...base, saveAbility: ABILS.includes(s.saveAbility) ? s.saveAbility : 'dex', saveSuccess: s.saveSuccess === 'none' ? 'none' : 'half' };
+        return { ...base, attackType: (s && s.attackType === 'melee') ? 'melee' : 'ranged' };
+      });
+    }
     if (!c.hp) c.hp = { current: c.maxHP };
     c.statsPending = false;
     broadcastCombat(key);
   });
 
   socket.on('combat-roll-initiative', (payload) => {
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && combat.combatants[payload.combatantId];
     if (!c) return;
@@ -1062,7 +1190,7 @@ io.on('connection', (socket) => {
 
   socket.on('combat-begin', () => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || combat.started) return;
     if (!Object.keys(combat.combatants).length) return combatDeny('No combatants');
@@ -1071,7 +1199,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('combat-action', (payload) => {
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || !combat.started || !payload) return;
     const c = combat.combatants[payload.combatantId];
@@ -1125,6 +1253,45 @@ io.on('connection', (socket) => {
       }
       entry.text = text;
       pushLog(key, combat, entry);
+    } else if (kind === 'cast') {
+      const spell = c.spells && c.spells[clampInt(payload.spellIndex, 0, 19, -1)];
+      if (!spell) return combatDeny('No such spell');
+      const target = combat.combatants[payload.targetId];
+      if (!target) return combatDeny('No such target');
+      if (target.id === c.id) return combatDeny("Can't target yourself");
+      if (hasEffect(target, 'down')) return combatDeny(`${target.name} is down`);
+      if (spell.level > 0) {
+        if (!c.slots || (c.slots[spell.level] || 0) < 1) return combatDeny(`No level ${spell.level} spell slots left`);
+        c.slots[spell.level] -= 1; // a miss still spends the slot (5e)
+      }
+      if (spell.attackType) { // attack-roll spell (spellAtk vs AC)
+        const disadvantage = hasEffect(target, 'dodging');
+        const d20 = [rollDie(20)]; if (disadvantage) d20.push(rollDie(20));
+        const used = disadvantage ? Math.min(d20[0], d20[1]) : d20[0];
+        const crit = used === 20;
+        const total = used + c.spellAtk;
+        const hit = used !== 1 && (crit || total >= target.ac);
+        const dieTxt = disadvantage ? `[${d20.join(', ')}] → ${used}` : `${used}`;
+        let text = `${c.name} casts ${spell.name} at ${target.name}: d20 ${dieTxt} ${fmtSigned(c.spellAtk)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
+        const entry = { kind: 'cast', actorName: c.name, targetName: target.name, spellName: spell.name, roll: { d20, used, mod: c.spellAtk, total, vs: target.ac, hit, crit, disadvantage } };
+        if (hit) {
+          const dmg = rollDamage(spell.damage, crit);
+          entry.dmg = dmg;
+          text += ` · ${dmg.expr}${crit ? ' (crit ×2 dice)' : ''} → ${dmg.total}${spell.damageType ? ' ' + spell.damageType : ''}`;
+          const next = applyDamageToTarget(target, dmg.total);
+          if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
+        }
+        entry.text = text; pushLog(key, combat, entry);
+      } else { // save-for-half/none spell
+        const save = rollSave(target, spell.saveAbility, c.spellDC);
+        const raw = rollDamage(spell.damage, false);
+        const dealt = save.success ? (spell.saveSuccess === 'half' ? Math.floor(raw.total / 2) : 0) : raw.total;
+        let text = `${c.name} casts ${spell.name} at ${target.name} (DC ${c.spellDC} ${spell.saveAbility.toUpperCase()}): ${target.name} d20 ${save.used} ${fmtSigned(save.mod)} = ${save.total} — ${save.success ? 'SAVE' : 'FAIL'} · ${raw.expr} → ${dealt}${spell.damageType ? ' ' + spell.damageType : ''}${save.success && spell.saveSuccess === 'half' ? ' (half)' : ''}`;
+        const entry = { kind: 'cast', actorName: c.name, targetName: target.name, spellName: spell.name, save: { d20: save.d20, used: save.used, mod: save.mod, total: save.total, vs: save.vs, ability: spell.saveAbility, success: save.success }, dmg: { expr: raw.expr, rolls: raw.rolls, total: dealt } };
+        const next = applyDamageToTarget(target, dealt);
+        if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
+        entry.text = text; pushLog(key, combat, entry);
+      }
     } else {
       return;
     }
@@ -1133,7 +1300,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('combat-end-turn', () => {
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || !combat.started) return;
     const active = combat.activeId && combat.combatants[combat.activeId];
@@ -1144,7 +1311,7 @@ io.on('connection', (socket) => {
 
   socket.on('combat-set-turn', (payload) => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && combat.started && payload && combat.combatants[payload.combatantId];
     if (!c) return;
@@ -1154,7 +1321,7 @@ io.on('connection', (socket) => {
 
   socket.on('combat-update-combatant', (payload) => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && combat.combatants[payload.combatantId];
     if (!c) return;
@@ -1179,7 +1346,7 @@ io.on('connection', (socket) => {
 
   socket.on('combat-set-order', (payload) => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || !payload || !Array.isArray(payload.order)) return;
     const cur = [...combat.order].sort().join('\0');
@@ -1191,7 +1358,7 @@ io.on('connection', (socket) => {
 
   socket.on('combat-remove-combatant', (payload) => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && combat.combatants[payload.combatantId];
     if (!c) return;
@@ -1202,10 +1369,10 @@ io.on('connection', (socket) => {
 
   socket.on('combat-add-combatant', (payload) => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const map = getMap(key);
-    const obj = combat && payload && map.objects[payload.objectId];
+    const obj = combat && payload && getMap(stateKey(key)).objects[payload.objectId];
     if (!obj || combat.combatants[obj.id]) return;
     const c = seedCombatant(obj);
     if (!c) return combatDeny('Only tokens and characters can fight');
@@ -1217,7 +1384,7 @@ io.on('connection', (socket) => {
 
   socket.on('combat-effect', (payload) => {
     if (!isGM(socket.username)) return combatDeny('GM only');
-    const key = socket.currentMapKey || DEFAULT_MAP_KEY;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && combat.combatants[payload.combatantId];
     const effKey = payload && String(payload.key || '');
@@ -1354,7 +1521,7 @@ io.on('connection', (socket) => {
     }
     for (const sock of io.sockets.sockets.values()) {
       if (isGM(sock.username) || !isUnifiedKey(sock.currentMapKey || '')) continue;
-      const m = getMap(sock.currentMapKey);
+      const m = getMap(WORLD_KEY);
       for (const obj of Object.values(m.objects)) {
         if (ownsObject(sock.username, obj)) continue; // visible either way
         const p = obj.position || {};
@@ -1376,13 +1543,18 @@ io.on('connection', (socket) => {
   // that pocket's players.
   const finitePoint = (p) => p && ['x', 'y', 'z'].every(k => Number.isFinite(Number(p[k])));
   const numPoint = (p) => ({ x: Number(p.x), y: Number(p.y), z: Number(p.z) });
-  function forEachCameraTarget(target, fn) {
+  function forEachCameraTarget(target, crossSpace, fn) {
     const gmKey = socket.currentMapKey || DEFAULT_MAP_KEY;
     const unified = isUnifiedKey(gmKey);
     for (const sock of io.sockets.sockets.values()) {
       if (sock === socket || !sock.username || isGM(sock.username)) continue;
-      const key = sock.currentMapKey || DEFAULT_MAP_KEY;
-      if (unified ? !isUnifiedKey(key) : key !== gmKey) continue;
+      // Relocating commands (Bring to my view) carry a mapKey and reach the
+      // target wherever they are; framing/release commands only touch players
+      // already sharing the GM's space.
+      if (!crossSpace) {
+        const key = sock.currentMapKey || DEFAULT_MAP_KEY;
+        if (unified ? !isUnifiedKey(key) : key !== gmKey) continue;
+      }
       if (target !== 'all' && sock.username.toLowerCase() !== target) continue;
       fn(sock);
     }
@@ -1391,17 +1563,21 @@ io.on('connection', (socket) => {
     if (!isGM(socket.username)) return;
     const pose = payload && payload.pose;
     if (!pose || !finitePoint(pose.pos) || !finitePoint(pose.look)) return;
+    // A relocating command carries the GM's mapKey: the player joins that map
+    // (crossing spaces, e.g. into a pocket) before landing on the pose.
+    const mapKey = payload.mapKey ? String(payload.mapKey) : null;
     const msg = {
       pose: { pos: numPoint(pose.pos), look: numPoint(pose.look) },
       mode: payload.mode === 'snap' ? 'snap' : 'fly',
       lock: !!payload.lock
     };
-    forEachCameraTarget(String(payload.target || 'all').toLowerCase(),
+    if (mapKey) msg.mapKey = mapKey;
+    forEachCameraTarget(String(payload.target || 'all').toLowerCase(), !!mapKey,
       (sock) => sock.emit('camera-goto', msg));
   });
   socket.on('camera-release', (payload) => {
     if (!isGM(socket.username)) return;
-    forEachCameraTarget(String((payload && payload.target) || 'all').toLowerCase(),
+    forEachCameraTarget(String((payload && payload.target) || 'all').toLowerCase(), true,
       (sock) => sock.emit('camera-unlock'));
   });
 

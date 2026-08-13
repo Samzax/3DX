@@ -13,6 +13,8 @@ let pendingHomebrew = null;
 let socket = null;
 let username = null;
 let activeTab = 'identity';
+const requestedCharacterId = new URLSearchParams(window.location.search).get('character');
+let requestedCharacterLoaded = false;
 const ALL_TABS = [
   ['identity','Identity'], ['class','Class'], ['abilities','Abilities'],
   ['skills','Skills'], ['spells','Spells'], ['equipment','Equipment'],
@@ -550,6 +552,13 @@ function renderSaved(list) {
     e.stopPropagation();
     if (confirm('Delete this character?')) socket.emit('delete-character', btn.dataset.id);
   });
+  // The tabletop inspector can deep-link directly into a placed character.
+  // Resolve only once so later save/list refreshes do not overwrite active edits.
+  if (requestedCharacterId && !requestedCharacterLoaded) {
+    requestedCharacterLoaded = true;
+    const requested = list.find(c => c.id === requestedCharacterId);
+    if (requested) loadIntoBuilder(requested);
+  }
 }
 function msg(t, err=false) { const m=$('msg'); m.textContent=t; m.style.color = err?'#f87171':'#34d399'; setTimeout(()=>{ if(m.textContent===t) m.textContent=''; }, 3000); }
 

@@ -7,15 +7,19 @@ import { Terrain, MATERIALS } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
-import { defaultMaterial, selectedMaterial, buildObjectFromData, applyMove } from '../shared/models.js';
+import { buildObjectFromData, applyMove } from '../shared/models.js';
 import { loadSRD } from '../shared/srd.js';
-import { CombatTracker, CombatOverlays, deriveCombatStats } from '../shared/combat.js';
+import { CombatTracker, CombatOverlays, deriveCombatStats, EFFECTS, remainingFeet } from '../shared/combat.js';
 import { tickRigCharacters } from '../shared/charmesh.js';
 import { buildWallRun, buildFloorPatch, disposeBuiltObject } from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { FogMask, FogOverlay, fogHexAt, hexesWithin } from '../shared/fog.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
+import { createTabletopWorkspace } from '../shared/workspace.js';
+import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData } from '../shared/object-ui.js';
+
+const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // --- Terrain editor state (tactical layer only) ---
 let terrain = null;
@@ -83,6 +87,9 @@ let selectedObjectData = null;
 let menuButtons = {};
 
 let socket;
+let workspace = null;
+let objectNameplates = null;
+let selectionReturnContext = null;
 
 // --- Combat mode (server-authoritative; the GM runs it from the tracker) ---
 let SRD = null;                 // loaded lazily: combat stat derivation only
@@ -94,6 +101,7 @@ let combatState = null;
 let combatTracker = null;
 let combatOverlays = null;
 let pendingAttack = null;       // { combatantId, attackIndex } while picking a target
+let pendingSpell = null;        // { combatantId, spellIndex } while picking a target
 let dragStartPos = null;        // selected token's world position when the move began
 
 let currentTool = null;
@@ -291,8 +299,9 @@ function enterMap(key) {
     selectedObjectData = null;
     currentTool = null;
     for (const k in toolMenuButtons) toolMenuButtons[k].classList.remove('active');
-    document.querySelectorAll('#object-menu .menu-button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('#object-menu .menu-button, #object-menu .character-card-place').forEach(b => b.classList.remove('active'));
     // clear local scene; server repopulates via 'map-state' after join-map
+    if (objectNameplates) objectNameplates.clear(objects);
     objects.forEach(o => worldGroup.remove(o));
     objects = [];
     ruler.removeSegments();
@@ -389,12 +398,20 @@ function initSocket() {
     combatTracker = new CombatTracker({
         container: document.getElementById('combat-tracker'),
         socket, isGM: true, username: 'GM',
-        onPickTarget: beginTargetPick,
+        onPickTarget: (id, index, item, mode) => mode === 'cast'
+            ? beginSpellPick(id, index, item)
+            : beginTargetPick(id, index, item),
+        onFocusCombatant: (id) => {
+            const object = findObjectMesh(id);
+            if (!object) return;
+            selectObject(object, { openInspector: true });
+            frameCameraOn(object.position);
+        },
         // Candidates for the tracker's "+ add to combat" select.
         getMapObjects: () => objects.map(o => ({
             id: o.userData.syncId,
             type: o.userData.characterData ? 'character' : o.userData.objectType,
-            name: o.userData.characterData ? o.userData.characterData.name : (o.userData.objectType || 'object')
+            name: objectIdentity(o, objects).displayName
         }))
     });
     const combatToggle = document.getElementById('btn-combat-toggle');
@@ -447,6 +464,8 @@ function initSocket() {
         // Ignore states for maps we're not on (e.g. the automatic 'world' join
         // that precedes our re-join after a reconnect).
         if (data.key && data.key !== currentMapKey) return;
+        if (selectedObject) deselectObject();
+        if (objectNameplates) objectNameplates.clear(objects);
         objects.forEach(obj => worldGroup.remove(obj));
         objects = [];
         ruler.removeSegments();
@@ -601,15 +620,27 @@ function initSocket() {
         const object = objects.find(o => o.userData.syncId === data.id);
         if (object) {
             object.position.set(data.position.x, data.position.y, data.position.z);
+            updateObjectPositionData(object);
+            if (selectedObject === object) renderSelectionInspector({ open: false });
         }
+    });
+
+    socket.on('object-updated', ({ id, patch } = {}) => {
+        const object = objects.find(o => o.userData.syncId === id);
+        if (!object || !patch) return;
+        updateObjectPresentation(object, patch);
+        if (objectNameplates) objectNameplates.sync(objects);
+        if (selectedObject === object) renderSelectionInspector({ open: false });
     });
 
     socket.on('object-deleted', (data) => {
         const object = objects.find(o => o.userData.syncId === data.id);
         if (object) {
             if (selectedObject === object) deselectObject();
+            if (objectNameplates) objectNameplates.removeFrom(object);
             worldGroup.remove(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
+            if (objectNameplates) objectNameplates.sync(objects);
         }
     });
 
@@ -629,8 +660,41 @@ function initSocket() {
 }
 
 function init() {
+    workspace = createTabletopWorkspace({
+        panels: {
+            'object-menu': { title: 'Library', kicker: 'Create' },
+            'selection-panel': { title: 'Selection', kicker: 'Selected object' },
+            'terrain-panel': { title: 'Terrain', kicker: 'Author' },
+            'biome-panel': { title: 'Biomes', kicker: 'World' },
+            'build-panel': { title: 'Build', kicker: 'Author' },
+            'fog-panel': { title: 'Fog of War', kicker: 'Visibility' },
+            'view-panel': { title: 'Direct Players', kicker: 'Session' }
+        },
+        defaultPanel: 'object-menu',
+        dockVisible: true,
+        onInspectorClose: () => {
+            if (selectedObject && workspace?.currentPanel() === 'selection-panel') selectionReturnContext = null;
+            workspace?.setMode(currentModeLabel());
+        },
+        shortcuts: [
+            { key: 'M', label: 'Move selected objects' },
+            { key: 'R', label: 'Measure distance' },
+            { key: 'L', label: 'Open the object and character library' },
+            { key: 'T', label: 'Terrain or biome tools' },
+            { key: 'B', label: 'Build walls and floors' },
+            { key: 'G', label: 'Paint fog of war' },
+            { key: 'V', label: 'Direct player cameras' },
+            { key: 'E', label: 'Show or hide the encounter dock' },
+            { key: '.', label: 'Focus the selected object' },
+            { key: 'Delete', label: 'Delete the selected object' },
+            { key: 'Esc', label: 'Cancel the current action or selection' },
+            { key: '?', label: 'Show this shortcut reference' }
+        ]
+    });
+
     ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup } =
         createTabletopScene(document.getElementById('scene-container')));
+    objectNameplates = new ObjectNameplates();
 
     // Tactical terrain (heightmap + material paint + water). Hidden off-tactical.
     // The brush cursor is drawn by the terrain shader (terrain.setBrush).
@@ -709,8 +773,17 @@ function init() {
     document.getElementById('char-tab-instances').addEventListener('click', () => setCharacterTab('instances'));
 
     // --- Tool Menu Listeners (Left) ---
+    toolMenuButtons.library = document.getElementById('btn-tool-library');
     toolMenuButtons.move = document.getElementById('btn-tool-move');
     toolMenuButtons.ruler = document.getElementById('btn-tool-ruler');
+    const openLibrary = () => {
+        if (selectedObjectType) deselectObjectType();
+        else setTool(null);
+        if (workspace) workspace.showPanel('object-menu', 'Library');
+    };
+    toolMenuButtons.library.addEventListener('click', openLibrary);
+    const topLibrary = document.getElementById('btn-workspace-library');
+    if (topLibrary) topLibrary.addEventListener('click', openLibrary);
     moveSubMenu = document.getElementById('move-submenu');
     moveSubMenuButtons.standard = document.getElementById('btn-move-standard');
     moveSubMenuButtons.x = document.getElementById('btn-move-x');
@@ -816,7 +889,7 @@ function init() {
     document.getElementById('view-fly').addEventListener('change', e => { viewCtl.fly = e.target.checked; });
     document.getElementById('view-lock').addEventListener('change', e => { viewCtl.lock = e.target.checked; });
     document.getElementById('view-bring').addEventListener('click', () => {
-        emitViewCommand(viewPoseFromHere(), 'My view');
+        emitViewCommand(viewPoseFromHere(), 'My view', true);
     });
     document.getElementById('view-release').addEventListener('click', () => {
         if (!socket) return;
@@ -866,6 +939,11 @@ function onPointerDown(event) {
 
     if (isDraggingHeight) {
         isDraggingHeight = false;
+        if (selectedObject?.userData.syncId && socket) {
+            const position = { x: selectedObject.position.x, y: selectedObject.position.y, z: selectedObject.position.z };
+            updateObjectPositionData(selectedObject);
+            socket.emit('move-object', { id: selectedObject.userData.syncId, position });
+        }
         deselectObject();
         return;
     }
@@ -996,6 +1074,20 @@ function onPointerDown(event) {
         updateHintBar();
         return;
     }
+    if (pendingSpell) {
+        const targetId = clickedObject && clickedObject.userData.syncId;
+        if (targetId && combatState && combatState.combatants[targetId] && socket) {
+            socket.emit('combat-action', {
+                combatantId: pendingSpell.combatantId, kind: 'cast',
+                spellIndex: pendingSpell.spellIndex, targetId
+            });
+        } else if (combatTracker) {
+            combatTracker.flash('Spell cancelled — that was not a combatant');
+        }
+        pendingSpell = null;
+        updateHintBar();
+        return;
+    }
 
     // Build surfaces usually read as GROUND for the placement tools — you drop
     // tokens ON a floor, measure across a room, release a move onto it. The
@@ -1027,6 +1119,9 @@ function onPointerDown(event) {
                     const docId = selectedObject.userData.syncId;
                     if (docId) {
                         const finalPosition = snapToCurrentGrid(selectedObject.position);
+                        selectedObject.position.x = finalPosition.x;
+                        selectedObject.position.z = finalPosition.z;
+                        updateObjectPositionData(selectedObject);
                         socket.emit('move-object', {
                             id: docId,
                             position: {
@@ -1049,6 +1144,9 @@ function onPointerDown(event) {
                 break;
             case 'ruler':
                 ruler.click(getCurrentRulerSnap(intersectPoint), emitRuler);
+                break;
+            default:
+                if (selectedObject) deselectObject();
                 break;
         }
     }
@@ -1285,6 +1383,26 @@ function onKeyDown(event) {
         return;
     }
 
+    // Workspace shortcuts stay single-key and map-focused. Text inputs were
+    // excluded above, and modified browser/OS shortcuts pass through untouched.
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat) {
+        const key = event.key.toLowerCase();
+        if (key === 'm') { event.preventDefault(); setMoveMode('standard'); return; }
+        if (key === 'r') { event.preventDefault(); setRulerMode(ruler.mode); return; }
+        if (key === 'l') {
+            event.preventDefault();
+            if (selectedObjectType) deselectObjectType(); else setTool(null);
+            workspace?.showPanel('object-menu', 'Library', 'Create');
+            return;
+        }
+        if (key === 't') { event.preventDefault(); setTool('terrain'); return; }
+        if (key === 'b') { event.preventDefault(); setTool('build'); return; }
+        if (key === 'g') { event.preventDefault(); setTool('fog'); return; }
+        if (key === 'v') { event.preventDefault(); setTool('view'); return; }
+        if (key === 'e') { event.preventDefault(); workspace?.toggleDock(); return; }
+        if (event.key === '.' && selectedObject) { event.preventDefault(); frameCameraOn(selectedObject.position); return; }
+    }
+
     // Terrain hotkeys: [ ] brush size, 1-8 brush modes.
     if (terrainActive()) {
         if (event.key === '[') { setBrushRadius(terrainBrush.radius - 1); return; }
@@ -1308,6 +1426,10 @@ function onKeyDown(event) {
         if (pendingAttack) {
             pendingAttack = null;
             if (combatTracker) combatTracker.flash('Attack cancelled');
+            updateHintBar();
+        } else if (pendingSpell) {
+            pendingSpell = null;
+            if (combatTracker) combatTracker.flash('Spell cancelled');
             updateHintBar();
         } else if (buildDrag) {
             buildDrag = null;
@@ -1408,29 +1530,245 @@ function createObjectFromData(id, data) {
     if (mesh) {
         worldGroup.add(mesh); // synced positions are world coords
         objects.push(mesh);
+        if (objectNameplates) objectNameplates.sync(objects);
     }
 }
 
-function selectObject(object) {
-    deselectObject();
-    selectedObject = object;
-    dragStartPos = object.position.clone(); // combat movement is measured from here
-    if (!selectedObject.userData.characterData) {
-        selectedObject.material = selectedMaterial;
-    }
+const INSPECTOR_CONDITIONS = ['prone', 'poisoned', 'restrained', 'stunned', 'blinded', 'frightened', 'grappled', 'invisible', 'down'];
+
+function currentModeLabel() {
+    return ({ add: 'Place', move: 'Move', ruler: 'Measure', terrain: 'Terrain', build: 'Build', fog: 'Fog', view: 'Direct' })[currentTool] || 'Explore';
 }
 
-function deselectObject() {
-    if (selectedObject && !selectedObject.userData.characterData) {
-        if (!selectedObject.material) {
-            selectedObject.material = defaultMaterial.clone();
+function selectedTypeLabel(type) {
+    return ({
+        character: 'Character token', token: 'Creature token', cube: 'Object', sphere: 'Object',
+        cave: 'Cave prop', arch: 'Rock arch', portal: 'Portal', wall: 'Wall run', floor: 'Floor patch'
+    })[type] || 'Scene object';
+}
+
+function fmtCoord(value) {
+    const n = Number(value) || 0;
+    return Math.abs(n) >= 1000 ? n.toFixed(0) : n.toFixed(2).replace(/\.00$/, '');
+}
+
+function metric(label, value) {
+    return `<div class="selection-metric"><span>${escHtml(label)}</span><strong>${escHtml(value)}</strong></div>`;
+}
+
+function derivedSelectionStats(char) {
+    if (!char || !SRD) return null;
+    try { return deriveCombatStats(char, SRD); }
+    catch (error) { return null; }
+}
+
+function renderSelectionInspector({ open = true } = {}) {
+    const object = selectedObject;
+    const content = document.getElementById('selection-content');
+    if (!object || !content) return;
+
+    const id = object.userData.syncId;
+    const data = object.userData.objectData || {};
+    const char = object.userData.characterData || null;
+    const type = char ? 'character' : (object.userData.objectType || data.type || 'object');
+    const identity = objectIdentity(object, objects);
+    const combatant = combatState && combatState.combatants[id];
+    const derived = char ? derivedSelectionStats(char) : null;
+    const stats = combatant || derived;
+    const hpCurrent = combatant?.hp?.current ?? char?.hp?.current ?? stats?.maxHP ?? '—';
+    const hpMax = combatant?.maxHP ?? stats?.maxHP ?? '—';
+    const owner = char?.owner || data.owner || '';
+    const ownerLabel = /^gm$/i.test(owner) ? 'GM' : owner;
+    const classes = (char?.classes || []).map(entry => `${entry.class || 'class'} ${entry.level || 1}`).join(' / ');
+    const meta = [selectedTypeLabel(type), identity.instanceText, owner ? `Owned by ${ownerLabel}` : '', char?.race || '', classes]
+        .filter(Boolean).join(' · ');
+
+    let statsHTML = '';
+    if (type === 'character' || type === 'token') {
+        statsHTML = `<div class="selection-section">
+            <div class="selection-section-title"><span>At a glance</span>${combatant ? '<span>In encounter</span>' : ''}</div>
+            <div class="selection-metrics">
+                ${metric('HP', `${hpCurrent}/${hpMax}`)}
+                ${metric('AC', stats?.ac ?? '—')}
+                ${metric('Speed', stats?.speedFeet != null ? `${stats.speedFeet} ft` : '—')}
+                ${metric('Initiative', combatant?.initiative ?? (stats?.initMod != null ? `${stats.initMod >= 0 ? '+' : ''}${stats.initMod}` : '—'))}
+                ${metric('Conditions', combatant?.effects?.length || 0)}
+                ${metric('Turn', combatant && combatState.started ? (combatState.activeId === id ? 'Active' : 'Waiting') : '—')}
+            </div>
+        </div>`;
+    }
+
+    const canEditAppearance = ['token', 'cube', 'sphere', 'portal'].includes(type);
+    const canEditColor = ['token', 'cube', 'sphere'].includes(type);
+    const detailsHTML = canEditAppearance ? `<div class="selection-section">
+        <div class="selection-section-title"><span>Identity</span><span>Shared live</span></div>
+        <form id="selection-details-form" class="selection-form selection-form-details">
+            <label class="selection-field">Name<input name="name" maxlength="40" value="${escHtml(data.name || identity.name)}"></label>
+            ${canEditColor ? `<label class="selection-field">Color<input name="color" type="color" value="${escHtml(identity.color)}"></label>` : ''}
+            <button class="selection-button primary wide" type="submit">Save details</button>
+        </form>
+    </div>` : '';
+
+    let combatHTML = '';
+    if (type === 'character' || type === 'token') {
+        if (combatant) {
+            const effects = new Set((combatant.effects || []).map(effect => effect.key));
+            combatHTML = `<div class="selection-section">
+                <div class="selection-section-title"><span>Encounter stats</span><span>${combatState.started && combatState.activeId === id ? `${remainingFeet(combatant)} ft left` : `Round ${combatState.round || '—'}`}</span></div>
+                <form id="selection-combat-form" class="selection-form">
+                    <label class="selection-field">Current HP<input name="hpCurrent" type="number" min="0" max="999" value="${escHtml(combatant.hp?.current ?? combatant.maxHP)}"></label>
+                    <label class="selection-field">Max HP<input name="maxHP" type="number" min="1" max="999" value="${escHtml(combatant.maxHP)}"></label>
+                    <label class="selection-field">AC<input name="ac" type="number" min="1" max="30" value="${escHtml(combatant.ac)}"></label>
+                    <label class="selection-field">Speed<input name="speedFeet" type="number" min="0" max="120" value="${escHtml(combatant.speedFeet)}"></label>
+                    <label class="selection-field">Initiative<input name="initiative" type="number" min="-20" max="60" value="${combatant.initiative == null ? '' : escHtml(combatant.initiative)}"></label>
+                    <button class="selection-button primary" type="submit">Update stats</button>
+                </form>
+                <div class="selection-section-title" style="margin-top:11px"><span>Conditions</span><span>Click to toggle</span></div>
+                <div class="selection-effects">
+                    ${INSPECTOR_CONDITIONS.map(key => `<button type="button" class="selection-effect${effects.has(key) ? ' active' : ''}" data-condition="${key}">${escHtml(EFFECTS[key]?.label || key)}</button>`).join('')}
+                </div>
+                <div class="selection-actions"><button type="button" class="selection-button danger wide" data-selection-act="combat-remove">Remove from encounter</button></div>
+            </div>`;
+        } else if (combatState) {
+            combatHTML = `<div class="selection-section"><div class="selection-section-title"><span>Encounter</span></div>
+                <button type="button" class="selection-button primary" data-selection-act="combat-add">Add to encounter</button></div>`;
         } else {
-            selectedObject.material = defaultMaterial;
+            combatHTML = `<div class="selection-section"><div class="selection-section-title"><span>Encounter</span></div>
+                <button type="button" class="selection-button primary" data-selection-act="combat-start">Start encounter with map tokens</button></div>`;
         }
     }
+
+    content.innerHTML = `<div class="selection-hero" style="--selection-color:${escHtml(identity.color)}">
+            <span class="selection-color"></span>
+            <div><span class="selection-name">${escHtml(identity.displayName)}</span><span class="selection-meta">${escHtml(meta)}</span></div>
+        </div>
+        ${statsHTML}
+        ${detailsHTML}
+        <div class="selection-section">
+            <div class="selection-section-title"><span>Position</span><span>World coordinates</span></div>
+            <form id="selection-position-form" class="selection-form">
+                <label class="selection-field">X<input name="x" type="number" step="0.01" value="${fmtCoord(object.position.x)}"></label>
+                <label class="selection-field">Y<input name="y" type="number" step="0.01" value="${fmtCoord(object.position.y)}"></label>
+                <label class="selection-field">Z<input name="z" type="number" step="0.01" value="${fmtCoord(object.position.z)}"></label>
+                <button class="selection-button primary wide" type="submit">Move to coordinates</button>
+            </form>
+        </div>
+        <div class="selection-section">
+            <div class="selection-section-title"><span>Map actions</span></div>
+            <div class="selection-actions">
+                <button type="button" class="selection-button primary" data-selection-act="move">Move on map</button>
+                <button type="button" class="selection-button" data-selection-act="focus">Focus camera</button>
+                <button type="button" class="selection-button" data-selection-act="duplicate">Duplicate</button>
+                ${char ? '<button type="button" class="selection-button" data-selection-act="instances">All instances</button>' : ''}
+                ${char?.id ? '<button type="button" class="selection-button wide" data-selection-act="studio">Open character in Studio</button>' : ''}
+                <button type="button" class="selection-button danger wide" data-selection-act="delete">Delete from map</button>
+            </div>
+        </div>
+        ${combatHTML}`;
+
+    content.querySelector('#selection-details-form')?.addEventListener('submit', event => {
+        event.preventDefault();
+        if (!socket || selectedObject !== object) return;
+        const form = new FormData(event.currentTarget);
+        const patch = { name: String(form.get('name') || '').trim() };
+        if (form.has('color')) patch.color = form.get('color');
+        socket.emit('update-object', { id, patch });
+    });
+
+    content.querySelector('#selection-position-form')?.addEventListener('submit', event => {
+        event.preventDefault();
+        if (!socket || selectedObject !== object) return;
+        const form = new FormData(event.currentTarget);
+        const position = { x: Number(form.get('x')), y: Number(form.get('y')), z: Number(form.get('z')) };
+        if (!Object.values(position).every(Number.isFinite)) return;
+        object.position.set(position.x, position.y, position.z);
+        updateObjectPositionData(object);
+        socket.emit('move-object', { id, position });
+        renderSelectionInspector({ open: false });
+    });
+
+    content.querySelector('#selection-combat-form')?.addEventListener('submit', event => {
+        event.preventDefault();
+        if (!socket || selectedObject !== object) return;
+        const form = new FormData(event.currentTarget);
+        const patch = {};
+        for (const key of ['hpCurrent', 'maxHP', 'ac', 'speedFeet', 'initiative']) {
+            const raw = form.get(key);
+            if (raw !== '' && raw != null && Number.isFinite(Number(raw))) patch[key] = Number(raw);
+        }
+        socket.emit('combat-update-combatant', { combatantId: id, patch });
+    });
+
+    content.querySelectorAll('[data-condition]').forEach(button => button.addEventListener('click', () => {
+        if (!socket || selectedObject !== object) return;
+        socket.emit('combat-effect', { combatantId: id, key: button.dataset.condition, add: !button.classList.contains('active') });
+    }));
+
+    content.querySelectorAll('[data-selection-act]').forEach(button => button.addEventListener('click', () => {
+        if (!socket || selectedObject !== object) return;
+        const action = button.dataset.selectionAct;
+        if (action === 'move') {
+            setTool('move', { preserveSelection: true });
+        } else if (action === 'focus') {
+            frameCameraOn(object.position);
+        } else if (action === 'duplicate') {
+            const clone = JSON.parse(JSON.stringify(object.userData.objectData || {}));
+            delete clone.id;
+            delete clone.addedBy;
+            clone.position = { x: object.position.x + GRID_CELL_SIZE, y: object.position.y, z: object.position.z + GRID_CELL_SIZE };
+            socket.emit('add-object', clone);
+        } else if (action === 'delete') {
+            if (confirm(`Delete ${identity.displayName} from this map?`)) socket.emit('delete-object', { id });
+        } else if (action === 'studio') {
+            workspace?.openStudio(`/?character=${encodeURIComponent(char.id)}`, `${char.name || 'Character'} · Studio`);
+        } else if (action === 'instances') {
+            deselectObject({ restoreContext: false });
+            setCharacterTab('instances');
+            workspace?.showPanel('object-menu', 'Library', 'Characters');
+        } else if (action === 'combat-start') {
+            socket.emit('combat-start', {});
+        } else if (action === 'combat-add') {
+            socket.emit('combat-add-combatant', { objectId: id });
+        } else if (action === 'combat-remove') {
+            socket.emit('combat-remove-combatant', { combatantId: id });
+        }
+    }));
+
+    if (open && workspace) {
+        workspace.showPanel('selection-panel', identity.displayName, selectedTypeLabel(type));
+        if (currentTool == null) workspace.setMode('Selected');
+    }
+}
+
+function selectObject(object, { openInspector = true } = {}) {
+    if (!object) return;
+    if (!selectedObject && workspace) {
+        selectionReturnContext = {
+            panel: workspace.currentPanel(),
+            open: workspace.isInspectorOpen()
+        };
+    }
+    if (selectedObject) deselectObject({ restoreContext: false, preserveReturn: true });
+    selectedObject = object;
+    dragStartPos = object.position.clone(); // combat movement is measured from here
+    setObjectSelected(object, true);
+    renderSelectionInspector({ open: openInspector });
+    updateHintBar();
+}
+
+function deselectObject({ restoreContext = true, preserveReturn = false } = {}) {
+    if (selectedObject) setObjectSelected(selectedObject, false);
     selectedObject = null;
     dragStartPos = null;
     hideMoveTooltip();
+    if (restoreContext && workspace && workspace.currentPanel() === 'selection-panel') {
+        const context = selectionReturnContext;
+        if (context?.open && context.panel && context.panel !== 'selection-panel') workspace.showPanel(context.panel);
+        else workspace.closeInspector();
+        workspace.setMode(currentModeLabel());
+    }
+    if (!preserveReturn) selectionReturnContext = null;
+    updateHintBar();
 }
 
 // --- Combat mode -------------------------------------------------------------
@@ -1439,13 +1777,24 @@ function findObjectMesh(id) { return objects.find(o => o.userData.syncId === id)
 
 // Every combat-updated re-applies the whole state on this screen.
 function setCombat(combat) {
+    const hadCombat = !!combatState;
     combatState = combat;
     if (combatTracker) combatTracker.setState(combat);
     if (combatOverlays) combatOverlays.sync(combat);
     answerStatsPending();
     const toggle = document.getElementById('btn-combat-toggle');
     if (toggle) toggle.classList.toggle('hidden', !!combat);
-    if (!combat) pendingAttack = null;
+    if (workspace) {
+        workspace.setDockVisible(true);
+        const active = combat?.started && combat.combatants[combat.activeId];
+        const activeObject = active && findObjectMesh(active.id);
+        const activeName = activeObject ? objectIdentity(activeObject, objects).displayName : active?.name;
+        const gathering = combat && !combat.started ? `${Object.keys(combat.combatants).length} combatants · Roll initiative` : '';
+        workspace.setEncounterStatus(combat ? (active ? `Round ${combat.round} · ${activeName}` : gathering || `Round ${combat.round || '—'}`) : 'Ready to start', !!combat);
+        if (combat && !hadCombat) workspace.setDockExpanded(true);
+    }
+    if (!combat) { pendingAttack = null; pendingSpell = null; }
+    if (selectedObject) renderSelectionInspector({ open: false });
     updateHintBar();
 }
 
@@ -1466,8 +1815,16 @@ function answerStatsPending() {
 }
 
 function beginTargetPick(combatantId, attackIndex, attack) {
+    pendingSpell = null;
     pendingAttack = { combatantId, attackIndex };
     if (combatTracker) combatTracker.flash(`Pick a target for ${attack.name}: click a token (Esc cancels)`);
+    updateHintBar();
+}
+
+function beginSpellPick(combatantId, spellIndex, spell) {
+    pendingAttack = null;
+    pendingSpell = { combatantId, spellIndex };
+    if (combatTracker) combatTracker.flash(`Pick a target for ${spell.name}: click a token (Esc cancels)`);
     updateHintBar();
 }
 
@@ -1504,7 +1861,7 @@ function setSelectedObjectType(type, data = null) {
         selectedObjectData = data;
         setTool('add');
 
-        document.querySelectorAll('#object-menu .menu-button').forEach(btn => {
+        document.querySelectorAll('#object-menu .menu-button, #object-menu .character-card-place').forEach(btn => {
             btn.classList.remove('active');
         });
         if (type === 'character') {
@@ -1522,7 +1879,7 @@ function deselectObjectType() {
     if (currentTool === 'add') {
         setTool(null);
     }
-    document.querySelectorAll('#object-menu .menu-button').forEach(btn => {
+    document.querySelectorAll('#object-menu .menu-button, #object-menu .character-card-place').forEach(btn => {
         btn.classList.remove('active');
     });
 }
@@ -1532,24 +1889,37 @@ function loadCharactersToMenu(characters) {
     listContainer.innerHTML = '';
 
     if (!Array.isArray(characters) || characters.length === 0) {
-        listContainer.innerHTML = '<p style="font-size: 12px; color: #999;">No characters found. Create one in the Character Creator!</p>';
+        listContainer.innerHTML = '<div class="workspace-empty">No characters yet.<br><button class="workspace-primary" data-workspace-studio="/">Create a character</button></div>';
         return;
     }
 
     characters.forEach(char => {
-        const charBtn = document.createElement('button');
-        charBtn.className = 'menu-button';
-        charBtn.textContent = `Char: ${char.name}`;
-        charBtn.title = `${char.name} - ${char.race}`;
-        charBtn.style.color = char.color;
-        charBtn.style.fontWeight = 'bold';
-        charBtn.style.borderLeft = `5px solid ${char.color}`;
-        charBtn.dataset.charId = char.id;
-        charBtn.addEventListener('click', () => {
-            setSelectedObjectType('character', char);
-        });
-        listContainer.appendChild(charBtn);
+        const card = document.createElement('div');
+        card.className = 'character-card';
+        card.style.setProperty('--character-color', char.color || '#7f8a99');
+
+        const summary = document.createElement('div');
+        summary.className = 'character-card-main';
+        summary.innerHTML = `<span class="character-card-name"></span><span class="character-card-meta"></span>`;
+        summary.querySelector('.character-card-name').textContent = char.name || 'Unnamed';
+        summary.querySelector('.character-card-meta').textContent = `${char.owner || 'unowned'} · ${char.race || 'character'}`;
+
+        const place = document.createElement('button');
+        place.className = 'character-card-place';
+        place.textContent = 'Place';
+        place.title = `Place ${char.name || 'this character'} on the map`;
+        place.dataset.charId = char.id;
+        place.addEventListener('click', () => setSelectedObjectType('character', char));
+
+        card.append(summary, place);
+        listContainer.appendChild(card);
     });
+
+    const studio = document.createElement('button');
+    studio.className = 'workspace-secondary';
+    studio.dataset.workspaceStudio = '/';
+    studio.textContent = 'Create or edit characters';
+    listContainer.appendChild(studio);
 }
 
 // --- Characters section tabs: Spawn (place a character) | Instances ---
@@ -1580,10 +1950,11 @@ function worldToTacticalPath(x, z) {
 // province) and descend onto it once map-state arrives.
 function gotoInstance(inst) {
     if (!inst) return;
+    if (selectedObject) deselectObject({ restoreContext: false });
     const pos = inst.position || { x: 0, y: 0, z: 0 };
     const sameRoom = inst.mapKey === currentMapKey ||
         (inst.mapKey === '@world' && !isPocket(currentMapKey) && isTacticalKey(currentMapKey));
-    if (sameRoom) { focusCameraOn(pos); return; }
+    if (sameRoom) { frameCameraOn(pos); return; }
     pendingFocus = { ...pos };
     enterMap(inst.mapKey === '@world' ? worldToTacticalPath(pos.x, pos.z) : inst.mapKey);
 }
@@ -1596,6 +1967,13 @@ function renderInstanceList() {
         list.innerHTML = '<p style="font-size: 12px; color: #999;">No character tokens on any map yet.</p>';
         return;
     }
+    const instanceGroups = new Map();
+    characterInstances.forEach(inst => {
+        const key = inst.charId || `${inst.owner || ''}:${inst.charName || ''}`;
+        if (!instanceGroups.has(key)) instanceGroups.set(key, []);
+        instanceGroups.get(key).push(inst);
+    });
+    instanceGroups.forEach(group => group.sort((a, b) => String(a.id).localeCompare(String(b.id))));
     characterInstances.forEach(inst => {
         const row = document.createElement('button');
         row.className = 'instance-row';
@@ -1604,7 +1982,9 @@ function renderInstanceList() {
 
         const name = document.createElement('div');
         name.className = 'inst-name';
-        name.textContent = inst.charName || 'Unnamed';
+        const group = instanceGroups.get(inst.charId || `${inst.owner || ''}:${inst.charName || ''}`) || [inst];
+        const ordinal = group.indexOf(inst) + 1;
+        name.textContent = `${inst.charName || 'Unnamed'}${group.length > 1 ? ` · ${ordinal} of ${group.length}` : ''}`;
         if (inst.color) name.style.color = inst.color;
 
         const loc = document.createElement('div');
@@ -1623,7 +2003,10 @@ function renderInstanceList() {
 }
 
 // --- UI Management (Left Menu) ---
-function setTool(toolName) {
+function setTool(toolName, { preserveSelection = false } = {}) {
+    if (selectedObject && !preserveSelection) {
+        deselectObject({ restoreContext: false });
+    }
     if (currentTool === 'ruler' && toolName !== 'ruler') {
         ruler.clearAll(() => socket.emit('clear-rulers'));
     }
@@ -1634,8 +2017,12 @@ function setTool(toolName) {
     if (toolName !== 'add' && toolName !== null) {
         deselectObjectType();
     }
+    const activeKey = (toolName === 'add' || toolName === null) ? 'library' : toolName;
     for (const key in toolMenuButtons) {
-        toolMenuButtons[key].classList.toggle('active', key === toolName);
+        toolMenuButtons[key].classList.toggle('active', key === activeKey);
+    }
+    if (workspace) {
+        workspace.setMode(currentModeLabel());
     }
     updateTerrainPanel();
 }
@@ -1837,12 +2224,15 @@ function viewPoseFromHere() {
 function viewPoseAt(p) {
     return { pos: { x: p.x + 20, y: p.y + 30, z: p.z + 20 }, look: { x: p.x, y: p.y, z: p.z } };
 }
-function emitViewCommand(pose, what) {
+function emitViewCommand(pose, what, relocate) {
     if (!socket) return;
     socket.emit('camera-command', {
         target: viewCtl.target, pose,
         mode: viewCtl.fly ? 'fly' : 'snap',
-        lock: viewCtl.lock
+        lock: viewCtl.lock,
+        // "Bring to my view" relocates players to the GM's map/tier (crossing
+        // spaces, e.g. into a pocket); point/token sends stay camera-only.
+        mapKey: relocate ? currentMapKey : undefined
     });
     const who = viewCtl.target === 'all' ? 'all players' : viewCtl.target;
     setViewStatus(`${what} → ${who}${viewCtl.lock ? ' (locked)' : ''}`);
@@ -1868,24 +2258,22 @@ function pickSceneObject(event) {
 // --- Terrain editor logic ---
 function terrainActive() { return currentTool === 'terrain' && isTacticalKey(); }
 function updateTerrainPanel() {
-    const panel = document.getElementById('terrain-panel');
-    const show = currentTool === 'terrain' && isTacticalKey();
-    panel.classList.toggle('hidden', !show);
-    // On hex layers the same tool paints biomes instead.
-    const biomePanel = document.getElementById('biome-panel');
-    if (biomePanel) biomePanel.classList.toggle('hidden', !(currentTool === 'terrain' && isHexLayer()));
-    // Build panel rides the same left slot; ghost dies with the tool.
-    const buildPanel = document.getElementById('build-panel');
-    if (buildPanel) buildPanel.classList.toggle('hidden', !(currentTool === 'build' && isTacticalKey()));
+    // Every authoring mode now owns the one context inspector. The page still
+    // owns tool validity; the shell only decides where its controls appear.
+    if (workspace) {
+        if (currentTool === 'terrain' && isTacticalKey()) workspace.showPanel('terrain-panel', 'Terrain');
+        else if (currentTool === 'terrain' && isHexLayer()) workspace.showPanel('biome-panel', 'Biomes');
+        else if (currentTool === 'build' && isTacticalKey()) workspace.showPanel('build-panel', 'Build');
+        else if (currentTool === 'fog' && !isPocket()) workspace.showPanel('fog-panel', 'Fog of War');
+        else if (currentTool === 'view') workspace.showPanel('view-panel', 'Direct Players');
+        else if (currentTool === 'add' || currentTool === null) workspace.showPanel('object-menu', 'Library');
+        else workspace.closeInspector();
+    }
+
+    // Tool teardown remains page-owned.
     if (currentTool !== 'build') { buildDrag = null; clearBuildGhost(); }
-    // Fog panel + preview sheet live and die with the Fog tool.
-    const fogPanel = document.getElementById('fog-panel');
-    if (fogPanel) fogPanel.classList.toggle('hidden', !(currentTool === 'fog' && !isPocket()));
     if (fogOverlay) fogOverlay.setVisible(fogActive());
     if (currentTool !== 'fog') fogStroke = null;
-    // View panel rides the same left slot.
-    const viewPanel = document.getElementById('view-panel');
-    if (viewPanel) viewPanel.classList.toggle('hidden', currentTool !== 'view');
     if (terrain) terrain.setBrush({ visible: false });
     updateHintBar();
 }
@@ -1942,8 +2330,12 @@ function focusCameraOn(worldPos) {
     // editing/move), keep the current framing and just recenter.
     const TACTICAL_VIEW_DIST = 120;
     if (camera.position.distanceTo(controls.target) > TACTICAL_VIEW_DIST) {
-        camera.position.set(tx + 20, worldPos.y + 30, tz + 20);
+        camera.position.set(tx + 8, worldPos.y + 12, tz + 8);
     }
+}
+function frameCameraOn(worldPos) {
+    focusCameraOn(worldPos);
+    camera.position.set(controls.target.x + 8, worldPos.y + 12, controls.target.z + 8);
 }
 // The effective brush mode for a dab: Shift inverts raise<->lower.
 function effectiveBrushMode() {
@@ -2038,7 +2430,7 @@ function updateHintBar() {
     if (!bar) return;
     const cam = 'RMB orbit · MMB pan · wheel zoom';
     let hint;
-    if (pendingAttack) {
+    if (pendingAttack || pendingSpell) {
         hint = `Combat · pick a target — LMB click a token · Esc cancel · ${cam}`;
     } else if (terrainActive()) {
         const mode = terrainBrush.mode;
@@ -2070,6 +2462,8 @@ function updateHintBar() {
         hint = viewCtl.action === 'token'
             ? `View · token — LMB click a token to frame it for ${who} · panel: bring / lock / release · ${cam}`
             : `View · point — LMB click the ground to send ${who} there · panel: bring / lock / release · ${cam}`;
+    } else if (selectedObject && currentTool == null) {
+        hint = `${objectIdentity(selectedObject, objects).displayName} selected · inspector: edit / duplicate / encounter · . focus · Del delete · Esc clear · ${cam}`;
     } else if (currentTool === 'move') {
         hint = `Move — LMB select, LMB ground to drop · Del delete · ${cam}`;
     } else if (currentTool === 'ruler') {

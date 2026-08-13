@@ -315,18 +315,21 @@ export function buildObjectFromData(id, data) {
             objectMesh = new THREE.Mesh(
                 new THREE.CylinderGeometry(GRID_CELL_SIZE * 0.4, GRID_CELL_SIZE * 0.4, 0.2, 32),
                 defaultMaterial.clone());
+            objectMesh.material.color.set(data.color == null ? 0xdd4444 : data.color);
             halfHeight = 0.1;
             break;
         case 'cube':
             objectMesh = new THREE.Mesh(
                 new THREE.BoxGeometry(GRID_CELL_SIZE * 0.8, GRID_CELL_SIZE * 0.8, GRID_CELL_SIZE * 0.8),
                 defaultMaterial.clone());
+            objectMesh.material.color.set(data.color == null ? 0xdd4444 : data.color);
             halfHeight = GRID_CELL_SIZE * 0.4;
             break;
         case 'sphere':
             objectMesh = new THREE.Mesh(
                 new THREE.SphereGeometry(GRID_CELL_SIZE * 0.4, 32, 32),
                 defaultMaterial.clone());
+            objectMesh.material.color.set(data.color == null ? 0xdd4444 : data.color);
             halfHeight = GRID_CELL_SIZE * 0.4;
             break;
         case 'character':
@@ -382,6 +385,12 @@ export function buildObjectFromData(id, data) {
     objectMesh.receiveShadow = true;
     objectMesh.userData.halfHeight = halfHeight;
     objectMesh.userData.syncId = id;
+    // Retain the synced source record for contextual inspectors, labels and
+    // duplicate actions. Position is refreshed by the pages after live moves.
+    objectMesh.userData.objectData = {
+        ...data,
+        position: data.position ? { ...data.position } : { x: 0, y: 0, z: 0 }
+    };
     if (data.type === 'character') {
         objectMesh.userData.characterData = data.characterData;
     } else {
