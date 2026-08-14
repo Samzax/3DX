@@ -14,10 +14,13 @@ import { tickRigCharacters } from '../shared/charmesh.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { setupLoginModal } from '../shared/login.js';
-import { CombatTracker, CombatOverlays, deriveCombatStats, remainingFeet, EFFECTS } from '../shared/combat.js';
+import { CombatTracker, CombatOverlays, combatAttackDamageLabel, deriveCombatStats, remainingFeet, EFFECTS } from '../shared/combat.js';
+import { combatInteger, combatModifier, combatSpellLevel } from '../shared/combat-safety.js';
 import { FogMask, FogOverlay, chunkFogHexKey } from '../shared/fog.js';
 import { createTabletopWorkspace } from '../shared/workspace.js';
 import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData } from '../shared/object-ui.js';
+import { disposeBuiltObject, structureLevel, structureStoreyLevel, structureTouchesLevel, isStructureType } from '../shared/structures.js';
+import { AuthenticatedMapReload } from '../shared/sync-state.js';
 
 let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
 let grass = null;   // instanced ground-cover grass (shared/grass.js)
@@ -71,6 +74,7 @@ let wasRightDrag = null; // right-drag orbits the camera; see trackRightDrag
 let boundsRect = null;   // pocket-map boundary rectangle
 let currentMapKey = 'world'; // players travel between maps via portals
 let terrainIsUnified = false; // is the loaded terrain the shared continuous world?
+const mapReload = new AuthenticatedMapReload();
 let hexTree = {};            // GM biome tags (generator overrides), synced via map-state
 let regenTimer = null;       // debounce for biome-driven regeneration
 // Fog of war (U4): the server only sends content inside GM-revealed regions;
@@ -80,6 +84,11 @@ let fogOverlay = null;       // created in init
 // GM-directed camera (View control): the GM can fly/snap this view to a pose
 // and optionally lock the controls until released.
 let cameraFly = null;        // created in init
+
+// Local multi-storey cutaway. It never changes shared map state: each player
+// may inspect the floor relevant to their token without changing anyone else.
+const levelView = { active: 0, isolate: false };
+let levelCutawayState = null;
 
 const emitRuler = (data) => { if (socket) socket.emit('add-ruler', data); };
 
@@ -188,6 +197,14 @@ function init() {
 
     document.querySelectorAll('#ruler-colors .color-swatch').forEach(swatch => {
         swatch.addEventListener('click', (e) => setRulerColor(e.target.dataset.color, e.target));
+    });
+
+    document.getElementById('level-view-down').addEventListener('click', () => stepPlayerLevel(-1));
+    document.getElementById('level-view-up').addEventListener('click', () => stepPlayerLevel(1));
+    document.getElementById('level-view-toggle').addEventListener('click', () => {
+        levelView.isolate = !levelView.isolate;
+        if (levelView.isolate && !availableStructureLevels().includes(levelView.active)) levelView.active = 0;
+        applyPlayerLevelVisibility();
     });
 
     dismissSubmenusOnOutsideClick([
@@ -306,8 +323,9 @@ function updateTerrainLOD() {
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }
-    if (grass) grass.update(camera, controls, terrainIsUnified);
-    if (trees) trees.update(camera, controls, terrainIsUnified);
+    const vegetationVisible = terrainIsUnified && !levelCutawayState;
+    if (grass) grass.update(camera, controls, vegetationVisible);
+    if (trees) trees.update(camera, controls, vegetationVisible);
     if (fogOverlay) fogOverlay.update(fogMask, worldTarget.x, worldTarget.z, dist);
 }
 
@@ -327,7 +345,7 @@ function onPointerDown(event) {
     }
 
     castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const allObjects = [plane, ...objects];
+    const allObjects = [...(levelCutawayState ? [] : [plane]), ...objects.filter(o => o.visible)];
     const intersects = raycaster.intersectObjects(allObjects, true);
     if (intersects.length === 0) return;
 
@@ -338,10 +356,10 @@ function onPointerDown(event) {
     }
     const clickedObject = objects.find(obj => obj === topLevelObject);
 
-    // GM-built walls/floors are scenery to players: clicks on them read as
-    // ground (drop a move on a floor, measure across a room), never selection.
+    // GM-built structures are scenery to players. A floor, tread or visible
+    // roof hit becomes the support height for placement and movement.
     const clickedType = clickedObject && clickedObject.userData.objectType;
-    const buildAsGround = clickedType === 'wall' || clickedType === 'floor';
+    const buildAsGround = isStructureType(clickedType);
 
     // Combat: with an attack pending, this click picks the target instead.
     if (pendingAttack) {
@@ -396,7 +414,9 @@ function onPointerDown(event) {
             }
         }
     } else if (firstIntersect.object.name === "tabletop" || buildAsGround) {
-        const intersectPoint = sceneToWorld(firstIntersect.point);
+        const support = (buildAsGround || ['move', 'place', 'ruler'].includes(currentTool))
+            ? pickPlayerSupportSurface(event, { exclude: selectedObject }) : null;
+        const intersectPoint = support ? support.point : sceneToWorld(firstIntersect.point);
 
         switch (currentTool) {
             case 'move':
@@ -404,6 +424,7 @@ function onPointerDown(event) {
                     // Emit the move to the server (shared map)
                     const docId = selectedObject.userData.syncId;
                     if (docId && socket) {
+                        if (support) selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0);
                         const finalPosition = snapToGrid(selectedObject.position);
                         selectedObject.position.x = finalPosition.x;
                         selectedObject.position.z = finalPosition.z;
@@ -427,7 +448,7 @@ function onPointerDown(event) {
                 ruler.click(ruler.snap(intersectPoint), emitRuler);
                 break;
             case 'place':
-                placeCharacterAt(intersectPoint);
+                placeCharacterAt(intersectPoint, support && support.object ? support.point.y : null);
                 break;
             default:
                 if (selectedObject) deselectObject();
@@ -449,15 +470,27 @@ function onPointerMove(event) {
         return;
     }
 
-    castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const intersects = raycaster.intersectObject(plane);
-    if (intersects.length === 0) return;
-    const intersectPoint = sceneToWorld(intersects[0].point);
+    if (currentTool === 'place' && placeCharacter) {
+        // Reuse the ruler tooltip as the placement hint (the tools are exclusive).
+        const el = document.getElementById('ruler-tooltip');
+        if (el) {
+            el.textContent = `Place ${placeCharacter.name || 'character'} — click the ground (Esc cancels)`;
+            el.style.display = 'block';
+            el.style.left = (event.clientX + 14) + 'px';
+            el.style.top = (event.clientY + 14) + 'px';
+        }
+        return;
+    }
+
+    if (currentTool !== 'move' && currentTool !== 'ruler') return;
+    const support = pickPlayerSupportSurface(event, { exclude: selectedObject });
+    if (!support) return;
+    const intersectPoint = support.point;
 
     if (currentTool === 'move' && selectedObject && playerOwnsObject(selectedObject)) {
-        // Players keep the object's current height, clamped above the ground.
+        // Standard movement follows the clicked terrain/floor/stair/roof surface.
         applyMove(selectedObject, snapToGrid(intersectPoint), currentMoveMode,
-            (x, z, halfHeight, currentY) => Math.max(currentY, halfHeight));
+            (x, z, halfHeight) => intersectPoint.y + halfHeight);
         updateMoveCostTooltip(event); // combat: live «X ft — Y ft left»
     }
 
@@ -469,16 +502,6 @@ function onPointerMove(event) {
         ruler.updateTooltip([], false, true); // show "0 ft" at the cursor
     }
 
-    if (currentTool === 'place' && placeCharacter) {
-        // Reuse the ruler tooltip as the placement hint (the tools are exclusive).
-        const el = document.getElementById('ruler-tooltip');
-        if (el) {
-            el.textContent = `Place ${placeCharacter.name || 'character'} — click the ground (Esc cancels)`;
-            el.style.display = 'block';
-            el.style.left = (event.clientX + 14) + 'px';
-            el.style.top = (event.clientY + 14) + 'px';
-        }
-    }
 }
 
 // Double-click a portal to travel to its target map (the server sends the new
@@ -503,11 +526,8 @@ function onContextMenu(event) {
     event.preventDefault();
     if (wasRightDrag && wasRightDrag(event)) return; // right-drag = camera orbit, not a click
     if (currentTool !== 'ruler') return;
-    castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const intersects = raycaster.intersectObject(plane);
-    if (intersects.length > 0) {
-        ruler.restartAt(ruler.snap(sceneToWorld(intersects[0].point)), emitRuler);
-    }
+    const support = pickPlayerSupportSurface(event);
+    if (support) ruler.restartAt(ruler.snap(support.point), emitRuler);
 }
 
 function onKeyDown(event) {
@@ -575,6 +595,98 @@ function updatePlayerHintBar() {
 function sceneToWorld(p) {
     return new THREE.Vector3(p.x + terrain.worldOrigin.x, p.y, p.z + terrain.worldOrigin.z);
 }
+
+function pickPlayerSupportSurface(event, { exclude = null } = {}) {
+    castFromPointer(event, { renderer, camera, raycaster, mouse });
+    const structures = objects.filter(o => o !== exclude && o.visible &&
+        ['floor', 'stair', 'roof'].includes(o.userData.objectType));
+    const targets = [...structures];
+    if (!levelCutawayState) {
+        if (terrain && terrain.group.visible) targets.push(terrain.chunkGroup);
+        targets.push(plane);
+    }
+    const hit = raycaster.intersectObjects(targets, true)[0];
+    if (!hit) return null;
+    let top = hit.object;
+    while (top.parent && top.parent !== scene && top.parent !== worldGroup && top.parent !== terrain?.chunkGroup) top = top.parent;
+    return { point: sceneToWorld(hit.point), object: objects.find(o => o === top) || null };
+}
+
+function availableStructureLevels() {
+    const levels = new Set([0]);
+    for (const object of objects) {
+        const data = object.userData.objectData || {};
+        if (!isStructureType(object.userData.objectType)) continue;
+        const here = structureStoreyLevel(data);
+        levels.add(here);
+        if (data.type === 'stair') {
+            const there = Number.isFinite(Number(data.toLevel))
+                ? Math.round(Number(data.toLevel))
+                : here + Math.sign(Number(data.rise) || 1);
+            levels.add(there);
+        }
+    }
+    return [...levels].sort((a, b) => a - b);
+}
+
+function playerLevelName(level) {
+    return level < 0 ? `B${Math.abs(level)}` : level > 0 ? `L${level}` : 'Ground';
+}
+
+function stepPlayerLevel(direction) {
+    const levels = availableStructureLevels();
+    if (!levelView.isolate) {
+        const candidates = direction < 0 ? levels.filter(n => n < 0).reverse() : levels.filter(n => n > 0);
+        levelView.active = candidates[0] ?? 0;
+        levelView.isolate = true;
+    } else {
+        const next = direction < 0
+            ? [...levels].reverse().find(n => n < levelView.active)
+            : levels.find(n => n > levelView.active);
+        if (next != null) levelView.active = next;
+    }
+    applyPlayerLevelVisibility();
+}
+
+function restorePlayerCutaway() {
+    if (!levelCutawayState) return;
+    if (terrain) terrain.group.visible = levelCutawayState.terrain;
+    if (plane) plane.visible = levelCutawayState.plane;
+    levelCutawayState = null;
+}
+
+function applyPlayerLevelVisibility() {
+    const levels = availableStructureLevels();
+    const vertical = levels.some(n => n !== 0);
+    if (!vertical) levelView.isolate = false;
+    for (const object of objects) {
+        const type = object.userData.objectType;
+        if (!isStructureType(type)) continue;
+        const data = object.userData.objectData || { type };
+        object.visible = !levelView.isolate || structureTouchesLevel(data, levelView.active);
+    }
+    const cutAwayTerrain = vertical && levelView.isolate && levelView.active < 0;
+    if (cutAwayTerrain && terrain && plane) {
+        if (!levelCutawayState) levelCutawayState = { terrain: terrain.group.visible, plane: plane.visible };
+        terrain.group.visible = false;
+        plane.visible = false;
+        if (grass) grass.hide();
+        if (trees) trees.hide();
+    } else if (!cutAwayTerrain) {
+        restorePlayerCutaway();
+    }
+
+    const panel = document.getElementById('level-view');
+    if (panel) panel.classList.toggle('hidden', !vertical);
+    const toggle = document.getElementById('level-view-toggle');
+    if (toggle) toggle.textContent = levelView.isolate ? playerLevelName(levelView.active) : 'All levels';
+    const down = document.getElementById('level-view-down');
+    const up = document.getElementById('level-view-up');
+    const pivot = levelView.isolate ? levelView.active : 0;
+    if (down) down.disabled = !levels.some(n => n < pivot);
+    if (up) up.disabled = !levels.some(n => n > pivot);
+}
+
 function focusCameraOn(worldPos) {
     controls.target.set(worldPos.x - terrain.worldOrigin.x, worldPos.y, worldPos.z - terrain.worldOrigin.z);
 }
@@ -768,13 +880,15 @@ function renderInstanceList() {
     });
 }
 
-function placeCharacterAt(worldPoint) {
+function placeCharacterAt(worldPoint, supportY = null) {
     if (!placeCharacter || !socket) return;
     const heightScale = (placeCharacter.appearance && placeCharacter.appearance.height) || 1;
     const halfHeight = (1 * heightScale) / 2 * 0.4;
     const snapped = snapToGrid(worldPoint);
-    // Seat the token on the terrain surface (flat y=0 in terrainless pockets).
-    const base = (terrain && terrain.group.visible) ? terrain.sampleHeight(snapped.x, snapped.z) : 0;
+    // A clicked upper/basement floor wins; otherwise retain the terrain fallback.
+    const base = Number.isFinite(supportY)
+        ? supportY
+        : (terrain && terrain.group.visible) ? terrain.sampleHeight(snapped.x, snapped.z) : 0;
     socket.emit('add-object', {
         type: 'character',
         characterData: placeCharacter,
@@ -785,13 +899,76 @@ function placeCharacterAt(worldPoint) {
 }
 
 // --- Object Management ---
+function replaceObjectGeometry(object, patch) {
+    const index = objects.indexOf(object);
+    if (index < 0) return object;
+    const source = object.userData.objectData || {};
+    const data = {
+        ...source,
+        ...patch,
+        position: { x: object.position.x, y: object.position.y, z: object.position.z }
+    };
+    const replacement = buildObjectFromData(object.userData.syncId, data);
+    if (!replacement) return object;
+    const wasSelected = selectedObject === object;
+    if (wasSelected) setObjectSelected(object, false);
+    if (objectNameplates) objectNameplates.removeFrom(object);
+    worldGroup.remove(object);
+    disposeBuiltObject(object);
+    worldGroup.add(replacement);
+    objects[index] = replacement;
+    if (wasSelected) {
+        selectedObject = replacement;
+        dragStartPos = replacement.position.clone();
+        setObjectSelected(replacement, true);
+    }
+    applyPlayerLevelVisibility();
+    return replacement;
+}
+
 function createObjectFromData(id, data) {
     const mesh = buildObjectFromData(id, data);
     if (mesh) {
         worldGroup.add(mesh); // synced positions are world coords
         objects.push(mesh);
+        applyPlayerLevelVisibility();
         if (objectNameplates) objectNameplates.sync(objects);
     }
+}
+
+function applyStructureBatchResult(result = {}) {
+    const resultIsPocket = typeof result.key === 'string' && result.key.startsWith('pocket/');
+    const currentIsPocket = currentMapKey.startsWith('pocket/');
+    if (result.key && result.key !== currentMapKey && (resultIsPocket || currentIsPocket)) return;
+    const created = Array.isArray(result.created) ? result.created : [];
+    const updated = Array.isArray(result.updated) ? result.updated : [];
+    const deleted = Array.isArray(result.deleted) ? result.deleted : [];
+    for (const record of created) {
+        if (record && record.id && !objects.some(object => object.userData.syncId === record.id)) {
+            createObjectFromData(record.id, record);
+        }
+    }
+    for (const entry of updated) {
+        if (!entry || !entry.id || !entry.patch) continue;
+        const object = objects.find(candidate => candidate.userData.syncId === entry.id);
+        if (!object) continue;
+        const type = object.userData.objectType;
+        const geometryChanged = (type === 'wall' && Object.prototype.hasOwnProperty.call(entry.patch, 'segments')) ||
+            ((type === 'floor' || type === 'roof') && Object.prototype.hasOwnProperty.call(entry.patch, 'tiles'));
+        if (geometryChanged) replaceObjectGeometry(object, entry.patch);
+        else updateObjectPresentation(object, entry.patch);
+    }
+    for (const entry of deleted) {
+        const id = typeof entry === 'string' ? entry : entry && entry.id;
+        const object = objects.find(candidate => candidate.userData.syncId === id);
+        if (!object) continue;
+        if (selectedObject === object) deselectObject();
+        if (objectNameplates) objectNameplates.removeFrom(object);
+        worldGroup.remove(object);
+        objects = objects.filter(candidate => candidate !== object);
+    }
+    applyPlayerLevelVisibility();
+    if (objectNameplates) objectNameplates.sync(objects);
 }
 
 function playerOwnsObject(object) {
@@ -814,22 +991,30 @@ function renderPlayerSelectionInspector({ open = true } = {}) {
     const id = object.userData.syncId;
     const data = object.userData.objectData || {};
     const char = object.userData.characterData || null;
+    const monster = data.monsterData || null;
     const type = char ? 'character' : (object.userData.objectType || data.type || 'object');
     const identity = objectIdentity(object, objects);
     const combatant = combatState && combatState.combatants[id];
     const owner = char?.owner || '';
     const ownerLabel = /^gm$/i.test(owner) ? 'the GM' : owner;
     const typeLabel = char ? 'Character token' : ({ token: 'Creature token', portal: 'Portal', cave: 'Cave', arch: 'Rock arch', cube: 'Object', sphere: 'Object' }[type] || 'Map object');
-    const effects = (combatant?.effects || []).map(effect => EFFECTS[effect.key]?.label || effect.label || effect.key);
+    const effects = (Array.isArray(combatant?.effects) ? combatant.effects : [])
+        .map(effect => EFFECTS[effect.key]?.label || effect.label || effect.key);
     const classes = (char?.classes || []).map(entry => `${entry.class || 'class'} ${entry.level || 1}`).join(' / ');
-    const meta = [typeLabel, identity.instanceText, owner ? `Controlled by ${ownerLabel}` : '', char?.race || '', classes].filter(Boolean).join(' · ');
+    const monsterMeta = monster
+        ? `${monster.size || 'Medium'} ${monster.type || 'creature'}`
+        : '';
+    const meta = [typeLabel, identity.instanceText, owner ? `Controlled by ${ownerLabel}` : '', char?.race || '', classes, monsterMeta].filter(Boolean).join(' · ');
 
+    const roundLabel = combatState?.round == null
+        ? '—'
+        : combatInteger(combatState.round, { fallback: 0, min: 0, max: 1000000 });
     const combatHTML = combatant ? `<div class="selection-section">
-        <div class="selection-section-title"><span>Encounter</span><span>${combatState.started && combatState.activeId === id ? 'Active turn' : `Round ${combatState.round || '—'}`}</span></div>
+        <div class="selection-section-title"><span>Encounter</span><span>${combatState.started && combatState.activeId === id ? 'Active turn' : `Round ${escHtml(roundLabel)}`}</span></div>
         <div class="selection-metrics">
             ${playerSelectionMetric('HP', `${combatant.hp?.current ?? '—'}/${combatant.maxHP}`)}
             ${playerSelectionMetric('AC', combatant.ac)}
-            ${playerSelectionMetric('Speed', `${combatant.speedFeet} ft`)}
+            ${playerSelectionMetric('Speed', `${combatInteger(combatant.speedFeet, { fallback: 0, min: 0, max: 1000000 })} ft`)}
             ${playerSelectionMetric('Initiative', combatant.initiative ?? '—')}
             ${playerSelectionMetric('Movement', combatState.activeId === id ? `${remainingFeet(combatant)} ft` : '—')}
             ${playerSelectionMetric('Conditions', effects.length || 0)}
@@ -1220,16 +1405,20 @@ function renderActionsPanel(char, d) {
         const activeObject = findObjectMesh(c.id);
         const activeLabel = activeObject ? objectIdentity(activeObject, objects).displayName : c.name;
         const dis = c.actionUsed ? 'disabled' : '';
-        const atkBtns = (c.attacks || []).map((a, i) =>
-            `<button class="btn-combat atk" data-combat-atk="${i}" ${dis}>⚔ ${escHtml(a.name)} <span class="tag">${fmtMod(a.attack)} · ${escHtml(a.damage)} ${escHtml(a.damageType)}</span></button>`
+        const atkBtns = (Array.isArray(c.attacks) ? c.attacks : []).map((a, i) =>
+            `<button class="btn-combat atk" data-combat-atk="${i}" ${dis}>⚔ ${escHtml(a?.name)} <span class="tag">${combatModifier(a?.attack)} · ${escHtml(combatAttackDamageLabel(a))}</span></button>`
         ).join('') || '<p class="muted">No attacks.</p>';
-        const spellBtns = (c.spells || []).map((spell, i) => {
-            const spellDis = c.actionUsed || (spell.level > 0 && (c.slots?.[spell.level] || 0) < 1) ? 'disabled' : '';
-            const level = spell.level === 0 ? 'Cantrip' : `L${spell.level}`;
-            return `<button class="btn-combat" data-combat-spell="${i}" ${spellDis}>✨ ${escHtml(spell.name)} <span class="tag">${level} · ${escHtml(spell.damage)} ${escHtml(spell.damageType)}</span></button>`;
+        const spellBtns = (Array.isArray(c.spells) ? c.spells : []).map((spell, i) => {
+            const spellLevel = combatSpellLevel(spell?.level);
+            const slots = combatInteger(c.slots?.[spellLevel], { fallback: 0, min: 0, max: 99 });
+            const spellDis = c.actionUsed || (spellLevel > 0 && slots < 1) ? 'disabled' : '';
+            const level = spellLevel === 0 ? 'Cantrip' : `L${spellLevel}`;
+            return `<button class="btn-combat" data-combat-spell="${i}" ${spellDis}>✨ ${escHtml(spell?.name)} <span class="tag">${level} · ${escHtml(spell?.damage)} ${escHtml(spell?.damageType)}</span></button>`;
         }).join('') || '<p class="muted">No spells.</p>';
+        const round = combatInteger(combatState.round, { fallback: 1, min: 0, max: 1000000 });
+        const speed = combatInteger(c.speedFeet, { fallback: 0, min: 0, max: 1000000 });
         ac.innerHTML = `
-            <div class="row-item"><span>▶ ${escHtml(activeLabel)}'s turn — Round ${combatState.round}</span><b>${remainingFeet(c)} ft left</b></div>
+            <div class="row-item"><span>▶ ${escHtml(activeLabel)}'s turn — Round ${round}</span><b>${remainingFeet(c)} ft left</b></div>
             ${c.actionUsed ? '<p class="muted">Action used this turn — you can still move, then end your turn.</p>' : ''}
             <h4>Attacks</h4>
             <div class="combat-actions-list">${atkBtns}</div>
@@ -1237,7 +1426,7 @@ function renderActionsPanel(char, d) {
             <div class="combat-actions-list">${spellBtns}</div>
             <h4>Other Actions</h4>
             <div class="combat-actions-list">
-                <button class="btn-combat" data-combat-act="dash" ${dis}>💨 Dash <span class="tag">+${c.speedFeet} ft move</span></button>
+                <button class="btn-combat" data-combat-act="dash" ${dis}>💨 Dash <span class="tag">+${speed} ft move</span></button>
                 <button class="btn-combat" data-combat-act="dodge" ${dis}>🛡 Dodge <span class="tag">attacks vs you at disadv.</span></button>
                 <button class="btn-combat" data-combat-act="disengage" ${dis}>↪ Disengage</button>
                 <button class="btn-combat end" data-combat-act="end-turn">■ End Turn</button>
@@ -1356,17 +1545,20 @@ function initSocket(username) {
     });
 
     socket.on('connect', () => {
+        mapReload.onConnect();
         console.log('Conectado ao servidor com ID:', socket.id);
         socket.emit('login', username);
         sessionStorage.setItem('vtt_username', username);
-        // Reconnects auto-join 'world' server-side; come back to where we were.
-        if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
 
     socket.on('login-success', (userData) => {
+        mapReload.onAuthenticated();
         console.log('Jogador autenticado:', userData);
         if (workspace) workspace.setUser(userData.username);
         login.hide();
+        // Rejoin only after application authentication. A delayed pre-login
+        // snapshot must not satisfy reconnect recovery.
+        if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
 
     // --- Character data for the HUD ---
@@ -1475,9 +1667,10 @@ function initSocket(username) {
 
     // Full map state on connect
     socket.on('map-state', (data) => {
-        // Ignore states for maps we're not on (e.g. the automatic 'world' join
-        // that precedes our re-join after a reconnect).
-        if (data.key && data.key !== currentMapKey) return;
+        if (!mapReload.acceptsMapState(data.key, currentMapKey)) return;
+        restorePlayerCutaway();
+        levelView.active = 0;
+        levelView.isolate = false;
         if (workspace) {
             const location = data.meta && data.meta.name
                 ? data.meta.name
@@ -1516,7 +1709,7 @@ function initSocket(username) {
                 fogMask.setList(data.fog || []);
                 if (fogOverlay) fogOverlay.setVisible(true);
                 // One continuous world: load once, then fly between provinces.
-                if (!terrainIsUnified) {
+                if (mapReload.shouldReplaceUnified(terrainIsUnified)) {
                     terrain.generatorOn = true;
                     terrain.reset();
                     if (data.terrain) terrain.applyData(data.terrain);
@@ -1558,11 +1751,33 @@ function initSocket(username) {
         // A GM "Bring to my view" that crossed maps: land on the pose now that
         // the target map is loaded (snap — we just teleported here).
         if (pendingViewPose) { applyViewPose(pendingViewPose.pose, 'snap', pendingViewPose.lock); pendingViewPose = null; }
+        applyPlayerLevelVisibility();
+        mapReload.onMapStateApplied();
     });
 
     // Live terrain edits from the GM (partial chunk payload).
     socket.on('terrain-updated', (data) => {
-        if (terrain) { terrain.applyData(data); terrain.group.visible = true; styleGroundForTerrain(plane, true); }
+        if (terrain) {
+            terrain.applyData(data);
+            terrain.group.visible = true;
+            styleGroundForTerrain(plane, true);
+            applyPlayerLevelVisibility();
+        }
+    });
+
+    // Regional and pocket resets are published only after the server commits
+    // chunks and water together. Apply that canonical result exactly like a
+    // live terrain update, then reassert any basement cutaway.
+    socket.on('terrain-reset-applied', (data) => {
+        const belongsHere = data?.scope === 'map'
+            ? data.contextKey === currentMapKey
+            : data?.scope === 'province' ? terrainIsUnified : true;
+        if (terrain && belongsHere) {
+            terrain.applyData(data);
+            terrain.group.visible = true;
+            styleGroundForTerrain(plane, true);
+            applyPlayerLevelVisibility();
+        }
     });
 
     // Fog of war: the GM revealed or hid regions. Revealed content (objects,
@@ -1613,10 +1828,20 @@ function initSocket(username) {
     socket.on('object-updated', ({ id, patch } = {}) => {
         const object = objects.find(o => o.userData.syncId === id);
         if (!object || !patch) return;
-        updateObjectPresentation(object, patch);
+        const type = object.userData.objectType;
+        const geometryChanged = (type === 'wall' &&
+            Object.prototype.hasOwnProperty.call(patch, 'segments')) ||
+            ((type === 'floor' || type === 'roof') &&
+                Object.prototype.hasOwnProperty.call(patch, 'tiles'));
+        const updated = geometryChanged
+            ? replaceObjectGeometry(object, patch)
+            : object;
+        if (updated === object) updateObjectPresentation(object, patch);
         if (objectNameplates) objectNameplates.sync(objects);
-        if (selectedObject === object && !playerOwnsObject(object)) renderPlayerSelectionInspector({ open: false });
+        if (selectedObject === updated && !playerOwnsObject(updated)) renderPlayerSelectionInspector({ open: false });
     });
+
+    socket.on('structure-batch-applied', (result) => applyStructureBatchResult(result));
 
     socket.on('object-deleted', (data) => {
         const object = objects.find(o => o.userData.syncId === data.id);
@@ -1625,6 +1850,7 @@ function initSocket(username) {
             if (objectNameplates) objectNameplates.removeFrom(object);
             worldGroup.remove(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
+            applyPlayerLevelVisibility();
             if (objectNameplates) objectNameplates.sync(objects);
         }
     });
@@ -1646,6 +1872,7 @@ function initSocket(username) {
     });
 
     socket.on('disconnect', () => {
+        mapReload.onDisconnect();
         console.log('Desconectado do servidor.');
     });
 }

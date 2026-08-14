@@ -313,6 +313,39 @@ body {
 }
 #hint-bar:empty { display: none; }
 
+/* --- Multi-storey cutaway control (player): all levels by default; choosing
+   a level hides the others and removes terrain while viewing a basement. --- */
+#level-view {
+  position: absolute;
+  top: 70px;
+  left: 78px;
+  z-index: 34;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius);
+  background: var(--panel-bg);
+  box-shadow: 0 8px 24px rgba(0,0,0,.28);
+}
+#level-view.hidden { display: none; }
+#level-view button {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-right: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+#level-view button:last-child { border-right: 0; }
+#level-view button:hover { background: var(--btn-bg-hover); }
+#level-view button:disabled { opacity: .35; cursor: default; background: transparent; }
+#level-view button:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+#level-view-toggle { min-width: 96px !important; color: var(--accent-warm) !important; font-weight: 700; }
+
 #ruler-tooltip {
   position: absolute;
   display: none; /* Hidden by default */

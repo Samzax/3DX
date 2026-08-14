@@ -4,7 +4,7 @@
 
 import * as THREE from 'three';
 import { GRID_CELL_SIZE } from './scene.js';
-import { buildWallRun, buildFloorPatch } from './structures.js';
+import { buildWallRun, buildFloorPatch, buildStaircase, buildRoofPatch } from './structures.js';
 import { createRigCharacter } from './charmesh.js';
 
 export const defaultMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
@@ -311,13 +311,22 @@ export function buildObjectFromData(id, data) {
     let halfHeight = 0.5;
 
     switch (data.type) {
-        case 'token':
+        case 'token': {
+            const sizeScale = ({ Tiny: 0.5, Small: 0.75, Medium: 1, Large: 2, Huge: 3, Gargantuan: 4 })[
+                data.monsterData && data.monsterData.size
+            ] || 1;
             objectMesh = new THREE.Mesh(
-                new THREE.CylinderGeometry(GRID_CELL_SIZE * 0.4, GRID_CELL_SIZE * 0.4, 0.2, 32),
+                new THREE.CylinderGeometry(
+                    GRID_CELL_SIZE * 0.4 * sizeScale,
+                    GRID_CELL_SIZE * 0.4 * sizeScale,
+                    0.2,
+                    32
+                ),
                 defaultMaterial.clone());
             objectMesh.material.color.set(data.color == null ? 0xdd4444 : data.color);
             halfHeight = 0.1;
             break;
+        }
         case 'cube':
             objectMesh = new THREE.Mesh(
                 new THREE.BoxGeometry(GRID_CELL_SIZE * 0.8, GRID_CELL_SIZE * 0.8, GRID_CELL_SIZE * 0.8),
@@ -368,6 +377,14 @@ export function buildObjectFromData(id, data) {
             break;
         case 'floor':
             objectMesh = buildFloorPatch(data);
+            halfHeight = 0;
+            break;
+        case 'stair':
+            objectMesh = buildStaircase(data);
+            halfHeight = 0;
+            break;
+        case 'roof':
+            objectMesh = buildRoofPatch(data);
             halfHeight = 0;
             break;
         default:

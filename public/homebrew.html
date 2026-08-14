@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Homebrew Builder — 3DX</title>
+  <title>Monster, Race &amp; Class Homebrew Builder — 3DX</title>
   <link rel="stylesheet" href="/css/homebrew.css" />
 </head>
 <body>
@@ -20,12 +20,90 @@
 
   <div id="app" class="wrap hidden">
     <div class="topbar">
-      <div class="title"><span>Homebrew builder</span><span class="badge">custom races &amp; classes</span></div>
-      <div><a href="/">← Character creator</a></div>
+      <div class="title"><span>Homebrew builder</span><span class="badge">custom monsters, races &amp; classes</span></div>
+      <div class="top-links"><a href="/data/srd/ATTRIBUTION.md" target="_blank" rel="license">SRD license</a><a href="/">← Character creator</a></div>
     </div>
 
     <div class="layout">
       <div>
+        <!-- Custom Monster -->
+        <div class="panel" id="monster-builder">
+          <div class="panel-heading">
+            <h2>Custom monster</h2>
+            <span class="pill" id="monster-edit-badge">new</span>
+          </div>
+
+          <div class="template-row hidden" id="m-template-row">
+            <div class="row">
+              <label class="fld" for="m-template">Start from an SRD monster</label>
+              <div class="inline-control">
+                <select id="m-template"><option value="">Choose a monster…</option></select>
+                <button class="btn btn-sm" id="clone-srd-monster" type="button">Use template</button>
+              </div>
+              <div class="field-hint">Templates are copied into a new homebrew monster; the SRD original is never changed.</div>
+            </div>
+          </div>
+
+          <div class="grid3 monster-identity-grid">
+            <div class="row"><label class="fld" for="m-name">Name</label><input type="text" id="m-name" placeholder="e.g. Embermaw"/></div>
+            <div class="row"><label class="fld" for="m-size">Size</label><select id="m-size"><option>Tiny</option><option>Small</option><option selected>Medium</option><option>Large</option><option>Huge</option><option>Gargantuan</option></select></div>
+            <div class="row"><label class="fld" for="m-type">Type</label><input type="text" id="m-type" value="monstrosity" placeholder="e.g. aberration"/></div>
+          </div>
+          <div class="grid3 monster-identity-grid">
+            <div class="row"><label class="fld" for="m-alignment">Alignment</label><input type="text" id="m-alignment" value="unaligned"/></div>
+            <div class="row"><label class="fld" for="m-cr">Challenge rating</label><input type="text" id="m-cr" value="1" list="cr-values" placeholder="e.g. 1/4 or 5"/></div>
+            <div class="row color-field"><label class="fld" for="m-color">Token color</label><input type="color" id="m-color" value="#ef4444"/></div>
+          </div>
+          <datalist id="cr-values"><option value="0"></option><option value="1/8"></option><option value="1/4"></option><option value="1/2"></option><option value="1"></option><option value="2"></option><option value="3"></option><option value="5"></option><option value="10"></option><option value="20"></option><option value="30"></option></datalist>
+
+          <div class="grid4 monster-combat-grid">
+            <div class="row"><label class="fld" for="m-ac">Armor class</label><input type="number" id="m-ac" value="12" min="1" max="30"/></div>
+            <div class="row"><label class="fld" for="m-hp">Hit points</label><input type="number" id="m-hp" value="10" min="1" max="999"/></div>
+            <div class="row"><label class="fld" for="m-hit-dice">Hit dice</label><input type="text" id="m-hit-dice" value="2d8" placeholder="e.g. 8d10+24"/></div>
+            <div class="row"><label class="fld" for="m-speed">Walk speed (ft)</label><input type="number" id="m-speed" value="30" min="0" max="120"/></div>
+          </div>
+
+          <div class="row">
+            <label class="fld">Ability scores</label>
+            <div class="ability-grid monster-ability-grid" id="m-abilities"></div>
+          </div>
+          <div class="row">
+            <label class="fld">Saving throw bonuses <span class="optional">(optional)</span></label>
+            <div class="ability-grid monster-ability-grid" id="m-saves"></div>
+          </div>
+
+          <div class="grid3 damage-grid">
+            <div class="row"><label class="fld" for="m-vulnerabilities">Damage vulnerabilities</label><textarea id="m-vulnerabilities" placeholder="cold, radiant"></textarea></div>
+            <div class="row"><label class="fld" for="m-resistances">Damage resistances</label><textarea id="m-resistances" placeholder="fire, poison"></textarea></div>
+            <div class="row"><label class="fld" for="m-immunities">Damage immunities</label><textarea id="m-immunities" placeholder="necrotic"></textarea></div>
+          </div>
+
+          <div class="grid2">
+            <div class="row"><label class="fld" for="m-senses">Senses</label><textarea id="m-senses" placeholder="darkvision 60 ft., tremorsense 30 ft."></textarea></div>
+            <div class="row"><label class="fld" for="m-languages">Languages</label><textarea id="m-languages" placeholder="Common, Draconic"></textarea></div>
+          </div>
+          <div class="row compact-number">
+            <label class="fld" for="m-passive">Passive Perception</label>
+            <input type="number" id="m-passive" value="10" min="0" max="99"/>
+          </div>
+
+          <div class="row repeatable-section">
+            <div class="repeatable-heading"><label class="fld">Traits</label><button class="btn btn-sm" id="add-monster-trait" type="button">+ Add trait</button></div>
+            <div id="m-traits"></div>
+          </div>
+
+          <div class="row repeatable-section">
+            <div class="repeatable-heading"><label class="fld">Actions</label><button class="btn btn-sm" id="add-monster-action" type="button">+ Add action</button></div>
+            <div id="m-actions"></div>
+          </div>
+
+          <div class="form-actions">
+            <button class="btn btn-accent" id="save-monster">Save monster</button>
+            <button class="btn" id="reset-monster" type="button">Reset</button>
+          </div>
+          <div class="msg" id="monster-msg"></div>
+        </div>
+
         <!-- Custom Race -->
         <div class="panel">
           <h2>Custom race</h2>
@@ -78,6 +156,7 @@
       <div class="panel">
         <h3 style="font-size:15px; margin-bottom:10px;">Existing homebrew</h3>
         <div id="hb-list"><p style="color:var(--muted); font-size:13px;">None yet.</p></div>
+        <div class="msg" id="homebrew-msg"></div>
       </div>
     </div>
   </div>

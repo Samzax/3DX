@@ -36,6 +36,7 @@ const FILES = {
 };
 
 let _cache = null;
+let _monsterCache = null;
 
 export async function loadSRD(base = '/data/srd') {
   if (_cache) return _cache;
@@ -48,6 +49,19 @@ export async function loadSRD(base = '/data/srd') {
   );
   _cache = new SRD(Object.fromEntries(entries));
   return _cache;
+}
+
+// Monsters are a much larger catalog than the character-building tables, so
+// keep them lazy. Only the GM library and homebrew studio need this payload;
+// character creator/player boot should not pay the download and parse cost.
+export async function loadSRDMonsters(base = '/data/srd') {
+  if (_monsterCache) return _monsterCache;
+  const res = await fetch(`${base}/monsters.json`);
+  if (!res.ok) throw new Error(`Failed to load monsters.json (${res.status})`);
+  const monsters = await res.json();
+  if (!Array.isArray(monsters)) throw new Error('Invalid monsters.json');
+  _monsterCache = monsters;
+  return _monsterCache;
 }
 
 class SRD {

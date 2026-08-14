@@ -131,6 +131,14 @@
     <!-- --- GM view lock (camera-goto with lock: the GM is steering this camera) --- -->
     <div id="view-lock-banner" class="hidden">&#128065; The GM is directing your view</div>
 
+    <!-- Local cutaway control for multi-storey buildings. It appears only when
+         the current map contains elevated/basement construction. -->
+    <div id="level-view" class="hidden" aria-label="Building level view">
+        <button id="level-view-down" title="View one storey down">&minus;</button>
+        <button id="level-view-toggle" title="Toggle all levels / active level">All levels</button>
+        <button id="level-view-up" title="View one storey up">+</button>
+    </div>
+
     <!-- --- Player HUD (Bottom) --- -->
     <div id="player-hud">
         <button class="hud-button active" data-panel="character-menu">Library</button>

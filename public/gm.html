@@ -104,7 +104,7 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20l5-9 4 5 3-4 6 8z"></path></svg>
         </button>
 
-        <button id="btn-tool-build" class="tool-button" data-label="Build" title="Build (B): tile-brush walls &amp; floors on tactical maps">
+        <button id="btn-tool-build" class="tool-button" data-label="Build" title="Build (B): multi-storey walls, floors, stairs &amp; roofs on tactical maps">
             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="1"></rect><path d="M3 9.3h18M3 14.6h18M9 4v5.3M15 9.3v5.3M9 14.6V20"></path></svg>
         </button>
 
@@ -174,14 +174,83 @@
         <button id="terrain-reset" class="tp-reset">Reset terrain</button>
     </div>
 
-    <!-- --- Build panel (tile brush: walls & floors on tactical maps) --- -->
+    <!-- --- Build panel (multi-storey tile brush: walls, floors, stairs and covers) --- -->
     <div id="build-panel" class="hidden">
         <h3>Build</h3>
+        <div class="tp-label">Building</div>
+        <div id="build-building-readout" title="Active building identity">New building</div>
+        <div class="tp-row build-building-buttons">
+            <button id="build-new-building" class="brush-mode" title="Start authoring pieces in a new, separate building">New</button>
+            <button id="build-pick-building" class="brush-mode" title="Click a grouped structure to make its building active">Pick</button>
+            <button id="build-adopt-structure" class="brush-mode" title="Explicitly add one clicked structure to the active building">Adopt piece</button>
+        </div>
+        <div class="tp-row build-duplicate-buttons">
+            <button id="build-duplicate-down" class="brush-mode" title="Duplicate the active building's current storey one level down">Duplicate below</button>
+            <button id="build-duplicate-up" class="brush-mode" title="Duplicate the active building's current storey one level up">Duplicate above</button>
+        </div>
+        <div id="build-building-status" class="tp-hint" aria-live="polite">New pieces share this building until you choose another.</div>
         <div class="tp-label">Mode</div>
         <div class="tp-row" id="build-modes">
-            <button class="brush-mode active" data-bmode="wall" title="Drag along the grid to raise a wall run">Wall</button>
+            <button class="brush-mode active" data-bmode="wall" title="Drag along the grid, then turn once to make an L-shaped wall run">Wall</button>
             <button class="brush-mode" data-bmode="floor" title="Drag a rectangle of floor tiles">Floor</button>
-            <button class="brush-mode" data-bmode="erase" title="Click a wall/floor to remove it">Erase</button>
+            <button class="brush-mode" data-bmode="stair" title="Drag a straight staircase between adjacent levels">Stairs</button>
+            <button class="brush-mode" data-bmode="roof" title="Drag a roof and ceiling over the active level">Roof</button>
+            <button class="brush-mode" data-bmode="opening" title="Click individual wall cells to add doors, windows or gaps">Openings</button>
+            <button class="brush-mode" data-bmode="tile" title="Cut or restore individual floor and roof cells">Tiles</button>
+            <button class="brush-mode" data-bmode="erase" title="Cut one wall, floor or roof cell; click stairs to remove them">Erase</button>
+        </div>
+        <div id="build-wall-options">
+            <div class="tp-hint">Drag straight, then turn for an L-shaped run. Your first movement sets the first leg.</div>
+        </div>
+        <div id="build-opening-options" class="hidden">
+            <div class="tp-label">Wall segment</div>
+            <div class="tp-row">
+                <button class="brush-mode active" data-opening-kind="door">Door</button>
+                <button class="brush-mode" data-opening-kind="window">Window</button>
+                <button class="brush-mode" data-opening-kind="gap">Gap</button>
+                <button class="brush-mode" data-opening-kind="solid">Solid</button>
+            </div>
+        </div>
+        <div id="build-tile-options" class="hidden">
+            <div class="tp-label">Floor / roof tile</div>
+            <div class="tp-row">
+                <button class="brush-mode active" data-tile-kind="gap">Cut</button>
+                <button class="brush-mode" data-tile-kind="solid">Restore</button>
+            </div>
+            <div class="tp-hint">Click one cell. Cut cells remain targetable so they can be restored later.</div>
+        </div>
+        <div id="build-roof-options" class="hidden">
+            <div class="tp-label">Roof / ceiling shape</div>
+            <div class="tp-row">
+                <button class="brush-mode" data-roof-shape="flat">Flat</button>
+                <button class="brush-mode active" data-roof-shape="gable-x">Gable X</button>
+                <button class="brush-mode" data-roof-shape="gable-z">Gable Z</button>
+                <button class="brush-mode" data-roof-shape="hip">Hip</button>
+            </div>
+            <div class="tp-slider">
+                <label>Pitch <span id="build-roof-pitch-val">6:12</span></label>
+                <input type="range" id="build-roof-pitch" min="0.1" max="1" step="0.05" value="0.5">
+            </div>
+            <div class="tp-hint">The cover sits one level above the active storey. Its underside is the interior ceiling.</div>
+        </div>
+        <div class="tp-label">Active level</div>
+        <div class="tp-row build-level-buttons">
+            <button id="build-level-down" class="brush-mode" title="One storey down (Page Down)">&minus;</button>
+            <button id="build-level-ground" class="brush-mode active" title="Return to ground level (Home)">Ground</button>
+            <button id="build-level-up" class="brush-mode" title="One storey up (Page Up)">+</button>
+        </div>
+        <div id="build-level-readout">Ground &middot; follows terrain</div>
+        <div class="tp-row">
+            <button id="build-pick-level" class="brush-mode build-wide" title="Click terrain or an existing floor to adopt its level and height">Pick from map</button>
+        </div>
+        <div class="tp-slider">
+            <label>Storey rise <span id="build-level-height-val">10 ft</span></label>
+            <input type="range" id="build-level-height" min="1" max="4" step="0.2" value="2">
+        </div>
+        <div class="tp-slider">
+            <label><input type="checkbox" id="build-follow-terrain" checked> Ground floors follow terrain</label>
+            <label><input type="checkbox" id="build-auto-snap" checked> Walls, stairs and roofs adopt clicked floors</label>
+            <label><input type="checkbox" id="build-isolate-level"> Isolate active level (cuts away terrain below ground)</label>
         </div>
         <div class="tp-label">Style</div>
         <div class="tp-row" id="build-styles">
@@ -196,7 +265,14 @@
         <div class="tp-slider">
             <label><input type="checkbox" id="build-scruffy"> Scruffy (ruins: gaps, crumble, tilt)</label>
         </div>
-        <div class="tp-hint">Walls snap to grid lines and follow the terrain; floors fill dragged rectangles. Esc cancels a drag, Alt+click erases a whole run/patch. For interiors, pair with a portal pocket map.</div>
+        <div id="build-stair-options" class="hidden">
+            <div class="tp-label">Stair direction</div>
+            <div class="tp-row">
+                <button class="brush-mode active" data-stair-dir="1">Up</button>
+                <button class="brush-mode" data-stair-dir="-1">Down</button>
+            </div>
+        </div>
+        <div class="tp-hint">Ground structures can follow terrain; every other level is flat. Roofs include ceilings and hide when their covered level is isolated. Storey duplication includes roofs by covered level and stairs by their starting level. Alt+click removes an entire structure.</div>
     </div>
 
     <!-- --- Fog of war panel (fog tool on the unified world: reveal/hide regions) --- -->
@@ -266,6 +342,19 @@
         <button id="btn-arch" class="menu-button">Rock Arch (prop)</button>
         <button id="btn-portal-new" class="menu-button" title="Creates a new pocket map (dungeon/room) and places its entry portal">Portal: New Dungeon</button>
         <button id="btn-portal-link" class="menu-button" title="Places a portal to an existing map key">Portal: Link Map</button>
+
+        <div id="monster-menu-container">
+            <h2>Monsters</h2>
+            <input id="monster-search" type="search" placeholder="Search 334 SRD + custom…" autocomplete="off" aria-label="Search monsters">
+            <div class="monster-filters">
+                <select id="monster-type-filter" aria-label="Filter monsters by type"><option value="">All types</option></select>
+                <select id="monster-cr-filter" aria-label="Filter monsters by challenge rating"><option value="">All CRs</option></select>
+            </div>
+            <button type="button" id="monster-library-status" class="monster-library-status">Load SRD monsters</button>
+            <div id="monster-button-list"></div>
+            <button class="workspace-secondary monster-create" data-workspace-studio="/homebrew" data-workspace-studio-title="Homebrew Studio">Create a custom monster</button>
+            <a class="monster-license" href="/data/srd/ATTRIBUTION.md" target="_blank" rel="license">SRD 5.1 · CC-BY-4.0</a>
+        </div>
 
         <div id="character-menu-container">
             <h2>Characters</h2>

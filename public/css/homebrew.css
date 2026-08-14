@@ -14,6 +14,7 @@ a { color:var(--accent); }
 
 .wrap { max-width:1100px; margin:0 auto; padding:20px; }
 .topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; gap:8px; }
+.top-links { display:flex; align-items:center; gap:12px; font-size:13px; }
 .title { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:700; }
 .badge { font-size:12px; padding:3px 10px; border-radius:999px; background:rgba(96,165,250,.15); color:var(--accent); }
 .layout { display:grid; grid-template-columns:1fr 320px; gap:18px; align-items:start; }
@@ -21,11 +22,15 @@ a { color:var(--accent); }
 
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:18px; }
 .panel h2 { font-size:18px; margin-bottom:14px; }
+.panel-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; }
+.panel-heading h2 { margin-bottom:0; }
 label.fld { display:block; font-size:13px; color:var(--muted); margin:0 0 6px; }
 .row { margin-bottom:14px; }
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 .grid3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
-select, input[type=text], input[type=number], textarea { width:100%; background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--txt); font-size:14px; font-family:inherit; }
+.grid4 { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+select, input[type=text], input[type=number], input[type=color], textarea { width:100%; background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:9px 10px; color:var(--txt); font-size:14px; font-family:inherit; }
+input[type=color] { min-height:39px; padding:4px; cursor:pointer; }
 textarea { min-height:64px; resize:vertical; }
 .checks { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:4px; }
 .checks label { font-size:13px; display:flex; align-items:center; gap:6px; padding:3px 4px; }
@@ -45,3 +50,37 @@ textarea { min-height:64px; resize:vertical; }
 .pill { font-size:11px; padding:1px 6px; border-radius:999px; background:#3a3a44; color:var(--muted); }
 .msg { margin-top:10px; min-height:18px; font-size:14px; }
 .caster-fields { margin-top:8px; }
+
+.template-row { padding:12px; margin-bottom:14px; border:1px solid rgba(96,165,250,.35); border-radius:10px; background:rgba(96,165,250,.07); }
+.template-row .row { margin-bottom:0; }
+.inline-control { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
+.field-hint { color:var(--muted); font-size:11px; line-height:1.4; margin-top:6px; }
+.optional { font-weight:400; color:#777e8b; }
+.compact-number { max-width:220px; }
+.repeatable-section { padding-top:4px; }
+.repeatable-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
+.repeatable-heading .fld { margin:0; }
+.monster-trait-row { display:grid; grid-template-columns:minmax(130px,.6fr) minmax(220px,1.4fr) 36px; gap:8px; align-items:start; margin-bottom:8px; }
+.monster-trait-row textarea { min-height:42px; }
+.monster-action-row { position:relative; padding:12px 46px 12px 12px; margin-bottom:10px; background:rgba(0,0,0,.13); border:1px solid var(--line); border-radius:10px; }
+.monster-action-row .action-delete { position:absolute; top:12px; right:10px; }
+.monster-action-main { display:grid; grid-template-columns:minmax(150px,1.2fr) 110px 110px minmax(110px,1fr); gap:8px; margin-bottom:8px; }
+.monster-action-extra { display:grid; grid-template-columns:130px 130px minmax(180px,1fr); gap:8px; }
+.monster-action-row label { display:block; color:var(--muted); font-size:11px; margin-bottom:4px; }
+.monster-action-row textarea { min-height:54px; }
+.form-actions { display:flex; align-items:center; gap:8px; }
+
+@media (max-width:700px) {
+  .grid3, .grid4, .monster-action-main, .monster-action-extra { grid-template-columns:1fr 1fr; }
+  .monster-trait-row { grid-template-columns:1fr 36px; }
+  .monster-trait-row .trait-desc { grid-column:1 / -1; grid-row:2; }
+  .monster-trait-row .trait-delete { grid-column:2; grid-row:1; }
+  .monster-ability-grid { grid-template-columns:repeat(3,1fr); }
+}
+
+@media (max-width:480px) {
+  .grid2, .grid3, .grid4, .monster-action-main, .monster-action-extra, .inline-control { grid-template-columns:1fr; }
+  .ability-grid, .monster-ability-grid { grid-template-columns:repeat(2,1fr); }
+  .monster-trait-row { grid-template-columns:1fr 36px; }
+  .inline-control .btn { width:100%; }
+}

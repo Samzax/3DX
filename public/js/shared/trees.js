@@ -183,4 +183,8 @@ export class Trees {
         const ox = this.terrain.worldOrigin.x, oz = this.terrain.worldOrigin.z;
         this.field.update(controls.target.x + ox, controls.target.z + oz, ox, oz);
     }
+
+    hide() {
+        this.field.hide();
+    }
 }

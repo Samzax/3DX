@@ -200,4 +200,8 @@ export class Grass {
             L.field.update(cwx, cwz, ox, oz);
         }
     }
+
+    hide() {
+        for (const L of this._layers) L.mesh.visible = false;
+    }
 }

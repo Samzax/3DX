@@ -8,16 +8,28 @@ import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { buildObjectFromData, applyMove } from '../shared/models.js';
-import { loadSRD } from '../shared/srd.js';
+import { loadSRD, loadSRDMonsters } from '../shared/srd.js';
+import {
+    monsterChallengeLabel, monsterColor, monsterCombatStats, monsterStatBlockHTML, monsterTokenSnapshot
+} from '../shared/monsters.js';
 import { CombatTracker, CombatOverlays, deriveCombatStats, EFFECTS, remainingFeet } from '../shared/combat.js';
+import { combatInteger } from '../shared/combat-safety.js';
 import { tickRigCharacters } from '../shared/charmesh.js';
-import { buildWallRun, buildFloorPatch, disposeBuiltObject } from '../shared/structures.js';
+import {
+    buildWallRun, buildFloorPatch, buildStaircase, buildRoofPatch, disposeBuiltObject,
+    wallGesturePath, wallSegmentCount, structureTileCount,
+    DEFAULT_LEVEL_HEIGHT, STRUCTURE_EDIT_PICK_LAYER,
+    structureLevel, structureTouchesLevel, structureStoreyLevel,
+    structureBuildingId, structureBuildingDatum, structureDatumCompatible,
+    newStructureIdentity, isStructureType
+} from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { FogMask, FogOverlay, fogHexAt, hexesWithin } from '../shared/fog.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { createTabletopWorkspace } from '../shared/workspace.js';
 import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData } from '../shared/object-ui.js';
+import { AuthenticatedMapReload } from '../shared/sync-state.js';
 
 const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -34,6 +46,7 @@ const terrainBrush = { mode: 'raise', radius: 6, strength: 0.35, material: 0, fl
 // Undo/redo: copy-on-write patches of only the chunks each stroke touched.
 const UNDO_LIMIT = 20;
 const undoStack = [], redoStack = [];
+let pendingTerrainReset = null;             // one requestId + pre-ack undo context
 
 // Ramp gesture state (click-drag a line, applied on release) + its preview line.
 let rampStart = null;                      // { x, z, h }
@@ -54,13 +67,24 @@ let lakeDrag = null;
 let riverDraft = null;   // { points: [{x,z}] }
 let riverPreview = null; // polyline following the draft + cursor
 
-// --- Build tool (tile brush) state: walls/floors dragged out on the grid.
-// Wall drags anchor on grid CORNERS (world coords), floor drags on CELL indices.
-const buildBrush = { mode: 'wall', style: 'stone', scruffy: false, wallHeight: 2 };
+// --- Build tool (tile brush) state: walls/floors/stairs/roofs dragged on the grid.
+// Level 0 may follow terrain (legacy behavior). Other levels share a flat datum
+// and are separated by levelHeight, so independent drags stay perfectly aligned.
+const buildBrush = {
+    mode: 'wall', style: 'stone', scruffy: false, wallHeight: 2,
+    level: 0, levelHeight: DEFAULT_LEVEL_HEIGHT, datumY: null,
+    followTerrain: true, autoSnap: true, isolate: false,
+    stairDirection: 1, openingKind: 'door', tileKind: 'gap',
+    roofShape: 'gable-x', roofPitch: 0.5, pickingLevel: false,
+    buildingId: newStructureIdentity('building'), buildingPickMode: null
+};
+const BUILD_LEVEL_MIN = -5, BUILD_LEVEL_MAX = 8;
 const MAX_RUN = 48;                        // cells per gesture (walls and floor sides)
-let buildDrag = null;                      // { kind:'wall'|'floor', ax, az, seed }
+let buildDrag = null;                      // gesture anchor + resolved level/base height
 let buildGhost = null;                     // translucent preview in worldGroup
 let buildGhostKey = '';                    // memo: rebuild only when the snap changes
+let buildCutawayState = null;               // terrain/plane visibility before basement cutaway
+const pendingStructureBatches = new Map();  // requestId -> local UX context
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
 
@@ -94,6 +118,11 @@ let selectionReturnContext = null;
 // --- Combat mode (server-authoritative; the GM runs it from the tracker) ---
 let SRD = null;                 // loaded lazily: combat stat derivation only
 let pendingHomebrew = null;
+let srdMonsters = [];
+let customMonsters = [];
+let monsterLoadError = '';
+let monsterCatalogState = 'idle';
+let monsterCatalogPromise = null;
 let allCharacters = [];         // GM sees every character (stat-fill fallback)
 let characterInstances = [];    // every placed character token across all maps (Instances tab)
 let pendingFocus = null;        // world position to land on once the next map-state arrives
@@ -124,6 +153,7 @@ let rulerSnapSubMenuButtons = {};
 let currentMapKey = 'world';
 let currentMapMeta = null;          // pocket metadata ({kind,name,width,height,parentKey})
 let terrainIsUnified = false;       // is the loaded terrain the shared continuous world?
+const mapReload = new AuthenticatedMapReload();
 let hexGridGroup = null;
 let boundsRect = null;              // pocket boundary rectangle
 let pendingPortal = null;           // portal placement waiting for 'pocket-created'
@@ -286,6 +316,7 @@ const emitRuler = (data) => socket.emit('add-ruler', data);
 
 // --- Drill-down navigation ---
 function enterMap(key) {
+    restoreBuildCutaway();
     currentMapKey = key;
     // World position of this layer's hex field (hex lenses are world-scale).
     layerCenter = isPocket(key) ? { x: 0, z: 0 } : pathWorldCenter(key);
@@ -320,7 +351,16 @@ function enterMap(key) {
     lakeDrag = null;
     cancelRiverDraft();
     buildDrag = null;
+    buildBrush.level = 0;
+    buildBrush.datumY = null;
+    buildBrush.isolate = false;
+    buildBrush.pickingLevel = false;
+    buildBrush.buildingId = newStructureIdentity('building');
+    buildBrush.buildingPickMode = null;
+    pendingStructureBatches.clear();
+    setBuildBuildingStatus('New pieces share this building until you choose another.');
     clearBuildGhost();
+    syncBuildControls();
     if (rampPreview) rampPreview.visible = false;
     if (terrain) terrain.setBrush({ visible: false });
     updateTerrainPanel();
@@ -422,18 +462,23 @@ function initSocket() {
     socket.on('combat-denied', ({ reason }) => { if (combatTracker) combatTracker.flash(reason || 'Not allowed'); });
 
     socket.on('connect', () => {
+        mapReload.onConnect();
+        clearPendingStructureBatches(
+            'Connection restored; building state will be reloaded.', true);
         console.log('Conectado ao servidor com ID:', socket.id);
         // Auto-login as GM on this single connection
         socket.emit('login', 'GM');
         sessionStorage.setItem('vtt_username', 'GM');
-        // Reconnects auto-join 'world' server-side; come back to where we were.
-        if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
 
     socket.on('login-success', (userData) => {
+        mapReload.onAuthenticated();
         console.log('GM logged in:', userData);
         const loginOverlay = document.getElementById('login-overlay');
         if (loginOverlay) loginOverlay.classList.add('hidden');
+        // Rejoin only after application authentication. A delayed state from
+        // an older/legacy pre-login path must not satisfy reconnect recovery.
+        if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
 
     socket.on('load-user-characters', (characters) => {
@@ -453,17 +498,21 @@ function initSocket() {
         renderInstanceList();
     });
 
-    // Homebrew races/classes feed the SRD-based combat stat derivation.
+    // Homebrew races/classes feed character rules; custom monsters join the
+    // GM's lazy SRD creature library.
     socket.on('load-homebrew', (hb) => {
         pendingHomebrew = hb;
+        customMonsters = hb && Array.isArray(hb.monsters) ? hb.monsters : [];
+        renderMonsterLibrary();
         if (SRD) { SRD.setHomebrew(hb); answerStatsPending(); }
     });
 
     // Full map state on connect / map switch
     socket.on('map-state', (data) => {
-        // Ignore states for maps we're not on (e.g. the automatic 'world' join
-        // that precedes our re-join after a reconnect).
-        if (data.key && data.key !== currentMapKey) return;
+        // Only a matching post-login state may satisfy reconnect recovery.
+        if (!mapReload.acceptsMapState(data.key, currentMapKey)) return;
+        clearPendingStructureBatches(
+            'Building state reloaded from the server. Retry any unfinished edit.');
         if (selectedObject) deselectObject();
         if (objectNameplates) objectNameplates.clear(objects);
         objects.forEach(obj => worldGroup.remove(obj));
@@ -501,7 +550,7 @@ function initSocket() {
                 // One continuous world (tactical leaves AND hex-tier lenses):
                 // load it once, then just fly the camera between layers (no
                 // reload flash, no re-applying 1000s of chunks every hop).
-                if (!terrainIsUnified) {
+                if (mapReload.shouldReplaceUnified(terrainIsUnified)) {
                     terrain.generatorOn = true;
                     terrain.reset();
                     undoStack.length = 0; redoStack.length = 0;
@@ -555,12 +604,28 @@ function initSocket() {
 
         // Instances-tab travel: we entered this map to find a token — land on it
         // (after the worldCenter landing above so the descent wins).
+        // Terrain reconstruction above restores its default visibility. Reapply
+        // retained storey isolation last so reconnecting in a basement cannot
+        // expose terrain or vegetation until another build-panel action.
+        applyBuildLevelVisibility();
         if (pendingFocus) { focusCameraOn(pendingFocus); pendingFocus = null; }
+        mapReload.onMapStateApplied();
     });
 
     // Live terrain edits (echo to other GM tabs; players handle this too).
     socket.on('terrain-updated', (data) => {
         if (terrain) { terrain.applyData(data); syncWaterControls(); }
+    });
+
+    // Chunk deletion and water removal are one server transaction. The sender
+    // stays untouched until this canonical success event arrives; other GM
+    // tabs and players apply the exact same result.
+    socket.on('terrain-reset-applied', (result) => applyTerrainResetResult(result));
+    socket.on('terrain-reset-rejected', ({ requestId, reason } = {}) => {
+        if (!pendingTerrainReset || requestId !== pendingTerrainReset.requestId) return;
+        pendingTerrainReset = null;
+        syncTerrainResetButton();
+        alert(reason || 'The terrain reset could not be saved. Nothing was changed.');
     });
 
     // Live hex tag edits (global broadcast: painted biomes reshape the world).
@@ -628,9 +693,27 @@ function initSocket() {
     socket.on('object-updated', ({ id, patch } = {}) => {
         const object = objects.find(o => o.userData.syncId === id);
         if (!object || !patch) return;
-        updateObjectPresentation(object, patch);
+        const type = object.userData.objectType;
+        const geometryChanged = (type === 'wall' &&
+            Object.prototype.hasOwnProperty.call(patch, 'segments')) ||
+            ((type === 'floor' || type === 'roof') &&
+                Object.prototype.hasOwnProperty.call(patch, 'tiles'));
+        const updated = geometryChanged
+            ? replaceObjectGeometry(object, patch)
+            : object;
+        if (updated === object) updateObjectPresentation(object, patch);
         if (objectNameplates) objectNameplates.sync(objects);
-        if (selectedObject === object) renderSelectionInspector({ open: false });
+        if (selectedObject === updated) renderSelectionInspector({ open: false });
+    });
+
+    // Atomic building/storey edits arrive as one canonical batch. The server
+    // must not require clients to infer a group from positions or replay the
+    // source transform independently.
+    socket.on('structure-batch-applied', (result) => applyStructureBatchResult(result));
+    socket.on('structure-batch-rejected', ({ requestId, reason } = {}) => {
+        if (requestId) pendingStructureBatches.delete(requestId);
+        setBuildBuildingStatus(reason || 'Building edit was rejected by the server.', true);
+        syncBuildControls();
     });
 
     socket.on('object-deleted', (data) => {
@@ -641,6 +724,7 @@ function initSocket() {
             worldGroup.remove(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
             if (objectNameplates) objectNameplates.sync(objects);
+            syncBuildControls();
         }
     });
 
@@ -655,6 +739,14 @@ function initSocket() {
     });
 
     socket.on('disconnect', () => {
+        mapReload.onDisconnect();
+        cancelTerrainGesturesForReload();
+        if (pendingTerrainReset) {
+            pendingTerrainReset = null;
+            syncTerrainResetButton();
+        }
+        clearPendingStructureBatches(
+            'Connection lost during a building edit; state will reload after reconnect.', true);
         console.log('Desconectado do servidor.');
     });
 }
@@ -681,7 +773,7 @@ function init() {
             { key: 'R', label: 'Measure distance' },
             { key: 'L', label: 'Open the object and character library' },
             { key: 'T', label: 'Terrain or biome tools' },
-            { key: 'B', label: 'Build walls and floors' },
+            { key: 'B', label: 'Build multi-storey walls, floors, stairs and roofs' },
             { key: 'G', label: 'Paint fog of war' },
             { key: 'V', label: 'Direct player cameras' },
             { key: 'E', label: 'Show or hide the encounter dock' },
@@ -766,6 +858,11 @@ function init() {
     menuButtons.arch.addEventListener('click', () => setSelectedObjectType('arch'));
     menuButtons['portal-new'].addEventListener('click', () => setSelectedObjectType('portal-new'));
     menuButtons['portal-link'].addEventListener('click', () => setSelectedObjectType('portal-link'));
+    document.getElementById('monster-search')?.addEventListener('focus', () => { void ensureMonsterLibraryLoaded(); });
+    document.getElementById('monster-search')?.addEventListener('input', () => { void ensureMonsterLibraryLoaded(); renderMonsterLibrary(); });
+    document.getElementById('monster-type-filter')?.addEventListener('change', () => { void ensureMonsterLibraryLoaded(); renderMonsterLibrary(); });
+    document.getElementById('monster-cr-filter')?.addEventListener('change', () => { void ensureMonsterLibraryLoaded(); renderMonsterLibrary(); });
+    document.getElementById('monster-library-status')?.addEventListener('click', () => { void ensureMonsterLibraryLoaded(); });
     // Characters are loaded from the server via Socket.IO (see initSocket).
 
     // Characters section tabs: Spawn (place a character) | Instances (placed tokens).
@@ -777,6 +874,7 @@ function init() {
     toolMenuButtons.move = document.getElementById('btn-tool-move');
     toolMenuButtons.ruler = document.getElementById('btn-tool-ruler');
     const openLibrary = () => {
+        void ensureMonsterLibraryLoaded();
         if (selectedObjectType) deselectObjectType();
         else setTool(null);
         if (workspace) workspace.showPanel('object-menu', 'Library');
@@ -832,20 +930,7 @@ function init() {
     const strengthInput = document.getElementById('brush-strength');
     radiusInput.addEventListener('input', e => setBrushRadius(+e.target.value));
     strengthInput.addEventListener('input', e => { terrainBrush.strength = +e.target.value; document.getElementById('brush-strength-val').textContent = (+e.target.value).toFixed(2); });
-    document.getElementById('terrain-reset').addEventListener('click', () => {
-        if (!confirm('Reset all terrain and water on this tactical map?')) return;
-        const waterBefore = terrain.getWaterData().bodies;
-        terrain.beginStroke();
-        terrain.reset();
-        const patch = terrain.endStroke();
-        // Two undo entries (water first, chunks second): Ctrl+Z restores the
-        // terrain, a second Ctrl+Z restores the water bodies.
-        if (waterBefore.length) undoStack.push({ kind: 'water', before: waterBefore, after: [] });
-        if (patch) undoStack.push({ kind: 'chunks', patch });
-        while (undoStack.length > UNDO_LIMIT) undoStack.shift();
-        redoStack.length = 0;
-        if (socket) socket.emit('update-terrain', { clear: true, water: terrain.getWaterData() });
-    });
+    document.getElementById('terrain-reset').addEventListener('click', requestTerrainReset);
 
     const flattenBtn = document.getElementById('flatten-target');
     if (flattenBtn) flattenBtn.addEventListener('click', clearFlattenTarget);
@@ -853,11 +938,83 @@ function init() {
     // --- Build tool (tile brush) wiring ---
     toolMenuButtons.build = document.getElementById('btn-tool-build');
     toolMenuButtons.build.addEventListener('click', () => setTool('build'));
+    document.getElementById('build-new-building').addEventListener('click', startNewBuilding);
+    document.getElementById('build-pick-building').addEventListener('click', () => {
+        setBuildingPickMode(buildBrush.buildingPickMode === 'pick' ? null : 'pick');
+    });
+    document.getElementById('build-adopt-structure').addEventListener('click', () => {
+        setBuildingPickMode(buildBrush.buildingPickMode === 'adopt' ? null : 'adopt');
+    });
+    document.getElementById('build-duplicate-down').addEventListener('click', () => duplicateActiveStorey(-1));
+    document.getElementById('build-duplicate-up').addEventListener('click', () => duplicateActiveStorey(1));
     document.querySelectorAll('#build-modes .brush-mode').forEach(btn => {
         btn.addEventListener('click', () => setBuildMode(btn.dataset.bmode));
     });
     document.querySelectorAll('#build-styles .brush-mode').forEach(btn => {
         btn.addEventListener('click', () => setBuildStyle(btn.dataset.bstyle));
+    });
+    document.getElementById('build-level-down').addEventListener('click', () => setBuildLevel(buildBrush.level - 1));
+    document.getElementById('build-level-ground').addEventListener('click', () => setBuildLevel(0));
+    document.getElementById('build-level-up').addEventListener('click', () => setBuildLevel(buildBrush.level + 1));
+    document.getElementById('build-pick-level').addEventListener('click', () => {
+        buildBrush.pickingLevel = !buildBrush.pickingLevel;
+        buildBrush.buildingPickMode = null;
+        buildDrag = null;
+        clearBuildGhost();
+        syncBuildControls();
+        updateHintBar();
+    });
+    document.getElementById('build-level-height').addEventListener('input', e => {
+        buildBrush.levelHeight = +e.target.value;
+        clearBuildGhost();
+        syncBuildControls();
+    });
+    document.getElementById('build-follow-terrain').addEventListener('change', e => {
+        buildBrush.followTerrain = e.target.checked;
+        clearBuildGhost();
+        syncBuildControls();
+    });
+    document.getElementById('build-auto-snap').addEventListener('change', e => {
+        buildBrush.autoSnap = e.target.checked;
+    });
+    document.getElementById('build-isolate-level').addEventListener('change', e => {
+        buildBrush.isolate = e.target.checked;
+        applyBuildLevelVisibility();
+        syncBuildControls();
+    });
+    document.querySelectorAll('[data-stair-dir]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            buildBrush.stairDirection = Number(btn.dataset.stairDir) < 0 ? -1 : 1;
+            clearBuildGhost();
+            syncBuildControls();
+        });
+    });
+    document.querySelectorAll('[data-opening-kind]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            buildBrush.openingKind = btn.dataset.openingKind;
+            syncBuildControls();
+            updateHintBar();
+        });
+    });
+    document.querySelectorAll('[data-tile-kind]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            buildBrush.tileKind = btn.dataset.tileKind;
+            syncBuildControls();
+            updateHintBar();
+        });
+    });
+    document.querySelectorAll('[data-roof-shape]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            buildBrush.roofShape = btn.dataset.roofShape;
+            clearBuildGhost();
+            syncBuildControls();
+            updateHintBar();
+        });
+    });
+    document.getElementById('build-roof-pitch').addEventListener('input', e => {
+        buildBrush.roofPitch = +e.target.value;
+        clearBuildGhost();
+        syncBuildControls();
     });
     document.getElementById('wall-height').addEventListener('input', e => {
         buildBrush.wallHeight = +e.target.value;
@@ -868,6 +1025,7 @@ function init() {
         buildBrush.scruffy = e.target.checked;
         clearBuildGhost();
     });
+    syncBuildControls();
 
     // --- Fog of war tool wiring ---
     toolMenuButtons.fog = document.getElementById('btn-tool-fog');
@@ -936,6 +1094,9 @@ function init() {
 function onPointerDown(event) {
     // The left button belongs to tools; right/middle belong to the camera (OrbitControls).
     if (event.button !== 0) return;
+    // Socket.IO buffers emits while disconnected. Do not let an interaction
+    // started before the authenticated reload queue a stale authoring intent.
+    if (!socket?.connected || !mapReload.authenticated) return;
 
     if (isDraggingHeight) {
         isDraggingHeight = false;
@@ -982,21 +1143,81 @@ function onPointerDown(event) {
         return;
     }
 
-    // Build tool (tile brush): walls/floors on tactical maps.
+    // Build tool (tile brush): draw structures or edit individual cells.
     if (buildActive()) {
-        if (buildBrush.mode === 'erase' || event.altKey) {
-            const target = pickBuildTarget(event);
-            if (target) socket.emit('delete-object', { id: target.userData.syncId });
+        if (pendingStructureBatches.size) {
+            setBuildBuildingStatus('Wait for the current building edit to finish.', true);
             return;
         }
-        const p = pointerToGround(event);
+        if (buildBrush.buildingPickMode) {
+            handleBuildingPick(event);
+            return;
+        }
+        if (buildBrush.pickingLevel) {
+            adoptBuildLevelAt(event);
+            return;
+        }
+        if (buildBrush.mode === 'erase' || buildBrush.mode === 'opening' ||
+            buildBrush.mode === 'tile' || event.altKey) {
+            const targetTypes = event.altKey || buildBrush.mode === 'erase' ? null
+                : buildBrush.mode === 'opening' ? new Set(['wall'])
+                    : new Set(['floor', 'roof']);
+            const hit = pickBuildHit(event, targetTypes);
+            if (!hit) return;
+            const type = hit.object.userData.objectType;
+            if (event.altKey) {
+                socket.emit('delete-object', { id: hit.object.userData.syncId });
+            } else if (type === 'wall' && hit.segmentIndex != null &&
+                (buildBrush.mode === 'erase' || buildBrush.mode === 'opening')) {
+                updateWallSegment(hit.object, hit.segmentIndex,
+                    buildBrush.mode === 'erase' ? 'gap' : buildBrush.openingKind);
+            } else if ((type === 'floor' || type === 'roof') && hit.tileIndex != null &&
+                (buildBrush.mode === 'erase' || buildBrush.mode === 'tile')) {
+                updateStructureTile(hit.object, hit.tileIndex,
+                    buildBrush.mode === 'erase' ? 'gap' : buildBrush.tileKind);
+            } else if (buildBrush.mode === 'erase') {
+                socket.emit('delete-object', { id: hit.object.userData.syncId });
+            }
+            return;
+        }
+        // Walls, stairs and covers started over a floor inherit that floor's
+        // level, so the common "floor first" workflow needs no manual dial.
+        if (buildBrush.autoSnap && buildBrush.mode !== 'floor') {
+            adoptBuildLevelAt(event, { structuresOnly: true, quiet: true });
+        }
+        let p = pointerToBuildSurface(event);
         if (!p) return;
         const seed = Math.floor(Math.random() * 1e9);
+        const placement = buildBrush.mode === 'roof'
+            ? resolveRoofPlacement(p)
+            : resolveBuildPlacement(p);
+        if (placement.heightMode === 'flat') p = pointerToBuildSurface(event) || p;
+        const authoredIdentity = {
+            buildingId: buildBrush.buildingId,
+            structureId: newStructureIdentity('structure'),
+            buildingDatumY: placement.buildingDatumY
+        };
         if (buildBrush.mode === 'wall') {
             const c = snapCorner(p);
-            buildDrag = { kind: 'wall', ax: c.x, az: c.z, seed };
+            buildDrag = {
+                kind: 'wall', ax: c.x, az: c.z, wallAxis: null,
+                wallCorners: [{ x: c.x, z: c.z }], seed, ...placement, ...authoredIdentity
+            };
+        } else if (buildBrush.mode === 'stair') {
+            buildDrag = {
+                kind: 'stair', ax: Math.floor(p.x / GRID_CELL_SIZE), az: Math.floor(p.z / GRID_CELL_SIZE),
+                seed, ...placement, ...authoredIdentity
+            };
+        } else if (buildBrush.mode === 'roof') {
+            buildDrag = {
+                kind: 'roof', ax: Math.floor(p.x / GRID_CELL_SIZE), az: Math.floor(p.z / GRID_CELL_SIZE),
+                seed, ...placement, ...authoredIdentity
+            };
         } else {
-            buildDrag = { kind: 'floor', ax: Math.floor(p.x / GRID_CELL_SIZE), az: Math.floor(p.z / GRID_CELL_SIZE), seed };
+            buildDrag = {
+                kind: 'floor', ax: Math.floor(p.x / GRID_CELL_SIZE), az: Math.floor(p.z / GRID_CELL_SIZE),
+                seed, ...placement, ...authoredIdentity
+            };
         }
         updateBuildGhost(p);
         return;
@@ -1048,7 +1269,7 @@ function onPointerDown(event) {
     }
 
     castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const allObjects = [plane, ...objects];
+    const allObjects = [...(buildCutawayState ? [] : [plane]), ...objects.filter(o => o.visible)];
     const intersects = raycaster.intersectObjects(allObjects, true);
     if (intersects.length === 0) return;
 
@@ -1094,7 +1315,7 @@ function onPointerDown(event) {
     // move tool can still grab one when nothing else is selected (to reposition
     // a whole run/patch or Del-delete it); the build tool's erase removes them.
     const clickedType = clickedObject && clickedObject.userData.objectType;
-    const buildAsGround = (clickedType === 'wall' || clickedType === 'floor') &&
+    const buildAsGround = isStructureType(clickedType) &&
         (currentTool === 'add' || currentTool === 'ruler' ||
          (currentTool === 'move' && selectedObject && selectedObject !== clickedObject));
 
@@ -1110,7 +1331,9 @@ function onPointerDown(event) {
             }
         }
     } else if (firstIntersect.object.name === "tabletop" || buildAsGround) {
-        const intersectPoint = sceneToWorld(firstIntersect.point);
+        const support = (buildAsGround || ['move', 'add', 'ruler'].includes(currentTool))
+            ? pickSupportSurface(event, { exclude: selectedObject }) : null;
+        const intersectPoint = support ? support.point : sceneToWorld(firstIntersect.point);
         const snappedPosition = snapToCurrentGrid(intersectPoint);
 
         switch (currentTool) {
@@ -1118,6 +1341,7 @@ function onPointerDown(event) {
                 if (selectedObject) {
                     const docId = selectedObject.userData.syncId;
                     if (docId) {
+                        if (support) selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0);
                         const finalPosition = snapToCurrentGrid(selectedObject.position);
                         selectedObject.position.x = finalPosition.x;
                         selectedObject.position.z = finalPosition.z;
@@ -1137,7 +1361,7 @@ function onPointerDown(event) {
                 break;
             case 'add':
                 if (selectedObjectType) {
-                    addObject(snappedPosition);
+                    addObject(snappedPosition, support && support.object ? support.point.y : null);
                     focusCameraOn(snappedPosition);
                     deselectObjectType();
                 }
@@ -1182,7 +1406,11 @@ function onPointerMove(event) {
 
     // Build tool: ghost preview follows the cursor (hover marker or live drag).
     if (buildActive()) {
-        const p = pointerToGround(event);
+        if (pendingStructureBatches.size) {
+            clearBuildGhost();
+            return;
+        }
+        const p = pointerToBuildSurface(event);
         if (p) updateBuildGhost(p);
         return;
     }
@@ -1197,14 +1425,14 @@ function onPointerMove(event) {
         return;
     }
 
-    castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const intersects = raycaster.intersectObject(plane);
-    if (intersects.length === 0) return;
-    const intersectPoint = sceneToWorld(intersects[0].point);
+    if (currentTool !== 'move' && currentTool !== 'ruler') return;
+    const support = pickSupportSurface(event, { exclude: selectedObject });
+    if (!support) return;
+    const intersectPoint = support.point;
 
     if (currentTool === 'move' && selectedObject) {
         applyMove(selectedObject, snapToCurrentGrid(intersectPoint), currentMoveMode,
-            (x, z, halfHeight) => groundY(x, z, halfHeight));
+            (x, z, halfHeight) => intersectPoint.y + halfHeight);
         updateMoveCostTooltip(event); // combat: live «X ft — Y ft left»
     }
 
@@ -1223,9 +1451,9 @@ function onPointerUp(event) {
     // Fog stroke ends with the drag.
     if (fogStroke) { fogStroke = null; return; }
 
-    // Build drag: commit the dragged wall run / floor rectangle.
+    // Build drag: commit the wall run, floor/roof rectangle or staircase.
     if (buildDrag) {
-        const p = pointerToGround(event);
+        const p = pointerToBuildSurface(event);
         if (p) commitBuildDrag(p);
         buildDrag = null;
         clearBuildGhost();
@@ -1319,6 +1547,32 @@ function cancelRiverDraft() {
     riverDraft = null;
     if (riverPreview) riverPreview.visible = false;
 }
+
+// A disconnect can strand a copy-on-write stroke or water gesture after local
+// mutation but before its server emit. Discard that transient transaction so
+// the authenticated reconnect snapshot cannot be captured into stale undo and
+// later resurrect data the server has already removed.
+function cancelTerrainGesturesForReload() {
+    isSculpting = false;
+    lastDab = null;
+    strokeRef = 0;
+    rampStart = null;
+    if (rampPreview) rampPreview.visible = false;
+    if (terrain && lakeDrag) terrain.setWaterData({ bodies: lakeDrag.before });
+    lakeDrag = null;
+    cancelRiverDraft();
+    buildDrag = null;
+    clearBuildGhost();
+    fogStroke = null;
+    isDraggingHeight = false;
+    undoStack.length = 0;
+    redoStack.length = 0;
+    if (ruler) ruler.clearInProgress();
+    if (terrain) {
+        terrain.cancelStroke();
+        terrain.setBrush({ visible: false });
+    }
+}
 function commitRiver() {
     if (!riverDraft) return;
     // Drop duplicate clicks (a committing double-click adds two nearby points).
@@ -1356,11 +1610,8 @@ function onContextMenu(event) {
     event.preventDefault();
     if (wasRightDrag && wasRightDrag(event)) return; // right-drag = camera orbit, not a click
     if (currentTool !== 'ruler') return;
-    castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const intersects = raycaster.intersectObject(plane);
-    if (intersects.length > 0) {
-        ruler.restartAt(getCurrentRulerSnap(sceneToWorld(intersects[0].point)), emitRuler);
-    }
+    const support = pickSupportSurface(event);
+    if (support) ruler.restartAt(getCurrentRulerSnap(support.point), emitRuler);
 }
 
 const BRUSH_MODE_KEYS = { '1': 'raise', '2': 'lower', '3': 'smooth', '4': 'flatten', '5': 'noise', '6': 'terrace', '7': 'ramp', '8': 'paint', '9': 'lake', '0': 'river' };
@@ -1374,11 +1625,13 @@ function onKeyDown(event) {
     // Undo/redo terrain strokes (Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y).
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
+        if (!socket?.connected || !mapReload.authenticated) return;
         event.shiftKey ? redoTerrain() : undoTerrain();
         return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
         event.preventDefault();
+        if (!socket?.connected || !mapReload.authenticated) return;
         redoTerrain();
         return;
     }
@@ -1411,6 +1664,12 @@ function onKeyDown(event) {
         if (mode) { setBrushMode(mode); return; }
     }
 
+    if (buildActive()) {
+        if (event.key === 'PageUp') { event.preventDefault(); setBuildLevel(buildBrush.level + 1); return; }
+        if (event.key === 'PageDown') { event.preventDefault(); setBuildLevel(buildBrush.level - 1); return; }
+        if (event.key === 'Home') { event.preventDefault(); setBuildLevel(0); return; }
+    }
+
     if ((event.key === "Delete" || event.key === "Backspace") && selectedObject) {
         const docId = selectedObject.userData.syncId;
         if (docId) {
@@ -1430,6 +1689,12 @@ function onKeyDown(event) {
         } else if (pendingSpell) {
             pendingSpell = null;
             if (combatTracker) combatTracker.flash('Spell cancelled');
+            updateHintBar();
+        } else if (buildBrush.buildingPickMode) {
+            setBuildingPickMode(null);
+        } else if (buildBrush.pickingLevel) {
+            buildBrush.pickingLevel = false;
+            syncBuildControls();
             updateHintBar();
         } else if (buildDrag) {
             buildDrag = null;
@@ -1460,7 +1725,7 @@ function onKeyUp(event) {
 // --- Object Management ---
 
 // Emit a new object to the server; the 'object-added' echo builds the mesh.
-function addObject(position) {
+function addObject(position, supportY = null) {
     let halfHeight = 0.5;
     let dataToSave = {};
 
@@ -1469,6 +1734,18 @@ function addObject(position) {
             halfHeight = 0.1;
             dataToSave = { type: 'token', color: 0xdd4444 };
             break;
+        case 'monster': {
+            const monsterData = monsterTokenSnapshot(selectedObjectData);
+            if (!monsterData) return;
+            halfHeight = 0.1;
+            dataToSave = {
+                type: 'token',
+                name: monsterData.name,
+                color: monsterColor(monsterData),
+                monsterData
+            };
+            break;
+        }
         case 'cube':
             halfHeight = GRID_CELL_SIZE * 0.4;
             dataToSave = { type: 'cube', color: 0xdd4444 };
@@ -1503,7 +1780,7 @@ function addObject(position) {
             const m = sizeStr.match(/(\d+)\s*[xX×]\s*(\d+)/);
             const width = m ? +m[1] : 24, height = m ? +m[2] : 24;
             pendingPortal = {
-                position: { x: position.x, y: groundY(position.x, position.z, 0), z: position.z }
+                position: { x: position.x, y: groundY(position.x, position.z, 0, supportY), z: position.z }
             };
             socket.emit('create-pocket-map', { name, width, height, parentKey: currentMapKey });
             return;
@@ -1520,9 +1797,37 @@ function addObject(position) {
             return;
     }
 
-    // Seat the object on the terrain surface (flat y=0 off the tactical layer).
-    dataToSave.position = { x: position.x, y: groundY(position.x, position.z, halfHeight), z: position.z };
+    // The clicked surface wins: elevated/basement floors are real supports, not
+    // just scenery. Calls without a surface still fall back to terrain.
+    dataToSave.position = { x: position.x, y: groundY(position.x, position.z, halfHeight, supportY), z: position.z };
     socket.emit('add-object', dataToSave);
+}
+
+function replaceObjectGeometry(object, patch) {
+    const index = objects.indexOf(object);
+    if (index < 0) return object;
+    const source = object.userData.objectData || {};
+    const data = {
+        ...source,
+        ...patch,
+        position: { x: object.position.x, y: object.position.y, z: object.position.z }
+    };
+    const replacement = buildObjectFromData(object.userData.syncId, data);
+    if (!replacement) return object;
+    const wasSelected = selectedObject === object;
+    if (wasSelected) setObjectSelected(object, false);
+    if (objectNameplates) objectNameplates.removeFrom(object);
+    worldGroup.remove(object);
+    disposeBuiltObject(object);
+    worldGroup.add(replacement);
+    objects[index] = replacement;
+    if (wasSelected) {
+        selectedObject = replacement;
+        dragStartPos = replacement.position.clone();
+        setObjectSelected(replacement, true);
+    }
+    applyBuildLevelVisibility();
+    return replacement;
 }
 
 function createObjectFromData(id, data) {
@@ -1530,7 +1835,9 @@ function createObjectFromData(id, data) {
     if (mesh) {
         worldGroup.add(mesh); // synced positions are world coords
         objects.push(mesh);
+        applyBuildLevelVisibility();
         if (objectNameplates) objectNameplates.sync(objects);
+        syncBuildControls();
     }
 }
 
@@ -1543,7 +1850,8 @@ function currentModeLabel() {
 function selectedTypeLabel(type) {
     return ({
         character: 'Character token', token: 'Creature token', cube: 'Object', sphere: 'Object',
-        cave: 'Cave prop', arch: 'Rock arch', portal: 'Portal', wall: 'Wall run', floor: 'Floor patch'
+        cave: 'Cave prop', arch: 'Rock arch', portal: 'Portal', wall: 'Wall run',
+        floor: 'Floor patch', stair: 'Staircase', roof: 'Roof / ceiling'
     })[type] || 'Scene object';
 }
 
@@ -1570,17 +1878,21 @@ function renderSelectionInspector({ open = true } = {}) {
     const id = object.userData.syncId;
     const data = object.userData.objectData || {};
     const char = object.userData.characterData || null;
+    const monster = data.monsterData || null;
     const type = char ? 'character' : (object.userData.objectType || data.type || 'object');
     const identity = objectIdentity(object, objects);
     const combatant = combatState && combatState.combatants[id];
-    const derived = char ? derivedSelectionStats(char) : null;
+    const derived = char ? derivedSelectionStats(char) : (monster ? monsterCombatStats(monster) : null);
     const stats = combatant || derived;
     const hpCurrent = combatant?.hp?.current ?? char?.hp?.current ?? stats?.maxHP ?? '—';
     const hpMax = combatant?.maxHP ?? stats?.maxHP ?? '—';
     const owner = char?.owner || data.owner || '';
     const ownerLabel = /^gm$/i.test(owner) ? 'GM' : owner;
     const classes = (char?.classes || []).map(entry => `${entry.class || 'class'} ${entry.level || 1}`).join(' / ');
-    const meta = [selectedTypeLabel(type), identity.instanceText, owner ? `Owned by ${ownerLabel}` : '', char?.race || '', classes]
+    const monsterMeta = monster
+        ? `${monster.size || 'Medium'} ${monster.type || 'creature'} · CR ${monsterChallengeLabel(monster.challenge_rating)} · ${monster.custom ? 'Custom' : 'SRD 5.1'}`
+        : '';
+    const meta = [selectedTypeLabel(type), identity.instanceText, owner ? `Owned by ${ownerLabel}` : '', char?.race || '', classes, monsterMeta]
         .filter(Boolean).join(' · ');
 
     let statsHTML = '';
@@ -1614,7 +1926,7 @@ function renderSelectionInspector({ open = true } = {}) {
         if (combatant) {
             const effects = new Set((combatant.effects || []).map(effect => effect.key));
             combatHTML = `<div class="selection-section">
-                <div class="selection-section-title"><span>Encounter stats</span><span>${combatState.started && combatState.activeId === id ? `${remainingFeet(combatant)} ft left` : `Round ${combatState.round || '—'}`}</span></div>
+                <div class="selection-section-title"><span>Encounter stats</span><span>${combatState.started && combatState.activeId === id ? `${remainingFeet(combatant)} ft left` : `Round ${combatState.round == null ? '—' : combatInteger(combatState.round, { fallback: 0, min: 0, max: 1000000 })}`}</span></div>
                 <form id="selection-combat-form" class="selection-form">
                     <label class="selection-field">Current HP<input name="hpCurrent" type="number" min="0" max="999" value="${escHtml(combatant.hp?.current ?? combatant.maxHP)}"></label>
                     <label class="selection-field">Max HP<input name="maxHP" type="number" min="1" max="999" value="${escHtml(combatant.maxHP)}"></label>
@@ -1643,6 +1955,7 @@ function renderSelectionInspector({ open = true } = {}) {
             <div><span class="selection-name">${escHtml(identity.displayName)}</span><span class="selection-meta">${escHtml(meta)}</span></div>
         </div>
         ${statsHTML}
+        ${monsterStatBlockHTML(monster)}
         ${detailsHTML}
         <div class="selection-section">
             <div class="selection-section-title"><span>Position</span><span>World coordinates</span></div>
@@ -1715,6 +2028,7 @@ function renderSelectionInspector({ open = true } = {}) {
             const clone = JSON.parse(JSON.stringify(object.userData.objectData || {}));
             delete clone.id;
             delete clone.addedBy;
+            if (isStructureType(clone.type)) clone.structureId = newStructureIdentity('structure');
             clone.position = { x: object.position.x + GRID_CELL_SIZE, y: object.position.y, z: object.position.z + GRID_CELL_SIZE };
             socket.emit('add-object', clone);
         } else if (action === 'delete') {
@@ -1867,6 +2181,9 @@ function setSelectedObjectType(type, data = null) {
         if (type === 'character') {
             const charBtn = document.querySelector(`button[data-char-id="${data.id}"]`);
             if (charBtn) charBtn.classList.add('active');
+        } else if (type === 'monster') {
+            const monsterBtn = document.querySelector(`button[data-monster-index="${data.index}"]`);
+            if (monsterBtn) monsterBtn.classList.add('active');
         } else {
             if (menuButtons[type]) menuButtons[type].classList.add('active');
         }
@@ -1882,6 +2199,115 @@ function deselectObjectType() {
     document.querySelectorAll('#object-menu .menu-button, #object-menu .character-card-place').forEach(btn => {
         btn.classList.remove('active');
     });
+}
+
+function rebuildMonsterFilters(monsters) {
+    const typeSelect = document.getElementById('monster-type-filter');
+    const crSelect = document.getElementById('monster-cr-filter');
+    if (!typeSelect || !crSelect) return;
+    const selectedType = typeSelect.value;
+    const selectedCR = crSelect.value;
+    const types = [...new Set(monsters.map(monster => String(monster.type || '').toLowerCase()).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b));
+    const challenges = [...new Set(monsters.map(monster => Number(monster.challenge_rating)).filter(Number.isFinite))]
+        .sort((a, b) => a - b);
+    typeSelect.replaceChildren(new Option('All types', ''));
+    for (const type of types) typeSelect.add(new Option(type[0].toUpperCase() + type.slice(1), type));
+    crSelect.replaceChildren(new Option('All CRs', ''));
+    for (const challenge of challenges) crSelect.add(new Option(`CR ${monsterChallengeLabel(challenge)}`, String(challenge)));
+    if (types.includes(selectedType)) typeSelect.value = selectedType;
+    if (challenges.some(value => String(value) === selectedCR)) crSelect.value = selectedCR;
+}
+
+function ensureMonsterLibraryLoaded() {
+    if (monsterCatalogPromise) return monsterCatalogPromise;
+    monsterCatalogState = 'loading';
+    monsterLoadError = '';
+    renderMonsterLibrary();
+    monsterCatalogPromise = loadSRDMonsters().then(monsters => {
+        srdMonsters = Array.isArray(monsters) ? monsters : [];
+        monsterCatalogState = 'ready';
+        renderMonsterLibrary();
+        return srdMonsters;
+    }).catch(error => {
+        monsterCatalogState = 'error';
+        monsterLoadError = error?.message || 'load failed';
+        monsterCatalogPromise = null;
+        renderMonsterLibrary();
+        console.error('SRD monster load failed:', error);
+        return [];
+    });
+    return monsterCatalogPromise;
+}
+
+function renderMonsterLibrary() {
+    const list = document.getElementById('monster-button-list');
+    const status = document.getElementById('monster-library-status');
+    if (!list || !status) return;
+    status.disabled = monsterCatalogState !== 'idle' && monsterCatalogState !== 'error';
+    const monsters = [...customMonsters, ...srdMonsters]
+        .filter(monster => monster && monster.name)
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)) || String(a.index).localeCompare(String(b.index)));
+    rebuildMonsterFilters(monsters);
+    const query = String(document.getElementById('monster-search')?.value || '').trim().toLowerCase();
+    const type = document.getElementById('monster-type-filter')?.value || '';
+    const challenge = document.getElementById('monster-cr-filter')?.value || '';
+    const filtered = monsters.filter(monster => {
+        const haystack = [monster.name, monster.type, monster.size, monster.alignment,
+            monsterChallengeLabel(monster.challenge_rating)].join(' ').toLowerCase();
+        return (!query || haystack.includes(query)) &&
+            (!type || String(monster.type || '').toLowerCase() === type) &&
+            (!challenge || String(Number(monster.challenge_rating)) === challenge);
+    });
+    list.replaceChildren();
+    for (const monster of filtered) {
+        const stats = monsterCombatStats(monster);
+        const card = document.createElement('div');
+        card.className = 'character-card monster-card';
+        card.style.setProperty('--character-color', monsterColor(monster));
+
+        const summary = document.createElement('div');
+        summary.className = 'character-card-main';
+        summary.title = (monster.special_abilities || []).concat(monster.actions || [])
+            .slice(0, 4).map(action => `${action.name}: ${action.desc || ''}`).join('\n');
+        const name = document.createElement('span');
+        name.className = 'character-card-name';
+        name.textContent = monster.name || 'Unnamed monster';
+        const meta = document.createElement('span');
+        meta.className = 'character-card-meta';
+        meta.textContent = `CR ${monsterChallengeLabel(monster.challenge_rating)} · ${monster.size || 'Medium'} ${monster.type || 'creature'} · AC ${stats?.ac ?? '—'} · HP ${stats?.maxHP ?? '—'}`;
+        if (monster.custom) {
+            const source = document.createElement('span');
+            source.className = 'monster-card-source';
+            source.textContent = 'custom';
+            meta.append(source);
+        }
+        summary.append(name, meta);
+
+        const place = document.createElement('button');
+        place.type = 'button';
+        place.className = 'character-card-place monster-card-place';
+        place.textContent = 'Place';
+        place.title = `Place ${monster.name || 'this monster'} on the map`;
+        place.dataset.monsterIndex = monster.index || monster.name;
+        place.classList.toggle('active', selectedObjectType === 'monster' && selectedObjectData === monster);
+        place.addEventListener('click', () => setSelectedObjectType('monster', monster));
+        card.append(summary, place);
+        list.appendChild(card);
+    }
+    const sourceSummary = `${srdMonsters.length} SRD · ${customMonsters.length} custom`;
+    if (monsterCatalogState === 'error' && !srdMonsters.length) {
+        status.textContent = `${customMonsters.length} custom · SRD catalog unavailable (${monsterLoadError})`;
+    } else if (monsterCatalogState === 'idle') {
+        status.textContent = `${customMonsters.length} custom · Load SRD monsters`;
+    } else if (monsterCatalogState === 'loading') {
+        status.textContent = 'Loading SRD monsters…';
+    } else if (!monsters.length) {
+        status.textContent = 'No monsters available';
+    } else {
+        status.textContent = filtered.length === monsters.length
+            ? sourceSummary : `${filtered.length} of ${monsters.length} · ${sourceSummary}`;
+    }
 }
 
 function loadCharactersToMenu(characters) {
@@ -2031,6 +2457,10 @@ function setTool(toolName, { preserveSelection = false } = {}) {
     if (toolName !== 'ruler') {
         ruler.hideTooltip();
     }
+    if (toolName !== 'build') {
+        buildBrush.buildingPickMode = null;
+        buildBrush.pickingLevel = false;
+    }
     currentTool = toolName;
     if (toolName !== 'add' && toolName !== null) {
         deselectObjectType();
@@ -2046,33 +2476,345 @@ function setTool(toolName, { preserveSelection = false } = {}) {
 }
 
 // --- Build tool (tile brush) logic ---
+function shortBuildingId(id) {
+    if (!id) return 'legacy / ungrouped';
+    const tail = String(id).split('-').pop() || String(id);
+    return tail.slice(-8);
+}
+
+function buildingObjects(buildingId = buildBrush.buildingId) {
+    return objects.filter(object => {
+        if (!isStructureType(object.userData.objectType)) return false;
+        return structureBuildingId(object.userData.objectData) === buildingId;
+    });
+}
+
+function buildingStoreyObjects(level = buildBrush.level, buildingId = buildBrush.buildingId) {
+    return buildingObjects(buildingId).filter(object =>
+        structureStoreyLevel(object.userData.objectData || {}) === level);
+}
+
+function structureDatumFromObject(object) {
+    const data = object?.userData?.objectData || {};
+    return round2(structureBuildingDatum(data, object?.position?.y));
+}
+
+function setBuildBuildingStatus(message, isError = false) {
+    const status = document.getElementById('build-building-status');
+    if (!status) return;
+    status.textContent = message || '';
+    status.classList.toggle('is-error', !!isError);
+}
+
+function clearPendingStructureBatches(message, isError = false) {
+    if (!pendingStructureBatches.size) return false;
+    pendingStructureBatches.clear();
+    setBuildBuildingStatus(message, isError);
+    syncBuildControls();
+    return true;
+}
+
+function startNewBuilding() {
+    if (pendingStructureBatches.size) return;
+    buildBrush.buildingId = newStructureIdentity('building');
+    buildBrush.datumY = null;
+    buildBrush.buildingPickMode = null;
+    buildBrush.pickingLevel = false;
+    buildDrag = null;
+    clearBuildGhost();
+    setBuildBuildingStatus('New pieces share this building until you choose another.');
+    syncBuildControls();
+    updateHintBar();
+}
+
+function setBuildingPickMode(mode) {
+    if (pendingStructureBatches.size) return;
+    buildBrush.buildingPickMode = mode === 'pick' || mode === 'adopt' ? mode : null;
+    if (buildBrush.buildingPickMode) buildBrush.pickingLevel = false;
+    buildDrag = null;
+    clearBuildGhost();
+    if (mode === 'pick') {
+        setBuildBuildingStatus('Click a grouped structure to activate its building.');
+    } else if (mode === 'adopt') {
+        setBuildBuildingStatus('Click exactly one structure to add it to the active building.');
+    } else {
+        setBuildBuildingStatus('Building selection cancelled.');
+    }
+    syncBuildControls();
+    updateHintBar();
+}
+
+function emitStructureBatch(action, payload, context) {
+    if (!socket || !socket.connected || !mapReload.authenticated) {
+        setBuildBuildingStatus('Connect to the server before editing a building.', true);
+        return null;
+    }
+    const requestId = newStructureIdentity('structure');
+    pendingStructureBatches.set(requestId, { action, ...context });
+    buildDrag = null;
+    clearBuildGhost();
+    socket.emit('structure-batch', { requestId, action, ...payload });
+    syncBuildControls();
+    return requestId;
+}
+
+function handleBuildingPick(event) {
+    const hit = pickBuildHit(event);
+    if (!hit) {
+        setBuildBuildingStatus('No structure under the cursor.', true);
+        return;
+    }
+    const object = hit.object;
+    const data = object.userData.objectData || {};
+    if (buildBrush.buildingPickMode === 'pick') {
+        const buildingId = structureBuildingId(data);
+        if (!buildingId) {
+            setBuildBuildingStatus('That is a legacy piece. Use Adopt piece to assign it explicitly.', true);
+            return;
+        }
+        buildBrush.buildingId = buildingId;
+        buildBrush.datumY = structureDatumFromObject(object);
+        if (Number(data.levelHeight) > 0) buildBrush.levelHeight = Number(data.levelHeight);
+        buildBrush.buildingPickMode = null;
+        setBuildBuildingStatus(`Active building ${shortBuildingId(buildingId)}.`);
+        syncBuildControls();
+        updateHintBar();
+        return;
+    }
+
+    const objectId = object.userData.syncId;
+    if (!objectId) return;
+    if (structureBuildingId(data) === buildBrush.buildingId && data.structureId) {
+        buildBrush.buildingPickMode = null;
+        setBuildBuildingStatus('That piece already belongs to the active building.');
+        syncBuildControls();
+        return;
+    }
+    const grouped = buildingObjects();
+    const pieceLevelHeight = Number(data.levelHeight) > 0
+        ? Number(data.levelHeight) : DEFAULT_LEVEL_HEIGHT;
+    if (grouped.length) {
+        const groupData = grouped[0].userData.objectData || {};
+        const groupLevelHeight = Number(groupData.levelHeight) > 0
+            ? Number(groupData.levelHeight) : DEFAULT_LEVEL_HEIGHT;
+        const groupDatum = structureDatumFromObject(grouped[0]);
+        buildBrush.levelHeight = groupLevelHeight;
+        buildBrush.datumY = groupDatum;
+        if (Math.abs(pieceLevelHeight - groupLevelHeight) > 0.001) {
+            setBuildBuildingStatus('That piece uses a different storey rise and cannot be adopted safely.', true);
+            return;
+        }
+        if (!structureDatumCompatible(data, groupDatum, object.position.y)) {
+            setBuildBuildingStatus('That piece uses a different building datum and cannot be adopted safely.', true);
+            return;
+        }
+    } else if (buildBrush.datumY != null &&
+        !structureDatumCompatible(data, buildBrush.datumY, object.position.y)) {
+        setBuildBuildingStatus('That piece uses a different building datum and cannot be adopted safely.', true);
+        return;
+    }
+    if (!grouped.length) buildBrush.levelHeight = pieceLevelHeight;
+    if (buildBrush.datumY == null) buildBrush.datumY = structureDatumFromObject(object);
+    buildBrush.buildingPickMode = null;
+    setBuildBuildingStatus('Assigning the selected piece…');
+    emitStructureBatch('adopt', {
+        buildingId: buildBrush.buildingId,
+        buildingDatumY: buildBrush.datumY,
+        objectIds: [objectId]
+    }, { buildingId: buildBrush.buildingId, objectIds: [objectId] });
+    updateHintBar();
+}
+
+function duplicateActiveStorey(direction) {
+    const destinationLevel = buildBrush.level + (direction < 0 ? -1 : 1);
+    if (destinationLevel < BUILD_LEVEL_MIN || destinationLevel > BUILD_LEVEL_MAX) return;
+    const source = buildingStoreyObjects();
+    if (!source.length) {
+        setBuildBuildingStatus(`No pieces from the active building belong to ${buildLevelName()}.`, true);
+        return;
+    }
+    const existing = buildingStoreyObjects(destinationLevel);
+    if (existing.length && !confirm(`${buildLevelName(destinationLevel)} already has ${existing.length} piece${existing.length === 1 ? '' : 's'} in this building. Duplicate into it anyway?`)) {
+        return;
+    }
+    if (buildBrush.datumY == null) buildBrush.datumY = structureDatumFromObject(source[0]);
+    const expectedSourceIds = source.map(object => object.userData.syncId).filter(Boolean).sort();
+    const expectedDestinationIds = existing.map(object => object.userData.syncId).filter(Boolean).sort();
+    setBuildBuildingStatus(`Duplicating ${source.length} piece${source.length === 1 ? '' : 's'} to ${buildLevelName(destinationLevel)}…`);
+    emitStructureBatch('duplicate-storey', {
+        buildingId: buildBrush.buildingId,
+        buildingDatumY: buildBrush.datumY,
+        sourceLevel: buildBrush.level,
+        destinationLevel,
+        expectedSourceIds,
+        expectedDestinationIds,
+        allowOccupiedDestination: existing.length > 0
+    }, { buildingId: buildBrush.buildingId, sourceLevel: buildBrush.level, destinationLevel });
+}
+
+function applyStructureBatchResult(result = {}) {
+    // Every non-pocket navigation key is a lens onto the same persisted @world
+    // state. Accept @world (or another unified context path) as equivalent, but
+    // never leak a late pocket result into a different state.
+    if (result.key && result.key !== currentMapKey &&
+        (isPocket(result.key) || isPocket(currentMapKey))) return;
+    const created = Array.isArray(result.created) ? result.created : [];
+    const updated = Array.isArray(result.updated) ? result.updated : [];
+    const deleted = Array.isArray(result.deleted) ? result.deleted : [];
+    for (const record of created) {
+        if (record && record.id && !objects.some(object => object.userData.syncId === record.id)) {
+            createObjectFromData(record.id, record);
+        }
+    }
+    for (const entry of updated) {
+        if (!entry || !entry.id || !entry.patch) continue;
+        const object = objects.find(candidate => candidate.userData.syncId === entry.id);
+        if (object) updateObjectPresentation(object, entry.patch);
+    }
+    for (const entry of deleted) {
+        const id = typeof entry === 'string' ? entry : entry && entry.id;
+        const object = objects.find(candidate => candidate.userData.syncId === id);
+        if (!object) continue;
+        if (selectedObject === object) deselectObject();
+        if (objectNameplates) objectNameplates.removeFrom(object);
+        worldGroup.remove(object);
+        objects = objects.filter(candidate => candidate !== object);
+    }
+    applyBuildLevelVisibility();
+    if (objectNameplates) objectNameplates.sync(objects);
+
+    const pending = result.requestId && pendingStructureBatches.get(result.requestId);
+    if (!pending) {
+        syncBuildControls();
+        return;
+    }
+    pendingStructureBatches.delete(result.requestId);
+    if (pending.action === 'duplicate-storey') {
+        setBuildBuildingStatus(`Duplicated ${created.length} piece${created.length === 1 ? '' : 's'} to ${buildLevelName(pending.destinationLevel)}.`);
+        if (pending.buildingId === buildBrush.buildingId) setBuildLevel(pending.destinationLevel);
+        else syncBuildControls();
+    } else {
+        setBuildBuildingStatus(`Adopted ${updated.length} piece${updated.length === 1 ? '' : 's'} into the active building.`);
+        syncBuildControls();
+    }
+}
+
 function buildActive() { return currentTool === 'build' && isTacticalKey(); }
 function snapCorner(p) {
     return { x: Math.round(p.x / GRID_CELL_SIZE) * GRID_CELL_SIZE,
              z: Math.round(p.z / GRID_CELL_SIZE) * GRID_CELL_SIZE };
 }
+function snapCellIndex(p) {
+    return { x: Math.floor(p.x / GRID_CELL_SIZE), z: Math.floor(p.z / GRID_CELL_SIZE) };
+}
 function round2(v) { return Math.round(v * 100) / 100; }
 
-// Wall run data from anchor corner a to cursor corner b: axis-aligned along the
-// dominant drag axis, ground heights baked per piece so both screens (and later
-// loads) rebuild the exact same wall (see structures.js).
-function wallData(a, b) {
-    let dx = Math.round((b.x - a.x) / GRID_CELL_SIZE), dz = Math.round((b.z - a.z) / GRID_CELL_SIZE);
-    if (Math.abs(dx) >= Math.abs(dz)) dz = 0; else dx = 0;
-    dx = Math.max(-MAX_RUN, Math.min(MAX_RUN, dx));
-    dz = Math.max(-MAX_RUN, Math.min(MAX_RUN, dz));
-    const n = Math.abs(dx) + Math.abs(dz);
-    const ux = Math.sign(dx), uz = Math.sign(dz);
-    const y0 = round2(terrain.sampleHeight(a.x, a.z));
-    const ys = [];
-    for (let i = 0; i < n; i++) {
-        ys.push(round2(terrain.sampleHeight(a.x + ux * (i + 0.5) * GRID_CELL_SIZE,
-                                            a.z + uz * (i + 0.5) * GRID_CELL_SIZE) - y0));
+function buildLevelName(level = buildBrush.level) {
+    if (level < 0) return `Basement ${Math.abs(level)}`;
+    if (level > 0) return `Level ${level}`;
+    return 'Ground';
+}
+
+function buildLevelY(level = buildBrush.level) {
+    return buildBrush.datumY == null ? null : round2(buildBrush.datumY + level * buildBrush.levelHeight);
+}
+
+function resolveBuildPlacement(p, { persistDatum = true } = {}) {
+    const level = buildBrush.level;
+    const heightMode = level === 0 && buildBrush.followTerrain ? 'terrain' : 'flat';
+    let datum = buildBrush.datumY;
+    // The first piece fixes a common datum even when its ground geometry follows
+    // terrain. Upper-storey copies must align to this datum, not to each source
+    // piece's terrain-derived anchor/ys offsets.
+    if (datum == null) {
+        datum = round2(terrain.sampleHeight(p.x, p.z));
+        if (persistDatum) {
+            buildBrush.datumY = datum;
+            syncBuildControls();
+        }
     }
-    return { type: 'wall', style: buildBrush.style, scruffy: buildBrush.scruffy,
+    const baseY = heightMode === 'terrain'
+        ? round2(terrain.sampleHeight(p.x, p.z))
+        : round2(datum + level * buildBrush.levelHeight);
+    return {
+        level, levelHeight: buildBrush.levelHeight, heightMode, baseY,
+        buildingDatumY: datum
+    };
+}
+
+// A cover is always flat at the datum above the active storey, even when its
+// ground floor follows terrain. The closed underside becomes that room's
+// ceiling; the roof profile rises from this next-level plane.
+function resolveRoofPlacement(p, { persistDatum = true } = {}) {
+    let datum = buildBrush.datumY;
+    if (datum == null) {
+        datum = round2(terrain.sampleHeight(p.x, p.z));
+        if (persistDatum) {
+            buildBrush.datumY = datum;
+            syncBuildControls();
+        }
+    }
+    const coversLevel = buildBrush.level;
+    const level = coversLevel + 1;
+    return {
+        level, coversLevel, levelHeight: buildBrush.levelHeight, heightMode: 'flat',
+        baseY: round2(datum + level * buildBrush.levelHeight), buildingDatumY: datum
+    };
+}
+
+function authoredStructureIdentity(placement) {
+    const identity = {
+        buildingId: buildDrag?.buildingId || buildBrush.buildingId,
+        buildingDatumY: Number.isFinite(Number(buildDrag?.buildingDatumY))
+            ? Number(buildDrag.buildingDatumY) : placement.buildingDatumY
+    };
+    // Preview data does not need to consume a durable per-piece identity. Every
+    // committed drag already owns one from pointerdown.
+    if (buildDrag?.structureId) identity.structureId = buildDrag.structureId;
+    return identity;
+}
+
+// Wall run data from anchor corner a to cursor corner b. The first snapped
+// movement locks the first leg, then moving off that axis adds a second leg so
+// one drag can author a clean L. Ground heights stay baked per piece so both
+// screens (and later loads) rebuild the exact same wall (see structures.js).
+function wallData(a, b) {
+    const gesture = wallGesturePath(a, b,
+        buildDrag?.kind === 'wall' ? buildDrag.wallAxis : null, MAX_RUN);
+    if (buildDrag?.kind === 'wall') {
+        buildDrag.wallAxis = gesture.axis;
+        buildDrag.wallCorners = gesture.points;
+    }
+    const corners = gesture.points;
+    const anchor = corners[0] || a;
+    const end = corners[corners.length - 1] || anchor;
+    const path = corners.map(point => ({
+        x: round2(point.x - anchor.x), z: round2(point.z - anchor.z)
+    }));
+    const placement = buildDrag || resolveBuildPlacement(a, { persistDatum: false });
+    const y0 = placement.heightMode === 'terrain'
+        ? round2(terrain.sampleHeight(anchor.x, anchor.z))
+        : placement.baseY;
+    const ys = [];
+    for (let p = 1; p < corners.length; p++) {
+        const start = corners[p - 1], finish = corners[p];
+        const dx = Math.round((finish.x - start.x) / GRID_CELL_SIZE);
+        const dz = Math.round((finish.z - start.z) / GRID_CELL_SIZE);
+        const n = Math.abs(dx) + Math.abs(dz);
+        const ux = Math.sign(dx), uz = Math.sign(dz);
+        for (let i = 0; i < n; i++) {
+            ys.push(placement.heightMode === 'terrain'
+                ? round2(terrain.sampleHeight(start.x + ux * (i + 0.5) * GRID_CELL_SIZE,
+                                              start.z + uz * (i + 0.5) * GRID_CELL_SIZE) - y0)
+                : 0);
+        }
+    }
+    return { type: 'wall', ...authoredStructureIdentity(placement),
+             style: buildBrush.style, scruffy: buildBrush.scruffy,
              wallHeight: buildBrush.wallHeight, seed: buildDrag ? buildDrag.seed : 1,
-             position: { x: a.x, y: y0, z: a.z },
-             bx: dx * GRID_CELL_SIZE, bz: dz * GRID_CELL_SIZE, ys };
+             level: placement.level, levelHeight: placement.levelHeight, heightMode: placement.heightMode,
+             position: { x: anchor.x, y: y0, z: anchor.z },
+             bx: round2(end.x - anchor.x), bz: round2(end.z - anchor.z), path, ys };
 }
 
 // Floor rectangle data between anchor cell a and cursor cell b (cell indices).
@@ -2084,39 +2826,202 @@ function floorData(a, b) {
     if (z1 - z0 >= MAX_RUN) { if (b.z >= a.z) z1 = z0 + MAX_RUN - 1; else z0 = z1 - MAX_RUN + 1; }
     const cols = x1 - x0 + 1, rows = z1 - z0 + 1;
     const px = x0 * GRID_CELL_SIZE, pz = z0 * GRID_CELL_SIZE;
-    const y0 = round2(terrain.sampleHeight(px + (cols / 2) * GRID_CELL_SIZE, pz + (rows / 2) * GRID_CELL_SIZE));
+    const center = { x: px + (cols / 2) * GRID_CELL_SIZE, z: pz + (rows / 2) * GRID_CELL_SIZE };
+    const placement = buildDrag || resolveBuildPlacement(center, { persistDatum: false });
+    const y0 = placement.heightMode === 'terrain'
+        ? round2(terrain.sampleHeight(center.x, center.z))
+        : placement.baseY;
     const ys = [];
     for (let tz = 0; tz < rows; tz++) {
         for (let tx = 0; tx < cols; tx++) {
-            ys.push(round2(terrain.sampleHeight(px + (tx + 0.5) * GRID_CELL_SIZE,
-                                                pz + (tz + 0.5) * GRID_CELL_SIZE) - y0));
+            ys.push(placement.heightMode === 'terrain'
+                ? round2(terrain.sampleHeight(px + (tx + 0.5) * GRID_CELL_SIZE,
+                                              pz + (tz + 0.5) * GRID_CELL_SIZE) - y0)
+                : 0);
         }
     }
-    return { type: 'floor', style: buildBrush.style, scruffy: buildBrush.scruffy,
+    return { type: 'floor', ...authoredStructureIdentity(placement),
+             style: buildBrush.style, scruffy: buildBrush.scruffy,
              seed: buildDrag ? buildDrag.seed : 1,
+             level: placement.level, levelHeight: placement.levelHeight, heightMode: placement.heightMode,
              position: { x: px, y: y0, z: pz }, cols, rows, ys };
 }
 
-// Rebuild the translucent ghost only when the snapped endpoints (or brush
+// Roof/ceiling rectangle over the active storey. Unlike a floor patch it has
+// no terrain-baked tile offsets: every cover shares the building datum and is
+// stored at the next level so isolating the room below cuts it away.
+function roofData(a, b) {
+    let x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
+    let z0 = Math.min(a.z, b.z), z1 = Math.max(a.z, b.z);
+    if (x1 - x0 >= MAX_RUN) { if (b.x >= a.x) x1 = x0 + MAX_RUN - 1; else x0 = x1 - MAX_RUN + 1; }
+    if (z1 - z0 >= MAX_RUN) { if (b.z >= a.z) z1 = z0 + MAX_RUN - 1; else z0 = z1 - MAX_RUN + 1; }
+    const cols = x1 - x0 + 1, rows = z1 - z0 + 1;
+    const px = x0 * GRID_CELL_SIZE, pz = z0 * GRID_CELL_SIZE;
+    const center = { x: px + cols * GRID_CELL_SIZE / 2, z: pz + rows * GRID_CELL_SIZE / 2 };
+    const placement = buildDrag || resolveRoofPlacement(center, { persistDatum: false });
+    return {
+        type: 'roof', ...authoredStructureIdentity(placement),
+        style: buildBrush.style, scruffy: buildBrush.scruffy,
+        seed: buildDrag ? buildDrag.seed : 1,
+        level: placement.level, coversLevel: placement.coversLevel,
+        levelHeight: placement.levelHeight, heightMode: 'flat',
+        roofShape: buildBrush.roofShape, pitch: buildBrush.roofPitch,
+        overhang: GRID_CELL_SIZE * 0.16,
+        position: { x: px, y: placement.baseY, z: pz }, cols, rows
+    };
+}
+
+// Straight stairs occupy the cells from a through b on the dominant axis and
+// connect the active level to the immediately adjacent level. They always use
+// a flat start height, even when the ground floor itself follows terrain.
+function stairData(a, b) {
+    let dx = b.x - a.x, dz = b.z - a.z;
+    let ux = 0, uz = 0, cells = 1;
+    if (Math.abs(dx) >= Math.abs(dz)) {
+        ux = Math.sign(dx) || 1;
+        cells = Math.min(MAX_RUN, Math.abs(dx) + 1);
+    } else {
+        uz = Math.sign(dz) || 1;
+        cells = Math.min(MAX_RUN, Math.abs(dz) + 1);
+    }
+    const start = { x: (a.x + 0.5) * GRID_CELL_SIZE, z: (a.z + 0.5) * GRID_CELL_SIZE };
+    const placement = buildDrag || resolveBuildPlacement(start, { persistDatum: false });
+    const baseY = placement.heightMode === 'terrain'
+        ? round2(terrain.sampleHeight(start.x, start.z))
+        : placement.baseY;
+    const direction = buildBrush.stairDirection < 0 ? -1 : 1;
+    return {
+        type: 'stair', ...authoredStructureIdentity(placement),
+        style: buildBrush.style, scruffy: buildBrush.scruffy,
+        seed: buildDrag ? buildDrag.seed : 1,
+        level: placement.level, toLevel: placement.level + direction,
+        levelHeight: placement.levelHeight, heightMode: 'flat',
+        position: { x: start.x, y: baseY, z: start.z },
+        bx: ux * cells * GRID_CELL_SIZE, bz: uz * cells * GRID_CELL_SIZE,
+        rise: direction * placement.levelHeight, width: GRID_CELL_SIZE * 0.9
+    };
+}
+
+// Fixed levels use an invisible horizontal authoring plane. This is what makes
+// basement editing possible after the terrain is cut away; level 0 retains the
+// old terrain-following raycast.
+function pointerToBuildSurface(event) {
+    if (buildBrush.level === 0 && buildBrush.followTerrain) return pointerToGround(event);
+    castFromPointer(event, { renderer, camera, raycaster, mouse });
+    const hit = new THREE.Vector3();
+    if (buildBrush.datumY == null) {
+        // The basement cutaway may already have hidden every renderable ground
+        // mesh. Intersect y=0 for XZ, then ask the terrain model for its datum.
+        const zeroPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+        if (!raycaster.ray.intersectPlane(zeroPlane, hit)) return null;
+        const world = sceneToWorld(hit);
+        world.y = terrain.sampleHeight(world.x, world.z);
+        return world;
+    }
+    const y = buildLevelY();
+    const authoringPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -y);
+    return raycaster.ray.intersectPlane(authoringPlane, hit) ? sceneToWorld(hit) : null;
+}
+
+function findBuildLevelHit(event) {
+    castFromPointer(event, { renderer, camera, raycaster, mouse });
+    const supportedTypes = buildBrush.mode === 'roof'
+        ? ['floor', 'stair']
+        : ['floor', 'stair', 'roof'];
+    const candidates = objects.filter(o => o.visible && supportedTypes.includes(o.userData.objectType));
+    const hit = raycaster.intersectObjects(candidates, true)[0];
+    if (!hit) return null;
+    let top = hit.object;
+    while (top.parent && top.parent !== scene && top.parent !== worldGroup) top = top.parent;
+    const object = objects.find(o => o === top);
+    return object ? { object, point: sceneToWorld(hit.point) } : null;
+}
+
+function adoptBuildLevelAt(event, { structuresOnly = false, quiet = false } = {}) {
+    const hit = findBuildLevelHit(event);
+    if (hit) {
+        const data = hit.object.userData.objectData || {};
+        let level = structureLevel(data);
+        let baseY = hit.object.position.y;
+        if (data.type === 'stair') {
+            const toLevel = Number.isFinite(Number(data.toLevel)) ? Math.round(Number(data.toLevel)) : level + Math.sign(Number(data.rise) || 1);
+            const endY = baseY + (Number(data.rise) || 0);
+            if (Math.abs(hit.point.y - endY) < Math.abs(hit.point.y - baseY)) {
+                level = toLevel;
+                baseY = endY;
+            }
+        }
+        if (Number.isFinite(Number(data.levelHeight)) && Number(data.levelHeight) > 0) {
+            buildBrush.levelHeight = Number(data.levelHeight);
+        }
+        const hitBuildingId = structureBuildingId(data);
+        if (hitBuildingId) {
+            buildBrush.buildingId = hitBuildingId;
+            if (!quiet) setBuildBuildingStatus(`Active building ${shortBuildingId(hitBuildingId)}.`);
+        }
+        buildBrush.level = Math.max(BUILD_LEVEL_MIN, Math.min(BUILD_LEVEL_MAX, level));
+        if (buildBrush.level < 0) buildBrush.isolate = true;
+        const persistedDatum = Number(data.buildingDatumY);
+        buildBrush.datumY = Number.isFinite(persistedDatum)
+            ? round2(persistedDatum)
+            : round2(baseY - buildBrush.level * buildBrush.levelHeight);
+        buildBrush.followTerrain = buildBrush.level === 0 && data.heightMode !== 'flat';
+    } else {
+        if (structuresOnly) return false;
+        const p = pointerToGround(event);
+        if (!p) return false;
+        buildBrush.level = 0;
+        buildBrush.datumY = round2(p.y);
+        buildBrush.followTerrain = true;
+    }
+    if (!quiet) buildBrush.pickingLevel = false;
+    buildDrag = null;
+    clearBuildGhost();
+    syncBuildControls();
+    applyBuildLevelVisibility();
+    updateHintBar();
+    return true;
+}
+
+// Rebuild the translucent ghost only when the snapped footprint (or brush
 // settings) actually change — mousemove between snaps is free.
 function updateBuildGhost(p) {
+    if (buildBrush.pickingLevel) { clearBuildGhost(); return; }
     const mode = buildDrag ? buildDrag.kind : buildBrush.mode;
-    if (mode === 'erase') { clearBuildGhost(); return; }
+    if (mode === 'erase' || mode === 'opening' || mode === 'tile') { clearBuildGhost(); return; }
     let a, b;
     if (mode === 'wall') {
         b = snapCorner(p);
         a = buildDrag ? { x: buildDrag.ax, z: buildDrag.az } : b;
     } else {
-        b = { x: Math.floor(p.x / GRID_CELL_SIZE), z: Math.floor(p.z / GRID_CELL_SIZE) };
+        b = snapCellIndex(p);
         a = buildDrag ? { x: buildDrag.ax, z: buildDrag.az } : b;
     }
-    const key = [mode, a.x, a.z, b.x, b.z, buildBrush.style, buildBrush.scruffy,
-                 buildBrush.wallHeight, buildDrag ? buildDrag.seed : 0].join('|');
+    let pathKey = '';
+    if (mode === 'wall') {
+        const gesture = wallGesturePath(a, b,
+            buildDrag?.kind === 'wall' ? buildDrag.wallAxis : null, MAX_RUN);
+        pathKey = gesture.points.map(point => `${point.x},${point.z}`).join(';');
+        if (buildDrag?.kind === 'wall') {
+            buildDrag.wallAxis = gesture.axis;
+            buildDrag.wallCorners = gesture.points;
+        }
+    }
+    const key = [mode, a.x, a.z, b.x, b.z, pathKey, buildBrush.style, buildBrush.scruffy,
+                 buildBrush.wallHeight, buildBrush.level, buildBrush.levelHeight,
+                 buildBrush.followTerrain, buildBrush.stairDirection,
+                 buildBrush.roofShape, buildBrush.roofPitch,
+                 buildDrag ? buildDrag.baseY : buildLevelY(), buildDrag ? buildDrag.seed : 0].join('|');
     if (key === buildGhostKey && buildGhost) return;
     clearBuildGhost();
-    const data = mode === 'wall' ? wallData(a, b) : floorData(a, b);
+    const data = mode === 'wall' ? wallData(a, b)
+        : mode === 'stair' ? stairData(a, b)
+            : mode === 'roof' ? roofData(a, b)
+                : floorData(a, b);
     buildGhost = mode === 'wall' ? buildWallRun(data, { ghost: true })
-                                 : buildFloorPatch(data, { ghost: true });
+        : mode === 'stair' ? buildStaircase(data, { ghost: true })
+            : mode === 'roof' ? buildRoofPatch(data, { ghost: true })
+                : buildFloorPatch(data, { ghost: true });
     buildGhost.position.set(data.position.x, data.position.y, data.position.z);
     worldGroup.add(buildGhost); // synced-object coords are world coords
     buildGhostKey = key;
@@ -2131,30 +3036,93 @@ function clearBuildGhost() {
 function commitBuildDrag(p) {
     if (buildDrag.kind === 'wall') {
         const data = wallData({ x: buildDrag.ax, z: buildDrag.az }, snapCorner(p));
-        if (Math.abs(data.bx) + Math.abs(data.bz) === 0) return; // click, no run
+        if (!wallSegmentCount(data)) return; // click, no run
         socket.emit('add-object', data);
+    } else if (buildDrag.kind === 'stair') {
+        socket.emit('add-object', stairData({ x: buildDrag.ax, z: buildDrag.az }, snapCellIndex(p)));
+    } else if (buildDrag.kind === 'roof') {
+        socket.emit('add-object', roofData({ x: buildDrag.ax, z: buildDrag.az }, snapCellIndex(p)));
     } else {
-        const b = { x: Math.floor(p.x / GRID_CELL_SIZE), z: Math.floor(p.z / GRID_CELL_SIZE) };
+        const b = snapCellIndex(p);
         socket.emit('add-object', floorData({ x: buildDrag.ax, z: buildDrag.az }, b));
     }
 }
-// The wall/floor under the cursor, if any (for erase / Alt+click).
-function pickBuildTarget(event) {
+// Resolve the visible structure plus its edit-cell index. Wall, floor and roof
+// pickers live on an edit-only layer and remain present across visible gaps.
+function buildHitFromIntersections(hits, targetTypes = null) {
+    for (const hit of hits) {
+        let top = hit.object;
+        let segmentIndex = Number.isInteger(top.userData.wallSegment) ? top.userData.wallSegment : null;
+        let tileIndex = top.userData.structureTilePicker && Number.isInteger(hit.instanceId)
+            ? hit.instanceId : null;
+        while (top.parent && top.parent !== scene && top.parent !== worldGroup) {
+            top = top.parent;
+            if (segmentIndex == null && Number.isInteger(top.userData.wallSegment)) {
+                segmentIndex = top.userData.wallSegment;
+            }
+        }
+        const object = objects.find(o => o === top);
+        if (object && isStructureType(object.userData.objectType) &&
+            (!targetTypes || targetTypes.has(object.userData.objectType))) {
+            return { object, segmentIndex, tileIndex };
+        }
+    }
+    return null;
+}
+
+function pickBuildHit(event, targetTypes = null) {
     castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const hit = raycaster.intersectObjects(objects, true)[0];
-    if (!hit) return null;
-    let top = hit.object;
-    while (top.parent && top.parent !== scene && top.parent !== worldGroup) top = top.parent;
-    const obj = objects.find(o => o === top);
-    const t = obj && obj.userData.objectType;
-    return (t === 'wall' || t === 'floor') ? obj : null;
+    const visibleObjects = objects.filter(o => o.visible);
+    const previousLayerMask = raycaster.layers.mask;
+    raycaster.layers.set(STRUCTURE_EDIT_PICK_LAYER);
+    const editHit = buildHitFromIntersections(
+        raycaster.intersectObjects(visibleObjects, true), targetTypes);
+    raycaster.layers.mask = previousLayerMask;
+    if (editHit) return editHit;
+    return buildHitFromIntersections(raycaster.intersectObjects(visibleObjects, true), targetTypes);
+}
+
+function updateWallSegment(object, segmentIndex, kind) {
+    if (!socket || object?.userData.objectType !== 'wall') return;
+    const data = object.userData.objectData || {};
+    const count = wallSegmentCount(data);
+    if (!Number.isInteger(segmentIndex) || segmentIndex < 0 || segmentIndex >= count) return;
+    const allowed = new Set(['door', 'window', 'gap', 'solid']);
+    if (!allowed.has(kind)) return;
+    const previous = Array.isArray(data.segments) ? data.segments : [];
+    const segments = Array.from({ length: count }, (_, i) => allowed.has(previous[i]) ? previous[i] : null);
+    segments[segmentIndex] = kind;
+    // Keep rapid consecutive edits cumulative while awaiting the server echo.
+    object.userData.objectData = { ...data, segments };
+    socket.emit('update-object', { id: object.userData.syncId, patch: { segments } });
+}
+
+function updateStructureTile(object, tileIndex, kind) {
+    if (!socket || !object) return;
+    const type = object.userData.objectType;
+    if (type !== 'floor' && type !== 'roof') return;
+    const data = object.userData.objectData || {};
+    const count = structureTileCount(data);
+    if (!Number.isInteger(tileIndex) || tileIndex < 0 || tileIndex >= count) return;
+    if (kind !== 'gap' && kind !== 'solid') return;
+    const previous = Array.isArray(data.tiles) ? data.tiles : [];
+    const tiles = Array.from({ length: count }, (_, i) =>
+        previous[i] === 'gap' || previous[i] === 'solid' ? previous[i] : null);
+    tiles[tileIndex] = kind;
+    // Keep rapid consecutive edits cumulative while awaiting the server echo.
+    object.userData.objectData = { ...data, tiles };
+    socket.emit('update-object', { id: object.userData.syncId, patch: { tiles } });
 }
 function setBuildMode(mode) {
     buildBrush.mode = mode;
+    buildBrush.pickingLevel = false;
+    buildBrush.buildingPickMode = null;
     buildDrag = null;
     clearBuildGhost();
     document.querySelectorAll('#build-modes .brush-mode').forEach(b =>
         b.classList.toggle('active', b.dataset.bmode === mode));
+    syncBuildControls();
+    applyBuildLevelVisibility();
     updateHintBar();
 }
 function setBuildStyle(style) {
@@ -2162,6 +3130,148 @@ function setBuildStyle(style) {
     clearBuildGhost(); // next hover rebuilds in the new style
     document.querySelectorAll('#build-styles .brush-mode').forEach(b =>
         b.classList.toggle('active', b.dataset.bstyle === style));
+}
+
+function setBuildLevel(level) {
+    if (pendingStructureBatches.size) return;
+    buildBrush.level = Math.max(BUILD_LEVEL_MIN, Math.min(BUILD_LEVEL_MAX, Math.round(level)));
+    if (buildBrush.level < 0) buildBrush.isolate = true;
+    buildBrush.pickingLevel = false;
+    buildBrush.buildingPickMode = null;
+    buildDrag = null;
+    clearBuildGhost();
+    syncBuildControls();
+    applyBuildLevelVisibility();
+    updateHintBar();
+}
+
+function syncBuildControls() {
+    const level = buildBrush.level;
+    const levelY = buildLevelY(level);
+    const grouped = buildingObjects();
+    const storeyPieces = grouped.filter(object =>
+        structureStoreyLevel(object.userData.objectData || {}) === level);
+    const buildingReadout = document.getElementById('build-building-readout');
+    if (buildingReadout) {
+        buildingReadout.textContent = `Building ${shortBuildingId(buildBrush.buildingId)} · ${grouped.length} piece${grouped.length === 1 ? '' : 's'}`;
+        buildingReadout.title = buildBrush.buildingId;
+    }
+    const batchPending = pendingStructureBatches.size > 0;
+    const newBuilding = document.getElementById('build-new-building');
+    if (newBuilding) newBuilding.disabled = batchPending;
+    const pickBuilding = document.getElementById('build-pick-building');
+    if (pickBuilding) {
+        pickBuilding.classList.toggle('active', buildBrush.buildingPickMode === 'pick');
+        pickBuilding.disabled = batchPending;
+    }
+    const adoptStructure = document.getElementById('build-adopt-structure');
+    if (adoptStructure) {
+        adoptStructure.classList.toggle('active', buildBrush.buildingPickMode === 'adopt');
+        adoptStructure.disabled = batchPending;
+    }
+    const duplicateDown = document.getElementById('build-duplicate-down');
+    if (duplicateDown) duplicateDown.disabled = batchPending || !storeyPieces.length || level <= BUILD_LEVEL_MIN;
+    const duplicateUp = document.getElementById('build-duplicate-up');
+    if (duplicateUp) duplicateUp.disabled = batchPending || !storeyPieces.length || level >= BUILD_LEVEL_MAX;
+    const readout = document.getElementById('build-level-readout');
+    if (readout) {
+        let detail;
+        if (buildBrush.mode === 'roof') {
+            const roofY = buildLevelY(level + 1);
+            detail = roofY == null ? 'cover height set on first drag' : `cover at Y ${roofY.toFixed(1)}`;
+        } else if (level === 0 && buildBrush.followTerrain) detail = 'follows terrain';
+        else if (levelY == null) detail = 'height set on first drag';
+        else detail = `Y ${levelY.toFixed(1)} · ${level * buildBrush.levelHeight * FEET_PER_GRID_CELL >= 0 ? '+' : ''}${Math.round(level * buildBrush.levelHeight * FEET_PER_GRID_CELL)} ft`;
+        readout.textContent = `${buildLevelName(level)} · ${detail}`;
+    }
+    const ground = document.getElementById('build-level-ground');
+    if (ground) {
+        ground.classList.toggle('active', level === 0);
+        ground.disabled = batchPending;
+    }
+    const down = document.getElementById('build-level-down');
+    const up = document.getElementById('build-level-up');
+    if (down) down.disabled = batchPending || level <= BUILD_LEVEL_MIN;
+    if (up) up.disabled = batchPending || level >= BUILD_LEVEL_MAX;
+    const height = document.getElementById('build-level-height');
+    if (height) {
+        height.value = buildBrush.levelHeight;
+        height.disabled = batchPending || grouped.length > 0;
+        height.title = batchPending
+            ? 'Wait for the current building edit to finish'
+            : grouped.length > 0
+                ? 'Storey rise is fixed after the first piece in a building'
+                : 'Set the rise before authoring the first piece';
+    }
+    const heightVal = document.getElementById('build-level-height-val');
+    if (heightVal) heightVal.textContent = `${Math.round(buildBrush.levelHeight * FEET_PER_GRID_CELL)} ft`;
+    const follow = document.getElementById('build-follow-terrain');
+    if (follow) { follow.checked = buildBrush.followTerrain; follow.disabled = level !== 0 || buildBrush.mode === 'roof'; }
+    const auto = document.getElementById('build-auto-snap');
+    if (auto) auto.checked = buildBrush.autoSnap;
+    const isolate = document.getElementById('build-isolate-level');
+    if (isolate) isolate.checked = buildBrush.isolate;
+    const pick = document.getElementById('build-pick-level');
+    if (pick) {
+        pick.classList.toggle('active', buildBrush.pickingLevel);
+        pick.textContent = buildBrush.pickingLevel ? 'Click map…' : 'Pick from map';
+    }
+    if (pick) pick.disabled = batchPending;
+    const stairs = document.getElementById('build-stair-options');
+    if (stairs) stairs.classList.toggle('hidden', buildBrush.mode !== 'stair');
+    const walls = document.getElementById('build-wall-options');
+    if (walls) walls.classList.toggle('hidden', buildBrush.mode !== 'wall');
+    document.querySelectorAll('[data-stair-dir]').forEach(btn =>
+        btn.classList.toggle('active', Number(btn.dataset.stairDir) === buildBrush.stairDirection));
+    const openings = document.getElementById('build-opening-options');
+    if (openings) openings.classList.toggle('hidden', buildBrush.mode !== 'opening');
+    document.querySelectorAll('[data-opening-kind]').forEach(btn =>
+        btn.classList.toggle('active', btn.dataset.openingKind === buildBrush.openingKind));
+    const tiles = document.getElementById('build-tile-options');
+    if (tiles) tiles.classList.toggle('hidden', buildBrush.mode !== 'tile');
+    document.querySelectorAll('[data-tile-kind]').forEach(btn =>
+        btn.classList.toggle('active', btn.dataset.tileKind === buildBrush.tileKind));
+    const roofs = document.getElementById('build-roof-options');
+    if (roofs) roofs.classList.toggle('hidden', buildBrush.mode !== 'roof');
+    document.querySelectorAll('[data-roof-shape]').forEach(btn =>
+        btn.classList.toggle('active', btn.dataset.roofShape === buildBrush.roofShape));
+    const roofPitch = document.getElementById('build-roof-pitch');
+    if (roofPitch) {
+        roofPitch.value = buildBrush.roofPitch;
+        roofPitch.disabled = buildBrush.roofShape === 'flat';
+    }
+    const roofPitchVal = document.getElementById('build-roof-pitch-val');
+    if (roofPitchVal) roofPitchVal.textContent = buildBrush.roofShape === 'flat'
+        ? 'flat' : `${Math.round(buildBrush.roofPitch * 12)}:12`;
+}
+
+function restoreBuildCutaway() {
+    if (!buildCutawayState) return;
+    if (terrain) terrain.group.visible = buildCutawayState.terrain;
+    if (plane) plane.visible = buildCutawayState.plane;
+    buildCutawayState = null;
+}
+
+function applyBuildLevelVisibility() {
+    for (const object of objects) {
+        const type = object.userData.objectType;
+        if (!isStructureType(type)) continue;
+        const data = object.userData.objectData || { type };
+        const authoringCover = currentTool === 'build' && buildBrush.mode === 'roof' && type === 'roof' &&
+            Number(data.coversLevel) === buildBrush.level;
+        object.visible = !buildBrush.isolate || authoringCover ||
+            structureTouchesLevel(data, buildBrush.level);
+    }
+    const cutAwayTerrain = buildBrush.isolate && buildBrush.level < 0;
+    if (cutAwayTerrain && terrain && plane) {
+        if (!buildCutawayState) buildCutawayState = { terrain: terrain.group.visible, plane: plane.visible };
+        terrain.group.visible = false;
+        plane.visible = false;
+        if (grass) grass.hide();
+        if (trees) trees.hide();
+    } else if (!cutAwayTerrain) {
+        restoreBuildCutaway();
+    }
 }
 
 // --- Fog of war tool logic ---
@@ -2289,7 +3399,13 @@ function updateTerrainPanel() {
     }
 
     // Tool teardown remains page-owned.
-    if (currentTool !== 'build') { buildDrag = null; clearBuildGhost(); }
+    if (currentTool !== 'build') {
+        buildDrag = null;
+        buildBrush.pickingLevel = false;
+        clearBuildGhost();
+        syncBuildControls();
+        applyBuildLevelVisibility();
+    } else applyBuildLevelVisibility();
     if (fogOverlay) fogOverlay.setVisible(fogActive());
     if (currentTool !== 'fog') fogStroke = null;
     if (terrain) terrain.setBrush({ visible: false });
@@ -2322,6 +3438,114 @@ function emitWater() {
     if (socket) socket.emit('update-terrain', { water: terrain.getWaterData() });
     syncWaterControls();
 }
+
+function syncTerrainResetButton() {
+    const button = document.getElementById('terrain-reset');
+    if (button) button.disabled = !!pendingTerrainReset;
+}
+
+function requestTerrainReset() {
+    if (!terrain || pendingTerrainReset) return;
+    if (!socket || !socket.connected || !mapReload.authenticated) {
+        alert('Reconnect before resetting terrain.');
+        return;
+    }
+    const prompt = terrainIsUnified
+        ? 'Reset edited terrain and water in this province?'
+        : 'Reset all terrain and water on this pocket map?';
+    if (!confirm(prompt)) return;
+
+    const requestId = newStructureIdentity('terrain-reset');
+    pendingTerrainReset = {
+        requestId,
+        beforeWater: structuredClone(terrain.getWaterData().bodies)
+    };
+    syncTerrainResetButton();
+    socket.emit('reset-terrain', { requestId });
+}
+
+function applyTerrainResetResult(result = {}) {
+    if (!terrain || !result || typeof result !== 'object') return;
+    const pending = pendingTerrainReset && result.requestId === pendingTerrainReset.requestId
+        ? pendingTerrainReset : null;
+    const belongsHere = result.scope === 'map'
+        ? result.contextKey === currentMapKey
+        : result.scope === 'province' ? terrainIsUnified : true;
+    if (!belongsHere) {
+        if (pending) {
+            pendingTerrainReset = null;
+            syncTerrainResetButton();
+        }
+        return;
+    }
+
+    if (!pending) {
+        terrain.applyData(result);
+        syncWaterControls();
+        applyBuildLevelVisibility();
+        return;
+    }
+
+    const afterWater = Array.isArray(result.water?.bodies)
+        ? structuredClone(result.water.bodies) : [];
+    let patch = null;
+    if (result.clear) {
+        terrain.beginStroke();
+        terrain.reset();
+        patch = terrain.endStroke();
+        if (result.water) terrain.setWaterData(result.water);
+        // Preserve the existing pocket undo order: terrain first, then water.
+        if (pending.beforeWater.length) {
+            undoStack.push({ kind: 'water', before: pending.beforeWater, after: afterWater });
+        }
+        if (patch) undoStack.push({ kind: 'chunks', patch });
+    } else {
+        const chunks = result.chunks && typeof result.chunks === 'object' ? result.chunks : {};
+        if (Object.keys(chunks).length) patch = terrain.applyPatch(chunks);
+        // Applying a canonical server deletion marks local sync dirt; drain it
+        // so a later brush stroke cannot accidentally re-emit the reset.
+        terrain.collectDirtyPayload();
+        if (result.water) terrain.setWaterData(result.water);
+        if (patch) undoStack.push({ kind: 'chunks', patch });
+        if (JSON.stringify(pending.beforeWater) !== JSON.stringify(afterWater)) {
+            undoStack.push({ kind: 'water', before: pending.beforeWater, after: afterWater });
+        }
+    }
+    while (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack.length = 0;
+    pendingTerrainReset = null;
+    syncTerrainResetButton();
+    syncWaterControls();
+    applyBuildLevelVisibility();
+}
+
+function emitChunkPayloadBatches(keys, batchSize = 40) {
+    if (!socket) return;
+    for (let i = 0; i < keys.length; i += batchSize) {
+        socket.emit('update-terrain', terrain.payloadForKeys(keys.slice(i, i + batchSize)));
+    }
+}
+
+// Floors, stair treads and visible roofs are gameplay surfaces. Raycast them alongside the
+// terrain and return the nearest visible support, excluding the object being
+// dragged so a floor patch cannot support itself.
+function pickSupportSurface(event, { exclude = null } = {}) {
+    castFromPointer(event, { renderer, camera, raycaster, mouse });
+    const structures = objects.filter(o => o !== exclude && o.visible &&
+        ['floor', 'stair', 'roof'].includes(o.userData.objectType));
+    const targets = [...structures];
+    if (!buildCutawayState) {
+        if (terrain && terrain.group.visible) targets.push(terrain.chunkGroup);
+        targets.push(plane); // raycast anchor even when the renderer hides it at survey zoom
+    }
+    const hit = raycaster.intersectObjects(targets, true)[0];
+    if (!hit) return null;
+    let top = hit.object;
+    while (top.parent && top.parent !== scene && top.parent !== worldGroup && top.parent !== terrain?.chunkGroup) top = top.parent;
+    const object = objects.find(o => o === top) || null;
+    return { point: sceneToWorld(hit.point), object };
+}
+
 // Pick against the actual terrain chunks on tactical maps (fall back to the flat
 // plane elsewhere) so the brush lands where the cursor visually touches the ground.
 // Returns TRUE world coordinates (scene hit + floating origin) — everything
@@ -2427,7 +3651,7 @@ function undoTerrain() {
     }
     redoStack.push({ kind: 'chunks', patch: terrain.applyPatch(entry.patch) }); // inverse
     terrain.collectDirtyPayload();                  // drain; we encode the keys directly
-    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(entry.patch)));
+    emitChunkPayloadBatches(Object.keys(entry.patch));
 }
 function redoTerrain() {
     if (!redoStack.length || !terrain) return;
@@ -2440,7 +3664,7 @@ function redoTerrain() {
     }
     undoStack.push({ kind: 'chunks', patch: terrain.applyPatch(entry.patch) });
     terrain.collectDirtyPayload();
-    if (socket) socket.emit('update-terrain', terrain.payloadForKeys(Object.keys(entry.patch)));
+    emitChunkPayloadBatches(Object.keys(entry.patch));
 }
 // --- Status hint bar: always tell the user what the mouse does right now ---
 function updateHintBar() {
@@ -2464,11 +3688,26 @@ function updateHintBar() {
         hint = `Biomes — LMB paint hex · Alt+click clear · tagged hexes seed new tactical maps · ${cam}`;
     } else if (currentTool === 'build' && isTacticalKey()) {
         const m = buildBrush.mode;
-        hint = m === 'erase'
-            ? `Build · erase — LMB click a wall/floor to remove it · ${cam}`
+        const level = buildLevelName();
+        hint = buildBrush.buildingPickMode === 'pick'
+            ? `Build · pick building — click a grouped structure · legacy pieces require Adopt piece · Esc cancel · ${cam}`
+            : buildBrush.buildingPickMode === 'adopt'
+            ? `Build · adopt piece — click exactly one structure to join building ${shortBuildingId(buildBrush.buildingId)} · Esc cancel · ${cam}`
+            : buildBrush.pickingLevel
+            ? `Build · pick level — click terrain, a floor, stairs, or a roof · Esc cancel · ${cam}`
+            : m === 'erase'
+            ? `Build · erase — LMB cuts one wall, floor, or roof cell · stairs delete whole · Alt+click removes whole structure · ${cam}`
+            : m === 'tile'
+                ? `Build · ${buildBrush.tileKind === 'gap' ? 'cut' : 'restore'} tiles — LMB edits one floor or roof cell · Alt+click removes whole structure · ${cam}`
+            : m === 'opening'
+                ? `Build · ${buildBrush.openingKind} · ${level} — LMB edit one wall cell · Alt+click removes whole run · ${cam}`
             : m === 'wall'
-                ? `Build · wall — LMB drag along the grid · Esc cancel · Alt+click erase · ${cam}`
-                : `Build · floor — LMB drag a rectangle of tiles · Esc cancel · Alt+click erase · ${cam}`;
+                ? `Build · wall · ${level} — drag, then turn once for an L · Page Up/Down level · Alt+click erase · ${cam}`
+                : m === 'stair'
+                    ? `Build · stairs ${buildBrush.stairDirection > 0 ? 'up' : 'down'} · ${level} — drag through cells · Page Up/Down level · ${cam}`
+                    : m === 'roof'
+                        ? `Build · ${buildBrush.roofShape} roof over ${level} — drag a cover rectangle · isolate ${level} to see inside · ${cam}`
+                        : `Build · floor · ${level} — drag a tile rectangle · Page Up/Down level · Alt+click erase · ${cam}`;
     } else if (currentTool === 'build') {
         hint = `Build works on tactical maps — enter a province leaf or pocket first · ${cam}`;
     } else if (fogActive()) {
@@ -2494,8 +3733,10 @@ function updateHintBar() {
     bar.textContent = hint;
 }
 // Ground height a token should rest at, for the current map.
-function groundY(x, z, halfHeight) {
-    const base = (terrain && isTacticalKey()) ? terrain.sampleHeight(x, z) : 0;
+function groundY(x, z, halfHeight, supportY = null) {
+    const base = Number.isFinite(supportY)
+        ? supportY
+        : (terrain && isTacticalKey()) ? terrain.sampleHeight(x, z) : 0;
     return base + halfHeight;
 }
 
@@ -2549,8 +3790,9 @@ function updateTerrainLOD() {
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
     }
-    if (grass) grass.update(camera, controls, terrainIsUnified);
-    if (trees) trees.update(camera, controls, terrainIsUnified);
+    const vegetationVisible = terrainIsUnified && !buildCutawayState;
+    if (grass) grass.update(camera, controls, vegetationVisible);
+    if (trees) trees.update(camera, controls, vegetationVisible);
     if (fogOverlay) fogOverlay.update(fogMask, worldTarget.x, worldTarget.z, dist);
 }
 // Reflect the current water bodies in the panel (count readout).
@@ -2604,3 +3846,6 @@ loadSRD().then(srd => {
     if (pendingHomebrew) SRD.setHomebrew(pendingHomebrew);
     answerStatsPending(); // combat may have arrived before the SRD finished loading
 }).catch(e => console.error('SRD load failed (combat stat auto-fill disabled):', e));
+
+// The 1.3 MB bestiary is fetched on first Library/search interaction by
+// ensureMonsterLibraryLoaded(), keeping initial tabletop startup lean.

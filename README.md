@@ -17,6 +17,8 @@ npm start
 Then open http://localhost:3000. Log in with any username — the name `gm`
 (case-insensitive) gets GM powers.
 
+Run the dependency-free regression suite with `npm test`.
+
 ## Routes
 
 | Route       | What it is |
@@ -24,7 +26,7 @@ Then open http://localhost:3000. Log in with any username — the name `gm`
 | `/`         | Character creator (SRD 5.1 rules, live 3D preview of the tabletop model) |
 | `/gm`       | GM screen: world map ladder (Continent → Kingdom → Province → Tactical), terrain editing, object placement, structures, combat tracker |
 | `/player`   | Player screen: shared map view + character-sheet HUD |
-| `/homebrew` | Custom race/class builder |
+| `/homebrew` | Custom monster/race/class builder |
 
 ## Features
 
@@ -34,20 +36,34 @@ Then open http://localhost:3000. Log in with any username — the name `gm`
   are zoom lenses over the same ground, not separate maps.
 - **GM world editing** — heightmap brushes, biome painting (which reshapes the
   actual generator, not just colors), poured lakes and spline rivers,
-  tile-brush structures (walls/floors, with a seeded "scruffy" ruins variant).
+  multi-storey tile-brush structures (terrain-following or elevated/basement
+  floors, straight or L-shaped wall runs with layered procedural panels,
+  stairs, level cutaways,
+  per-cell doors/windows/gaps,
+  cut/restore floor and roof cells, flat/gable/hip roofs with ceiling
+  undersides, explicit building grouping, whole-storey duplication above or
+  below, and a seeded "scruffy"
+  ruins variant).
 - **Pocket maps** — portal-linked dungeon/interior maps separate from the
   overworld.
 - **Server-authoritative 5e combat** — initiative tracker, turn/range
   overlays, attack/dash/dodge/disengage actions and conditions; the server
   rolls all dice and enforces turns and movement.
 - **Character creator & homebrew** — SRD 5.1 rules math (AC, HP, spell slots,
-  weapon attacks), plus custom races/classes shared to every screen.
+  weapon attacks), plus custom monsters/races/classes shared to every screen.
+- **Monster library** — 334 CC-BY SRD 5.1 creatures plus table-made monsters,
+  searchable by name/type/CR and placeable as size-aware combat tokens. Their
+  AC, HP, speed, initiative, saves, and standard attacks seed encounters.
 
 ## Data & persistence
 
 Runtime state (characters, maps, homebrew) is saved as JSON under
-`data/saves/` (gitignored). Login is unauthenticated and owner checks are
-advisory — this is a trusted-table tool, not a hardened service.
+`data/saves/` (gitignored), or under `THREEDX_DATA_DIR` when that environment
+variable is set. Writes use a flushed temporary file plus atomic rename and
+keep a parseable `.bak` recovery copy. GM/player mutation permissions and
+payload bounds are enforced server-side, but login still trusts the supplied
+username — this remains a trusted-table tool, not an internet-facing auth
+service.
 
 ## Licensing
 

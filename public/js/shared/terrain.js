@@ -1010,6 +1010,18 @@ export class Terrain {
     return out;
   }
 
+  // Abort an unfinished authoring gesture. Restore its copy-on-write snapshot
+  // locally and discard the resulting dirty payload: reconnect/map reload will
+  // supply the authoritative state, and this abandoned stroke must never be
+  // emitted later or captured by a subsequent undo operation.
+  cancelStroke() {
+    const patch = this.endStroke();
+    if (!patch) return false;
+    this.applyPatch(patch);
+    this._dirtyData.clear();
+    return true;
+  }
+
   // Restore a patch; returns the inverse patch (for redo). Marks restored chunks dirty.
   applyPatch(patch) {
     const inverse = {};
@@ -1719,6 +1731,15 @@ export class Terrain {
   applyData(data) {
     if (!data) return { changed: false, migrated: false };
     let changed = false, migrated = false, deleted = false;
+    // A pocket-map reset is broadcast as one canonical clear operation. Reset
+    // first, then apply any replacement chunks/water carried by the same
+    // payload. Unified-world resets are converted to explicit regional chunk
+    // deletions by the GM page and never arrive here as `clear`.
+    if (data.clear) {
+      this.reset();
+      changed = true;
+      deleted = true;
+    }
     if (data.format === 2 || data.chunks) {
       for (const k of Object.keys(data.chunks || {})) {
         if (!/^-?\d+,-?\d+$/.test(k)) continue;

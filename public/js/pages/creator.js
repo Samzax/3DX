@@ -118,10 +118,10 @@ function tabIdentity() {
   if (rb.options) {
     racialChoiceUI = `<div class="row"><label class="fld">Racial ability boost — choose ${rb.options.choose} (${'+1'} each)</label>
       <div style="display:flex; flex-wrap:wrap; gap:8px;">${rb.options.from.map(a =>
-        `<label class="pill" style="cursor:pointer; padding:6px 10px;"><input type="checkbox" class="rc" value="${a}" ${char.racialChoice.includes(a)?'checked':''}/> ${a.toUpperCase()}</label>`).join('')}</div></div>`;
+        `<label class="pill" style="cursor:pointer; padding:6px 10px;"><input type="checkbox" class="rc" value="${esc(a)}" ${char.racialChoice.includes(a)?'checked':''}/> ${esc(a.toUpperCase())}</label>`).join('')}</div></div>`;
   }
   return `<h2>Identity</h2>
-    <div class="row"><label class="fld">Character name</label><input type="text" id="f-name" value="${char.name||''}" placeholder="e.g. Thorin"/></div>
+    <div class="row"><label class="fld">Character name</label><input type="text" id="f-name" value="${esc(char.name)}" placeholder="e.g. Thorin"/></div>
     <div class="grid2">
       <div class="row"><label class="fld">Race</label><select id="f-race">${opt(SRD.races, char.race)}</select></div>
       <div class="row"><label class="fld">Subrace</label><select id="f-subrace" ${subraces.length?'':'disabled'}>
@@ -132,7 +132,7 @@ function tabIdentity() {
       <div class="row"><label class="fld">Alignment</label><select id="f-align"><option value="">— none —</option>${opt(SRD.alignments, char.alignment)}</select></div>
     </div>
     ${racialChoiceUI}
-    <div class="info"><strong>${esc(race?race.name:'')}</strong> — speed ${race?race.speed:'?'} ft, size ${esc(race?race.size:'')}. Ability bonuses: ${bonusText}.
+    <div class="info"><strong>${esc(race?race.name:'')}</strong> — speed ${esc(race?race.speed:'?')} ft, size ${esc(race?race.size:'')}. Ability bonuses: ${esc(bonusText)}.
       <div style="margin-top:6px;">${race && race.traits ? race.traits.map(t=>esc(t.name)).join(' · ') : ''}</div></div>
     ${stepNav()}`;
 }
@@ -145,7 +145,7 @@ function tabClass() {
     const canSub = c.level >= choiceLvl && subs.length;
     return `<div class="class-row" data-i="${i}">
       <select class="c-class">${opt(SRD.classes, c.class)}</select>
-      <input type="number" class="c-level" value="${c.level}" min="1" max="20"/>
+      <input type="number" class="c-level" value="${esc(c.level)}" min="1" max="20"/>
       <select class="c-sub" ${canSub?'':'disabled'}>
         <option value="">${canSub?'— subclass —':`subclass @ ${choiceLvl}`}</option>${opt(subs, c.subclass)}</select>
       <button class="btn btn-danger c-del" ${char.classes.length>1?'':'disabled'}>✕</button>
@@ -183,7 +183,7 @@ function tabAbilities() {
   } else {
     body = ABILITIES.map(a =>
       `<div class="ability-row"><label>${ABILITY_NAMES[a]}</label><span></span>
-        <input type="number" class="man" data-a="${a}" min="1" max="30" value="${char.baseAbilities[a]}" style="width:64px; text-align:center;"/><span></span>
+        <input type="number" class="man" data-a="${a}" min="1" max="30" value="${esc(char.baseAbilities[a])}" style="width:64px; text-align:center;"/><span></span>
         <div class="final"><b>${finals[a]}</b> (${fmtMod(abilityMod(finals[a]))})</div></div>`).join('');
   }
   return `<h2>Abilities</h2>
@@ -201,7 +201,7 @@ function abilityRow(a, finalVal, buy) {
   return `<div class="ability-row" data-a="${a}">
     <label>${ABILITY_NAMES[a]}</label>
     <button class="stepper dec" ${base<=8?'disabled':''}>−</button>
-    <div class="score">${base}</div>
+    <div class="score">${esc(base)}</div>
     <button class="stepper inc" ${base>=15?'disabled':''}>+</button>
     <div class="final"><b>${finalVal}</b> (${fmtMod(abilityMod(finalVal))})</div></div>`;
 }
@@ -234,11 +234,11 @@ function tabSkills() {
 function tabAppearance() {
   const ap = char.appearance, c = ap.colors;
   const slider = (key,label,min,max) => `<div class="slider-row"><span>${label}</span>
-    <input type="range" class="ap-s" data-k="${key}" min="${min}" max="${max}" step="0.05" value="${ap[key]}"/>
+    <input type="range" class="ap-s" data-k="${key}" min="${min}" max="${max}" step="0.05" value="${esc(ap[key])}"/>
     <span>${Number(ap[key]).toFixed(2)}</span></div>`;
-  const color = (key,label) => `<label>${label}<input type="color" class="ap-c" data-k="${key}" value="${c[key]}"/></label>`;
+  const color = (key,label) => `<label>${label}<input type="color" class="ap-c" data-k="${key}" value="${esc(c[key])}"/></label>`;
   return `<h2>Appearance</h2>
-    <button class="btn btn-sm" id="apply-preset" style="margin-bottom:14px;">Apply ${SRD.get('races',char.race)?.name||''} preset</button>
+    <button class="btn btn-sm" id="apply-preset" style="margin-bottom:14px;">Apply ${esc(SRD.get('races',char.race)?.name||'')} preset</button>
     ${slider('height','Height',0.6,1.4)}
     ${slider('build','Build',0.7,1.4)}
     ${slider('headSize','Head',0.7,1.4)}
@@ -260,8 +260,8 @@ function tabEquipment() {
     }).join('');
   const weaponOpts = SRD.weaponList().map(w=>`<option value="${w.index}">${w.name} — ${w.damage?w.damage.damage_dice:''} ${w.damage&&w.damage.damage_type?w.damage.damage_type.name:''}${w.weapon_range==='Ranged'?' (ranged)':''}</option>`).join('');
   const gearOpts = SRD.gearList().map(g=>`<option value="${g.index}">${g.name}</option>`).join('');
-  const wRows = eq.weapons.map((wi,i)=>{ const w=SRD.get('equipment',wi); const a=w?SRD.weaponAttack(w,d.mods,char.classes,d.prof):{attack:0,damage:'',damageType:'',ranged:false,range:'',versatile:null}; return `<div class="inv-row"><span>${w?w.name:wi} <span class="pill">${a.ranged?'ranged '+a.range:'melee'}</span></span><span class="pill">${fmtMod(a.attack)} · ${a.damage}${a.versatile?' ('+a.versatile+' 2H)':''} ${a.damageType}</span><button class="btn-danger btn-sm rm-w" data-i="${i}">✕</button></div>`; }).join('') || '<p style="color:var(--muted); font-size:13px;">No weapons.</p>';
-  const iRows = eq.items.map((gi,i)=>{ const g=SRD.get('equipment',gi); return `<div class="inv-row"><span>${g?g.name:gi}</span><button class="btn-danger btn-sm rm-i" data-i="${i}">✕</button></div>`; }).join('') || '<p style="color:var(--muted); font-size:13px;">No gear.</p>';
+  const wRows = eq.weapons.map((wi,i)=>{ const w=SRD.get('equipment',wi); const a=w?SRD.weaponAttack(w,d.mods,char.classes,d.prof):{attack:0,damage:'',damageType:'',ranged:false,range:'',versatile:null}; return `<div class="inv-row"><span>${esc(w?w.name:wi)} <span class="pill">${a.ranged?'ranged '+a.range:'melee'}</span></span><span class="pill">${fmtMod(a.attack)} · ${a.damage}${a.versatile?' ('+a.versatile+' 2H)':''} ${a.damageType}</span><button class="btn-danger btn-sm rm-w" data-i="${i}">✕</button></div>`; }).join('') || '<p style="color:var(--muted); font-size:13px;">No weapons.</p>';
+  const iRows = eq.items.map((gi,i)=>{ const g=SRD.get('equipment',gi); return `<div class="inv-row"><span>${esc(g?g.name:gi)}</span><button class="btn-danger btn-sm rm-i" data-i="${i}">✕</button></div>`; }).join('') || '<p style="color:var(--muted); font-size:13px;">No gear.</p>';
   return `<h2>Equipment <span style="float:right; font-size:13px; color:var(--muted); font-weight:400;">AC ${d.ac} · ${d.acSource}</span></h2>
     <div class="grid2">
       <div class="row"><label class="fld">Armor</label><select id="eq-armor">${armorOpts}</select></div>
@@ -314,7 +314,7 @@ function tabSpells() {
       const items = byLevel[lv].map(s=>`<label class="spell ${char.spells.includes(s.index)?'on':''}"><input type="checkbox" class="sp" value="${s.index}" ${char.spells.includes(s.index)?'checked':''}/> ${s.name}${s.concentration?' <span class="pill">C</span>':''}${s.ritual?' <span class="pill">R</span>':''}</label>`).join('');
       return `<details ${lv<=1?'open':''}><summary>${label} <span style="color:var(--muted)">(${byLevel[lv].length})</span></summary><div class="spell-grid">${items}</div></details>`;
     }).join('') || '<p style="color:var(--muted); font-size:13px;">No spells available at this level yet.</p>';
-    return `<div class="caster-block" data-class="${c.class}" data-level="${c.level}"><h3 style="font-size:15px; margin:6px 0;">${esc(cl.name)} <span style="color:var(--muted); font-weight:400; font-size:13px;">${ci.ability?ci.ability.toUpperCase():''} · save DC ${ci.dc!=null?ci.dc:'?'} · spell atk ${ci.atk!=null?fmtMod(ci.atk):'?'}</span></h3>${guide}${sections}</div>`;
+    return `<div class="caster-block" data-class="${esc(c.class)}" data-level="${esc(c.level)}"><h3 style="font-size:15px; margin:6px 0;">${esc(cl.name)} <span style="color:var(--muted); font-weight:400; font-size:13px;">${ci.ability?esc(ci.ability.toUpperCase()):''} · save DC ${ci.dc!=null?esc(ci.dc):'?'} · spell atk ${ci.atk!=null?esc(fmtMod(ci.atk)):'?'}</span></h3>${guide}${sections}</div>`;
   }).join('');
   return `<h2>Spells</h2>
     <div class="info" style="margin-bottom:12px;">Spell slots — ${slotLine||'—'}${pactLine?('  ·  '+pactLine):''}</div>
@@ -324,7 +324,7 @@ function tabSpells() {
 
 function tabReview() {
   const d = derive();
-  const classes = char.classes.map(c => { const cl=SRD.get('classes',c.class); const sub=c.subclass&&SRD.get('subclasses',c.subclass); return `${esc(cl?cl.name:c.class)} ${c.level}${sub?` (${esc(sub.name)})`:''}`; }).join(' / ');
+  const classes = char.classes.map(c => { const cl=SRD.get('classes',c.class); const sub=c.subclass&&SRD.get('subclasses',c.subclass); return `${esc(cl?cl.name:c.class)} ${esc(c.level)}${sub?` (${esc(sub.name)})`:''}`; }).join(' / ');
   const race = SRD.get('races', char.race); const sub = char.subrace && SRD.get('subraces', char.subrace);
   const abilGrid = ABILITIES.map(a=>`<div class="metric"><div class="l">${a.toUpperCase()}</div><div class="v">${d.finals[a]}</div><div class="l">${fmtMod(d.mods[a])}${d.saves.has(a)?' · save '+fmtMod(d.mods[a]+d.prof):''}</div></div>`).join('');
   const skillList = [...d.proficient].map(s=>SRD.get('skills',s)).filter(Boolean).sort((a,b)=>a.name.localeCompare(b.name)).map(sk=>{ const ab=sk.ability_score.index; return `<div class="inv-row"><span>${sk.name} <span class="pill">${ab}</span></span><b>${fmtMod(d.mods[ab]+d.prof)}</b></div>`; }).join('') || '<span style="color:var(--muted)">—</span>';
@@ -332,9 +332,9 @@ function tabReview() {
   const si=d.spellInfo;
   const slotsTxt = Object.entries(si.slots).filter(([l,n])=>n>0).map(([l,n])=>`L${l}×${n}`).join('  ') + (si.pact?`  Pact ${si.pact.count}×L${si.pact.level}`:'');
   const spellNames = char.spells.map(x=>SRD.get('spells',x)).filter(Boolean).sort((a,b)=>a.level-b.level||a.name.localeCompare(b.name));
-  const spellsTxt = spellNames.length ? spellNames.map(s=>`${s.level===0?'•':s.level} ${s.name}`).join(', ') : '—';
-  const gear = char.equipment.items.map(gi=>SRD.get('equipment',gi)).filter(Boolean).map(g=>g.name).join(', ') || '—';
-  const armorTxt = char.equipment.armor ? SRD.get('equipment',char.equipment.armor).name : 'none';
+  const spellsTxt = spellNames.length ? spellNames.map(s=>`${s.level===0?'•':esc(s.level)} ${esc(s.name)}`).join(', ') : '—';
+  const gear = char.equipment.items.map(gi=>SRD.get('equipment',gi)).filter(Boolean).map(g=>esc(g.name)).join(', ') || '—';
+  const armorTxt = char.equipment.armor ? esc(SRD.get('equipment',char.equipment.armor)?.name || char.equipment.armor) : 'none';
   const feats = SRD.classFeatures(char.classes);
   const featTxt = feats.length ? feats.map(f=>`${esc(f.name)} (L${f.level})`).join(', ') : '—';
   return `<h2>${esc(char.name)||'(unnamed)'} <span style="float:right; font-size:13px; color:var(--muted); font-weight:400;">${esc(sub?sub.name:(race?race.name:''))} · ${classes}</span></h2>
@@ -344,9 +344,9 @@ function tabReview() {
         <h3 style="font-size:14px; margin:12px 0 6px;">Skills</h3>${skillList}
       </div>
       <div>
-        <div class="info" style="line-height:1.7;">AC <strong>${d.ac}</strong> <span style="color:var(--muted)">(${d.acSource})</span><br/>HP <strong>${d.hp}</strong> · Init <strong>${fmtMod(d.init)}</strong> · Speed <strong>${d.speed}</strong> · Prof <strong>${fmtMod(d.prof)}</strong> · PP <strong>${d.pp}</strong><br/>${char.background?SRD.get('backgrounds',char.background).name:'—'}${char.alignment?(' · '+SRD.get('alignments',char.alignment).name):''}</div>
+        <div class="info" style="line-height:1.7;">AC <strong>${d.ac}</strong> <span style="color:var(--muted)">(${esc(d.acSource)})</span><br/>HP <strong>${d.hp}</strong> · Init <strong>${fmtMod(d.init)}</strong> · Speed <strong>${d.speed}</strong> · Prof <strong>${fmtMod(d.prof)}</strong> · PP <strong>${d.pp}</strong><br/>${char.background?esc(SRD.get('backgrounds',char.background).name):'—'}${char.alignment?(' · '+esc(SRD.get('alignments',char.alignment).name)):''}</div>
         <h3 style="font-size:14px; margin:12px 0 6px;">Attacks</h3>${attacks}
-        ${si.casters.length?`<h3 style="font-size:14px; margin:12px 0 6px;">Spells</h3><div class="info">${si.casters.map(ci=>`${SRD.get('classes',ci.class).name}: save DC ${ci.dc!=null?ci.dc:'?'} · spell atk ${ci.atk!=null?fmtMod(ci.atk):'?'}`).join('<br/>')}<div style="margin-top:6px;">Slots: ${slotsTxt||'—'}</div><div style="margin-top:6px;">${spellsTxt}</div></div>`:''}
+        ${si.casters.length?`<h3 style="font-size:14px; margin:12px 0 6px;">Spells</h3><div class="info">${si.casters.map(ci=>`${esc(SRD.get('classes',ci.class).name)}: save DC ${ci.dc!=null?ci.dc:'?'} · spell atk ${ci.atk!=null?fmtMod(ci.atk):'?'}`).join('<br/>')}<div style="margin-top:6px;">Slots: ${slotsTxt||'—'}</div><div style="margin-top:6px;">${spellsTxt}</div></div>`:''}
       </div>
     </div>
     <h3 style="font-size:14px; margin:14px 0 6px;">Equipment</h3><div class="info">Armor: ${armorTxt}${char.equipment.shield?' · shield':''}<div style="margin-top:4px;">Gear: ${gear}</div></div>
@@ -539,7 +539,10 @@ function renderSaved(list) {
   const el = $('saved');
   if (!list || !list.length) { el.innerHTML = '<p style="color:var(--muted); font-size:13px;">None yet.</p>'; return; }
   el.innerHTML = list.map(c => {
-    const lvl = (c.classes||[]).reduce((s,x)=>s+(x.level||0),0);
+    const lvl = (Array.isArray(c.classes) ? c.classes : []).reduce((sum, entry) => {
+      const level = Number(entry && entry.level);
+      return sum + (Number.isFinite(level) ? Math.max(0, Math.min(20, Math.floor(level))) : 0);
+    }, 0);
     const owner = c.owner && c.owner!==username ? ` <span class="pill">${esc(c.owner)}</span>` : '';
     return `<div class="c" data-id="${esc(c.id)}"><span><b style="color:${esc(c.color||'#dd4444')}">${esc(c.name)}</b>${owner} <span style="color:var(--muted)">· L${lvl}</span></span><button class="del" data-id="${esc(c.id)}">✕</button></div>`;
   }).join('');

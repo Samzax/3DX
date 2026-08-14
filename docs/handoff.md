@@ -9,9 +9,108 @@ Design docs: `docs/unified-world-design.md`,
 
 ## Where the project stands
 
-**Branch state:** everything is on `main`, pushed to GitHub. No side branches.
+**Branch state:** on `main`; the current structures-v2 work is uncommitted.
 
 Built and working (newest first):
+- **Whole-storey duplication (structures v2, seventh slice)**: authored
+  structures now carry stable `buildingId` and per-piece `structureId` values
+  plus a shared `buildingDatumY`. The Build panel can start/pick a building,
+  explicitly adopt a selected legacy piece, and duplicate the active semantic
+  storey above or below. The GM sends one `structure-batch` intent; the server
+  validates the complete source/destination set, transforms walls, floors,
+  stairs and roof `coversLevel` data atomically, saves once, then broadcasts one
+  canonical `structure-batch-applied` result. No proximity guessing is used.
+  GM/player cutaways consume the same semantic storey helpers, and pending
+  batches lock group controls and recover cleanly after reconnect/map reload.
+- **Persistence, permission and input hardening**: every JSON database now
+  writes through a flushed temporary file and atomic rename, rotates a
+  parseable `.bak`, and recovers from invalid primaries at startup.
+  `THREEDX_DATA_DIR` provides an isolated save root for tests. World authoring
+  is GM-only; players retain bounded rulers and their own canonical saved
+  character instances. Character IDs/owners are server-derived, map/object/
+  terrain payloads are bounded, hidden-object denials do not leak positions,
+  and persisted creator/homebrew/combat values are normalized before DOM
+  insertion. Full character sheets and combat loadouts are projected only to
+  their owner/GM; other viewers receive public token/encounter fields. Combat
+  HP commits update every map mirror and refresh matched character/map recovery
+  copies after both files commit. Login still trusts the username, so
+  deployment remains trusted-table only.
+- **Regression and acceptance harness**: `npm test` syntax-checks the server and
+  every browser module, exercises the real structure geometry/level/tile
+  helpers, and starts isolated real servers for save/restart, backup recovery,
+  permission and canonical storey-batch protocol tests. The GM/player browser
+  acceptance matrix covers grouped walls/floors/stairs/roofs, openings,
+  cut/restore, cutaways, live sync and reload persistence.
+- **Region-safe terrain reset**: the button now sends one server-authoritative
+  request instead of clearing optimistically. Pocket resets commit as one
+  canonical clear; on the unified world the server derives the current
+  province from the GM's joined map, removes its edited chunks and touching
+  water (including lake footprint and curved-river intersections) in one save,
+  rolls back on failure, then sends the same fog-filtered result to GM/player
+  clients. Authenticated reconnects force an authoritative terrain replacement
+  and cancel stale authoring gestures. Basement cutaways also keep grass and
+  trees suppressed during per-frame LOD updates.
+- **Editable floor/roof cells (structures v2, sixth slice)**: the GM Build
+  panel now has a Tiles mode with Cut and Restore brushes. Erase cuts one wall,
+  floor or roof cell; stairs still delete as one object, while Alt+click is the
+  explicit whole-structure delete. Floor and roof records carry a bounded
+  row-major `tiles` mask (`gap`/`solid`) sanitized by the GM-only server update
+  path. Missing cells retain invisible edit-layer instance pickers, so an empty
+  opening remains clickable. Cut pitched roofs switch to deterministic tiled
+  closed shells with ceiling undersides and fascia around both exterior and
+  hole edges. GM and player clients rebuild from the synchronized patch; legacy
+  structures without `tiles` keep their optimized geometry unchanged.
+- **Thicker wall panels (structures v2, fifth slice)**: the shared procedural
+  wall builder now gives every existing and new wall a 0.24-cell core, raised
+  two-sided inset faces, deeper door/window trim and capped grid posts. Stone,
+  wood and plaster use tiny generated surface maps (masonry courses, vertical
+  planks and mottled render) plus style-specific face/trim colors; there are no
+  downloaded assets and no saved-data migration. Scruffy walls retain their
+  broken silhouettes and gain the surface treatment without polished inset
+  faces. Straight and L runs, openings, invisible cell pickers, roof clearance
+  and GM/player deterministic rebuilds remain unchanged.
+- **Wall-follow drag (structures v2, fourth slice)**: one Wall gesture can now
+  continue around a single grid corner to create a clean L-shaped run. The
+  first snapped movement fixes the first leg; the whole two-leg path shares a
+  48-cell cap and is stored as one backward-compatible wall object using
+  relative orthogonal `path` corners alongside its legacy endpoint `bx/bz`.
+  Terrain heights are baked in continuous segment order across the bend, and
+  doors/windows/gaps keep the same per-cell indices and invisible pickers on
+  both legs. The server bounds and normalizes new wall paths before saving;
+  old straight walls without `path` still rebuild unchanged.
+- **Roofs and ceilings (structures v2, third slice)**: Roof mode drags a
+  rectangular cover over the active storey and stores it at the next level
+  datum. Shapes are Flat, Gable X, Gable Z and Hip with adjustable pitch,
+  fixed eave overhang, style-specific exterior colors and a closed interior
+  ceiling face. Upper floor slabs also render their underside as ceilings.
+  A roof belongs semantically to the storey it covers rather than creating a
+  phantom extra level in the selector. All Levels shows the exterior, while
+  isolating the covered room hides the roof automatically. Roof mode keeps that
+  room's cover visible while authoring. Visible roofs are raycast support
+  surfaces for rooftop token placement/movement. The newer tile-edit slice
+  makes Erase cut one roof cell; Alt+click still removes the whole cover.
+- **Editable wall openings (structures v2, second slice)**: the GM Build
+  panel now has an Openings mode for per-cell Door, Window, Gap and Solid
+  edits. Erase turns one wall cell into a restorable gap; the newer tile-edit
+  slice does the same for floor/roof cells, stairs still delete as whole
+  objects, and Alt+click explicitly deletes an entire structure. Wall records
+  carry a bounded `segments` array, sanitized by the
+  server's GM-only `update-object` path. Both GM and player clients rebuild
+  wall geometry on the synchronized patch, including open door leaves,
+  translucent window panes and invisible pick volumes that keep gaps
+  clickable. Legacy walls without `segments` retain their old rendering.
+- **Multi-storey tile brush (structures v2, first slice)**: Build levels now
+  span Basement 5 through Level 8 with an adjustable storey rise (10 ft by
+  default). Ground walls/floors retain the old terrain-following mode; flat
+  ground slabs and every upper/lower floor share a picked map datum so separate
+  drags align exactly. `Pick from map` adopts terrain or an existing floor;
+  walls, stairs and roofs auto-adopt a clicked floor by default. New `stair` synced
+  objects render deterministic straight steps up or down between adjacent
+  levels. GM isolation hides other structure levels and automatically cuts away
+  terrain/vegetation for basements; players get a local All/Ground/L/B cutaway
+  control whenever vertical construction exists. Floors and stair treads are
+  now real raycast support surfaces, so placed/moved tokens sit on the storey
+  actually clicked. Legacy wall/floor objects remain level 0 and render unchanged.
 - **GM camera control (View tool)**: the GM steers player cameras. Events:
   `players-updated` (presence roster, broadcast on login/join-map/disconnect),
   `camera-command { target: 'all'|username, pose: {pos, look}, mode:
@@ -91,14 +190,14 @@ Built and working (newest first):
 - **Tile-brush structures (step 4, v1)**: a new
   Build tool button on the GM toolbar (own panel, tactical maps only).
   `shared/structures.js` builds modular wall runs (drag along grid lines,
-  axis-aligned, posts on corners) and floor patches (drag a rectangle; one
+  posts on corners; v2 adds a one-turn L path) and floor patches (drag a rectangle; one
   merged mesh, vertex-color checker) from synced object data — ground heights
   are BAKED into the data (`ys` arrays) at creation so GM/player render
   identically; styles stone/wood/plaster; **Scruffy** checkbox = deterministic
   ruins (seeded gaps/crumble/tilt, identical on every client). Ghost preview
-  while dragging, Esc cancels, Erase mode / Alt+click deletes a whole
-  run/patch. Synced as plain objects (`wall`/`floor` types) through the
-  existing add/move/delete events — zero server changes. Walls/floors read as
+  while dragging and Esc cancels. The v2 opening slice supersedes its original
+  whole-wall Erase behavior (Alt+click remains whole-object deletion). Synced
+  as plain objects (`wall`/`floor` types). Walls/floors read as
   GROUND for add/ruler (and for move-drops), so tokens place ON floors; the
   move tool can still grab one when nothing is selected.
 - **Pocket-map generator fix** (found while testing the tile brush): since U2,
@@ -151,27 +250,31 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
 2. ~~Grass/vegetation scatter~~ — done (see above).
 3. Hand-placed hero props (GLTF pipeline) — **explicitly deferred**, maybe
    permanently.
-4. **Tile-brush structures** — the next big feature: Sims-style wall/floor
-   painting that emits modular pieces, plus a "scruffy" variant (purposeful
-   tilt/jitter) for ruins. Interiors reuse pocket maps via portals.
+4. ~~Tile-brush structures~~ — v1 walls/floors and the first seven v2 slices
+   (levels/stairs/cutaways, editable openings, roofs/ceilings, and L-shaped
+   wall-follow drags, thicker procedural wall panels, and per-cell floor/roof
+   cut/restore, explicit grouping and whole-storey duplication) are done.
+   Interiors can still use pocket maps.
 
 ## Next steps, in priority order
 1. ~~Combat mode~~ — v1 done (see above). Possible v2 dials: opportunity
-   attacks, advantage/disadvantage from conditions, saving-throw actions,
-   spell attacks/slots in combat, death saves, multi-target/AoE.
+   attacks/reactions, advantage/disadvantage from conditions, death saves,
+   multi-target/AoE, and bonus actions. Spell attacks, saving throws and slot
+   spending are already implemented.
 2. ~~U4: fog of war~~ — v1 done (see above). Possible v2 dials: fog sheet
    look (soft edges / cloud texture instead of the flat dark plane),
    auto-reveal around player tokens, per-player masks (now it's one shared
    mask), rulers/water filtering, `subscribe-region` streaming when world
    size demands it.
-3. Tile-brush v2 dials: doors/gaps in runs, per-segment erase, roofs,
-   wall-follow drag (L-shapes in one gesture), thicker panel look.
+3. Tile-brush v2 follow-ups: multi-piece selection/editing, moving an entire
+   grouped building, and richer stair/roof joins. Whole-storey duplication,
+   levels, openings, roofs/ceilings, L-shaped walls, thicker wall panels and
+   per-cell floor/roof cut/restore are done.
 4. Vegetation extras: biome-varied ground cover (desert tufts, forest ferns,
    flowers, rocks), GM density brush (needs a synced channel), tree
    billboards past 220u.
 5. Look-pass dials (toon banding, rim light).
-6. Later: character animations, pocket playable masks, region-scoped terrain
-   reset.
+6. Later: character animations and pocket playable masks.
 
 ## Known minor issues
 - ~90ms frame for the all-ocean sheet rebuild once per window drain (worst
@@ -182,10 +285,19 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
 - Sparse foam speckle on near-sea-level flats; faint seam at the fine-chunk
   window edge in some light.
 - Legacy world map at origin has old-generator terrain baked as edited chunks.
-- `public/js/shared/structures.js` key map entry: wall/floor mesh builders
-  (`buildWallRun`/`buildFloorPatch`), seeded `buildRand`, `BUILD_STYLES`,
-  `disposeBuiltObject` (ghost cleanup). GM tool logic lives in gm.js
-  (`buildBrush`/`buildDrag`/`wallData`/`floorData`/`updateBuildGhost`).
+- Character and map files are each crash-safe and keep matched recovery copies,
+  but a process/host loss in the tiny interval between their two primary-file
+  renames is not a true cross-file transaction; eliminating that window would
+  require a journal/WAL or a single transactional store.
+- `public/js/shared/structures.js` key map entry: wall/floor/stair/roof mesh
+  builders (`buildWallRun`/`buildFloorPatch`/`buildStaircase`/
+  `buildRoofPatch`), wall path helpers (`wallGesturePath`/`wallPathPoints`/
+  `wallSegmentCount`), tile-mask helper (`structureTileCount`), level helpers, seeded
+  `buildRand`, generated wall surface maps, layered panel/opening meshes,
+  per-cell wall and instanced floor/roof pickers, `BUILD_STYLES`, and
+  `disposeBuiltObject` (ghost/rebuild cleanup). GM tool logic lives in gm.js
+  (`buildBrush`/`buildDrag`/`wallData`/`floorData`/`stairData`/`roofData`/
+  `updateBuildGhost`/`updateWallSegment`/`updateStructureTile`).
 
 ## Critical workflow rules
 - Commit as **Samzax <108634046+Samzax@users.noreply.github.com>**. Commit only when I approve
@@ -208,7 +320,9 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
   shared with the page).
 - I sometimes chat remotely — edit the local repo directly, keep the server
   running for my playtests.
-- No tests/linter: verify by running + screenshots + headless evals.
+- Run `npm test` for syntax, pure geometry/state helpers, and isolated real-server
+  persistence/protocol regressions; use screenshots/headless evals for visual
+  behavior that the suite cannot cover.
 - `data/saves/` is runtime state (gitignored); never read `data/srd/*.json`
   directly (use srd.js).
 

@@ -5,7 +5,10 @@
 // only renders state and emits the combat-* events.
 
 import * as THREE from 'three';
-import { ABILITIES, abilityMod, fmtMod, proficiencyBonus } from './srd.js';
+import { ABILITIES, abilityMod, proficiencyBonus } from './srd.js';
+import {
+    combatCssColor, combatInteger, combatModifier, combatNumber, combatSpellLevel
+} from './combat-safety.js';
 
 const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -29,7 +32,10 @@ export const EFFECTS = {
 const GM_CONDITIONS = ['prone', 'poisoned', 'restrained', 'stunned', 'blinded', 'frightened', 'grappled', 'invisible', 'down'];
 
 export function remainingFeet(c) {
-    return Math.max(0, Math.round(c.speedFeet + c.dashFeet - c.movementUsedFeet));
+    const speed = combatNumber(c?.speedFeet, { fallback: 0, min: 0, max: 1000000 });
+    const dash = combatNumber(c?.dashFeet, { fallback: 0, min: 0, max: 1000000 });
+    const used = combatNumber(c?.movementUsedFeet, { fallback: 0, min: 0, max: 2000000 });
+    return Math.max(0, Math.round(speed + dash - used));
 }
 
 // SRD-derived combat stats for a character — the same math as the player HUD's
@@ -100,9 +106,11 @@ export function deriveCombatStats(char, SRD) {
     };
 }
 
-function cssColor(c) {
-    if (typeof c === 'number') return '#' + c.toString(16).padStart(6, '0');
-    return String(c || '#dd4444');
+export function combatAttackDamageLabel(attack) {
+    const parts = Array.isArray(attack?.damageParts) && attack.damageParts.length > 1
+        ? attack.damageParts
+        : [{ damage: attack?.damage, damageType: attack?.damageType }];
+    return parts.map(part => [part?.damage, part?.damageType].filter(Boolean).join(' ')).filter(Boolean).join(' + ');
 }
 
 const LOG_ICONS = { info: '•', initiative: '🎲', attack: '⚔', cast: '✨', action: '✦', turn: '▶', damage: '💥' };
@@ -161,6 +169,7 @@ export class CombatTracker {
 
     appendLog(entry) {
         if (!this.state) return;
+        if (!Array.isArray(this.state.log)) this.state.log = [];
         if (this.state.log.some(l => l.id === entry.id)) return;
         this.state.log.push(entry);
         const logEl = this.container.querySelector('.combat-log');
@@ -180,33 +189,42 @@ export class CombatTracker {
     }
 
     logLineHTML(entry) {
+        entry = entry && typeof entry === 'object' ? entry : {};
         return `<div class="log-line log-${escHtml(entry.kind)}"><span class="log-ic">${LOG_ICONS[entry.kind] || '•'}</span>${escHtml(entry.text)}</div>`;
     }
 
     // The combatant ids in display order: turn order once started, name order while gathering.
     displayOrder() {
         const s = this.state;
-        if (s.started && s.order.length) {
-            const extra = Object.keys(s.combatants).filter(id => !s.order.includes(id));
-            return [...s.order, ...extra];
+        const combatants = s?.combatants && typeof s.combatants === 'object' && !Array.isArray(s.combatants)
+            ? s.combatants : {};
+        const order = Array.isArray(s?.order) ? s.order.map(String) : [];
+        if (s?.started && order.length) {
+            const extra = Object.keys(combatants).filter(id => !order.includes(id));
+            return [...order.filter(id => combatants[id]), ...extra];
         }
-        return Object.keys(s.combatants).sort((a, b) =>
-            String(s.combatants[a].name).localeCompare(String(s.combatants[b].name)));
+        return Object.keys(combatants).sort((a, b) =>
+            String(combatants[a]?.name).localeCompare(String(combatants[b]?.name)));
     }
 
     rowHTML(c, idx) {
         const s = this.state;
+        c = c && typeof c === 'object' ? c : {};
         const displayName = this.displayName(c);
         const active = s.started && s.activeId === c.id;
         const mine = this.canControl(c);
-        const hp = c.hp ? `${c.hp.current}/${c.maxHP}` : `—/${c.maxHP}`;
-        const hpCurrent = c.hp && typeof c.hp.current === 'number' ? c.hp.current : c.maxHP;
-        const hpPct = Math.max(0, Math.min(100, Math.round((hpCurrent / Math.max(1, c.maxHP)) * 100)));
-        const moveTotal = Math.max(0, c.speedFeet + c.dashFeet);
+        const maxHP = combatInteger(c.maxHP, { fallback: 1, min: 0, max: 1000000 });
+        const hasCurrentHP = c.hp && (typeof c.hp.current === 'number' || typeof c.hp.current === 'string');
+        const hpCurrent = combatInteger(c.hp?.current, { fallback: maxHP, min: 0, max: 1000000 });
+        const hp = hasCurrentHP ? `${hpCurrent}/${maxHP}` : `—/${maxHP}`;
+        const hpPct = Math.max(0, Math.min(100, Math.round((hpCurrent / Math.max(1, maxHP)) * 100)));
+        const moveTotal = Math.max(0,
+            combatNumber(c.speedFeet, { fallback: 0, min: 0, max: 1000000 })
+            + combatNumber(c.dashFeet, { fallback: 0, min: 0, max: 1000000 }));
         const movePct = moveTotal > 0
             ? Math.max(0, Math.min(100, Math.round((remainingFeet(c) / moveTotal) * 100)))
             : 0;
-        const badges = (c.effects || []).map(e => {
+        const badges = (Array.isArray(c.effects) ? c.effects : []).filter(e => e && typeof e === 'object').map(e => {
             const glyph = (EFFECTS[e.key] && EFFECTS[e.key].glyph) || '●';
             const rm = this.isGM ? ` data-act="fx-remove" data-id="${escHtml(c.id)}" data-key="${escHtml(e.key)}"` : '';
             return `<span class="badge-effect${this.isGM ? ' rm' : ''}" title="${escHtml(e.label)}${this.isGM ? ' (click to remove)' : ''}"${rm}>${glyph}</span>`;
@@ -221,15 +239,17 @@ export class CombatTracker {
         }
         if (active && mine) {
             if (!c.actionUsed) {
-                buttons += (c.attacks || []).map((a, i) =>
-                    `<button class="btn-combat atk" data-act="attack" data-id="${escHtml(c.id)}" data-atk="${i}" title="${fmtMod(a.attack)} to hit · ${escHtml(a.damage)} ${escHtml(a.damageType)}">⚔ ${escHtml(a.name)}</button>`).join('');
-                if (c.spells && c.spells.length) {
+                buttons += (Array.isArray(c.attacks) ? c.attacks : []).map((a, i) =>
+                    `<button class="btn-combat atk" data-act="attack" data-id="${escHtml(c.id)}" data-atk="${i}" title="${combatModifier(a?.attack)} to hit · ${escHtml(combatAttackDamageLabel(a))}">⚔ ${escHtml(a?.name)}</button>`).join('');
+                if (Array.isArray(c.spells) && c.spells.length) {
                     buttons += `<button class="btn-combat" data-act="cast-menu" data-id="${escHtml(c.id)}">✨ Cast</button>`
                         + `<span data-cast-menu="${escHtml(c.id)}" hidden>`
                         + c.spells.map((spell, i) => {
-                            const disabled = spell.level > 0 && (c.slots?.[spell.level] || 0) < 1 ? ' disabled' : '';
-                            const level = spell.level === 0 ? 'Cantrip' : `L${spell.level}`;
-                            return `<button class="btn-combat" data-act="cast" data-id="${escHtml(c.id)}" data-spell="${i}"${disabled}>${escHtml(spell.name)} — ${level} · ${escHtml(spell.damage)} ${escHtml(spell.damageType)}</button>`;
+                            const spellLevel = combatSpellLevel(spell?.level);
+                            const slots = combatInteger(c.slots?.[spellLevel], { fallback: 0, min: 0, max: 99 });
+                            const disabled = spellLevel > 0 && slots < 1 ? ' disabled' : '';
+                            const level = spellLevel === 0 ? 'Cantrip' : `L${spellLevel}`;
+                            return `<button class="btn-combat" data-act="cast" data-id="${escHtml(c.id)}" data-spell="${i}"${disabled}>${escHtml(spell?.name)} — ${level} · ${escHtml(spell?.damage)} ${escHtml(spell?.damageType)}</button>`;
                         }).join('')
                         + `</span>`;
                 }
@@ -260,7 +280,7 @@ export class CombatTracker {
         return `<div class="combat-row${active ? ' active' : ''}${mine ? ' mine' : ''}${c.statsPending ? ' pending' : ''}" data-row="${escHtml(c.id)}"${active ? ' aria-current="true"' : ''}>
             <div class="cr-main">
                 <span class="cr-marker">${active ? '▶' : (s.started ? (idx + 1) : '')}</span>
-                <button class="cr-name cr-focus" data-act="focus" data-id="${escHtml(c.id)}" style="border-left-color:${cssColor(c.color)}" title="Focus ${escHtml(displayName)} on the map">${escHtml(displayName)}${c.statsPending ? ' <span class="tag">…stats</span>' : ''}</button>
+                <button class="cr-name cr-focus" data-act="focus" data-id="${escHtml(c.id)}" style="border-left-color:${combatCssColor(c.color)}" title="Focus ${escHtml(displayName)} on the map">${escHtml(displayName)}${c.statsPending ? ' <span class="tag">…stats</span>' : ''}</button>
                 <span class="cr-init" title="Initiative">🎲 ${this.isGM ? `<span class="ce" data-act="edit" data-id="${escHtml(c.id)}" data-field="initiative">${escHtml(initVal)}</span>` : escHtml(initVal)}</span>
                 <span class="cr-stat" title="Armor Class">AC ${ed('ac', c.ac, 'Armor Class')}</span>
                 <span class="cr-stat" title="Hit Points">HP ${ed('hp', hp, 'Hit Points (cur or cur/max)')}</span>
@@ -280,7 +300,8 @@ export class CombatTracker {
         const s = this.state;
         if (!s) return;
         const order = this.displayOrder();
-        const title = s.started ? `Combat — Round ${s.round}` : 'Combat — roll initiative!';
+        const round = combatInteger(s.round, { fallback: 1, min: 0, max: 1000000 });
+        const title = s.started ? `Combat — Round ${round}` : 'Combat — roll initiative!';
         let gmHeader = '';
         if (this.isGM) {
             gmHeader = (s.started
@@ -288,20 +309,22 @@ export class CombatTracker {
                 : `<button class="btn-combat" data-act="gm-begin" title="Auto-rolls missing initiative">Begin ▶</button>`)
                 + `<button class="btn-combat danger" data-act="gm-end">End Combat</button>`;
         }
-        const logToggle = `<button class="btn-combat" data-act="toggle-log" aria-pressed="${this.logOpen}">${this.logOpen ? 'Hide log' : `Log (${(s.log || []).length})`}</button>`;
-        const rows = order.map((id, i) => this.rowHTML(s.combatants[id], i)).join('')
+        const logs = Array.isArray(s.log) ? s.log : [];
+        const combatants = s.combatants && typeof s.combatants === 'object' && !Array.isArray(s.combatants) ? s.combatants : {};
+        const logToggle = `<button class="btn-combat" data-act="toggle-log" aria-pressed="${this.logOpen}">${this.logOpen ? 'Hide log' : `Log (${logs.length})`}</button>`;
+        const rows = order.map((id, i) => this.rowHTML(combatants[id], i)).join('')
             || '<p class="muted">No combatants.</p>';
         let gmAdd = '';
         if (this.isGM) {
             const candidates = this.getMapObjects().filter(o =>
-                (o.type === 'token' || o.type === 'character') && !s.combatants[o.id]);
+                (o.type === 'token' || o.type === 'character') && !combatants[o.id]);
             if (candidates.length) {
                 gmAdd = `<select class="fx-add" data-act="gm-add"><option value="">+ add to combat…</option>`
                     + candidates.map(o => `<option value="${escHtml(o.id)}">${escHtml(o.name || o.type)}</option>`).join('')
                     + `</select>`;
             }
         }
-        const log = (s.log || []).map(l => this.logLineHTML(l)).join('');
+        const log = logs.map(l => this.logLineHTML(l)).join('');
         this.container.innerHTML = `
             <div class="ct-header"><span class="ct-title">⚔ ${escHtml(title)}</span><span class="ct-btns">${logToggle}${gmHeader}</span></div>
             <div class="combat-flash"></div>
@@ -450,8 +473,10 @@ export class CombatOverlays {
     sync(combat) {
         this.combat = combat;
         this.clear();
-        if (!combat || !combat.started) return;
-        const active = combat.combatants[combat.activeId];
+        const combatants = combat?.combatants && typeof combat.combatants === 'object' && !Array.isArray(combat.combatants)
+            ? combat.combatants : null;
+        if (!combat || !combat.started || !combatants) return;
+        const active = combatants[combat.activeId];
         if (active && this.findMesh(active.id)) {
             this.turnRing = createTurnRing();
             this.worldGroup.add(this.turnRing);
@@ -461,8 +486,8 @@ export class CombatOverlays {
                 this.worldGroup.add(this.rangeRing);
             }
         }
-        for (const c of Object.values(combat.combatants)) {
-            if (!(c.effects || []).length) continue;
+        for (const c of Object.values(combatants)) {
+            if (!c || !Array.isArray(c.effects) || !c.effects.length) continue;
             const spr = createEffectBadge(c.effects);
             if (spr && this.findMesh(c.id)) { this.badges.set(c.id, spr); this.worldGroup.add(spr); }
         }
@@ -515,7 +540,9 @@ export function createRangeRing(radiusWorld) {
 
 // Floating sprite of up to 3 effect glyphs, hovered above a token by the page.
 export function createEffectBadge(effects) {
-    const glyphs = (effects || []).slice(0, 3).map(e => (EFFECTS[e.key] && EFFECTS[e.key].glyph) || '●');
+    const glyphs = (Array.isArray(effects) ? effects : []).slice(0, 3)
+        .filter(e => e && typeof e === 'object')
+        .map(e => (EFFECTS[e.key] && EFFECTS[e.key].glyph) || '●');
     if (!glyphs.length) return null;
     const canvas = document.createElement('canvas');
     canvas.width = 192; canvas.height = 64;

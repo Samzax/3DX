@@ -60,6 +60,56 @@
   padding-top: 15px;
 }
 
+#monster-menu-container {
+  margin-top: 15px;
+  border-top: 1px solid #444;
+  padding-top: 15px;
+}
+#monster-search,
+.monster-filters select {
+  width: 100%;
+  border: 1px solid #454b56;
+  border-radius: 6px;
+  background: #20242b;
+  color: #eef2f7;
+  font: inherit;
+}
+#monster-search {
+  padding: 8px 9px;
+  margin-bottom: 7px;
+}
+.monster-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, .72fr);
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.monster-filters select { padding: 6px 5px; font-size: 11px; }
+.monster-library-status {
+  margin: 6px 1px 9px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #929baa;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: left;
+}
+.monster-library-status:not(:disabled) { color: #b9c3d1; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+#monster-button-list { max-height: 320px; overflow-y: auto; scrollbar-gutter: stable; }
+.monster-card { --character-color: #b45309; }
+.monster-card-source {
+  margin-left: 4px;
+  color: #d8b4fe;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.monster-create { margin-top: 8px; }
+.monster-license { display: block; margin-top: 8px; color: #7f8998; font-size: 10px; text-align: center; }
+
 #move-submenu .menu-button {
   font-size: 13px;
   text-align: left;
@@ -134,6 +184,40 @@
 }
 #terrain-panel .tp-chip:hover { background: var(--btn-bg-hover); }
 #terrain-panel .tp-hint, #build-panel .tp-hint, #fog-panel .tp-hint, #view-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin: 4px 0 2px; }
+
+#build-panel .build-level-buttons .brush-mode { flex-basis: 28%; }
+#build-panel .brush-mode:disabled { opacity: .35; cursor: default; }
+#build-panel .build-wide { flex-basis: 100%; }
+#build-panel {
+  max-height: calc(100vh - 44px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+#build-panel .build-building-buttons .brush-mode { flex-basis: 25%; }
+#build-panel .build-building-buttons #build-adopt-structure { flex-basis: 42%; }
+#build-panel .build-duplicate-buttons { margin-top: 5px; }
+#build-panel .build-duplicate-buttons .brush-mode { flex-basis: 46%; }
+#build-building-readout,
+#build-level-readout {
+  margin: 6px 0 8px;
+  padding: 7px 8px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: var(--btn-radius);
+  background: rgba(0,0,0,.18);
+  color: #d9dee7;
+  font-size: 12px;
+  text-align: center;
+}
+#build-building-readout {
+  color: var(--accent-warm);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#build-building-status { min-height: 30px; }
+#build-building-status.is-error { color: #ff9b91; }
+#build-panel .tp-slider label + label { margin-top: 5px; }
 
 /* --- View panel extras (player rows + send/release buttons) --- */
 #view-players .view-player { flex: 1 1 100%; text-align: left; display: flex; justify-content: space-between; align-items: baseline; }

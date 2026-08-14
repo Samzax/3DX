@@ -33,7 +33,8 @@ function identityBase(object) {
     const type = (object && object.userData && object.userData.objectType) || data.type || 'object';
     const labels = {
         token: 'Token', cube: 'Cube', sphere: 'Sphere', cave: 'Cave', arch: 'Rock Arch',
-        portal: data.name || object?.userData?.portalName || 'Portal', wall: 'Wall', floor: 'Floor'
+        portal: data.name || object?.userData?.portalName || 'Portal',
+        wall: 'Wall', floor: 'Floor', stair: 'Staircase', roof: 'Roof'
     };
     const name = data.name || labels[type] || type.replace(/(^|-)(\w)/g, (_, __, c) => ` ${c.toUpperCase()}`).trim();
     return {
@@ -159,7 +160,11 @@ export function setObjectSelected(object, selected) {
     if (existing) return;
 
     const type = identityBase(object).type;
-    const outer = type === 'character' || type === 'token' ? 0.62
+    const tokenSize = ({ Tiny: 0.5, Small: 0.75, Medium: 1, Large: 2, Huge: 3, Gargantuan: 4 })[
+        sourceData(object).monsterData?.size
+    ] || 1;
+    const outer = type === 'character' ? 0.62
+        : type === 'token' ? Math.max(0.36, 0.62 * tokenSize)
         : type === 'cube' || type === 'sphere' ? 0.72
             : type === 'portal' ? 1.05 : 1.3;
     const ring = new THREE.Mesh(

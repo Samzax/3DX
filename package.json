@@ -4,7 +4,11 @@
   "description": "3DX virtual tabletop",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --no-warnings --experimental-vm-modules --test --test-concurrency=1",
+    "test:syntax": "node --test --test-concurrency=1 tests/syntax.test.cjs",
+    "test:structures": "node --no-warnings --experimental-vm-modules --test --test-concurrency=1 tests/structures.test.cjs",
+    "test:persistence": "node --test --test-concurrency=1 tests/server-persistence.test.cjs"
   },
   "dependencies": {
     "express": "^5.1.0",
