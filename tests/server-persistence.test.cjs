@@ -2061,3 +2061,120 @@ test('custom monsters canonicalize, seed combat, enforce GM placement, and survi
   const reloadedHomebrew = await waitForSocketEvent(reloadedGM, 'load-homebrew');
   assert.deepEqual(reloadedHomebrew.monsters, [saved]);
 });
+
+test('Ape model variants canonicalize, project publicly, and survive restart', { timeout: 30000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-ape-variants-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const player = await connectPolling(instance.port);
+  await emitEvent(gm, 'login', 'GM');
+  await pollPackets(gm);
+  await emitEvent(player, 'login', 'alice');
+  await pollPackets(player);
+
+  await emitEvent(gm, 'create-pocket-map', {
+    name: 'Ape variant fixture', width: 20, height: 20, parentKey: 'world'
+  });
+  const pocket = await waitForSocketEvent(gm, 'pocket-created');
+  await emitEvent(gm, 'join-map', { key: pocket.key });
+  await waitForSocketEvent(gm, 'map-state');
+  await emitEvent(player, 'join-map', { key: pocket.key });
+  await waitForSocketEvent(player, 'map-state');
+
+  async function placeSRDMonster(index, x, monsterVariant) {
+    const data = {
+      type: 'token',
+      position: { x, y: 0.1, z: 0 },
+      monsterData: { index, name: 'Client-forged name', source: 'srd-5.1' }
+    };
+    if (monsterVariant !== undefined) data.monsterVariant = monsterVariant;
+    await emitEvent(gm, 'add-object', data);
+    return {
+      gm: await waitForSocketEvent(gm, 'object-added'),
+      player: await waitForSocketEvent(player, 'object-added')
+    };
+  }
+
+  const highland = await placeSRDMonster('ape', 1, 'highland');
+  assert.equal(highland.gm.monsterData.index, 'ape');
+  assert.equal(highland.gm.monsterData.name, 'Ape',
+    'the visual variant must not bypass canonical SRD monster resolution');
+  assert.equal(highland.gm.monsterVariant, 'highland');
+  assert.equal(highland.player.monsterVariant, 'highland');
+  assert.equal(highland.player.monsterData.index, 'ape',
+    'players need the canonical index to select the Ape renderer');
+  assert.equal(highland.player.monsterData.name, 'Ape');
+  assert.equal(highland.player.monsterData.source, 'srd-5.1');
+  assert.equal(highland.player.monsterData.public, true);
+  for (const privateField of [
+    'alignment', 'armor_class', 'hit_points', 'hit_dice', 'speed',
+    'challenge_rating', 'xp', 'strength', 'dexterity', 'constitution',
+    'intelligence', 'wisdom', 'charisma', 'proficiencies', 'senses',
+    'special_abilities', 'actions', 'reactions', 'legendary_actions'
+  ]) {
+    assert.equal(Object.hasOwn(highland.player.monsterData, privateField), false,
+      `${privateField} must not leak through the public Ape projection`);
+  }
+
+  const invalid = await placeSRDMonster('ape', 2, '../../not-a-variant');
+  assert.equal(invalid.gm.monsterVariant, 'silverback');
+  assert.equal(invalid.player.monsterVariant, 'silverback');
+
+  const missing = await placeSRDMonster('ape', 3);
+  assert.equal(missing.gm.monsterVariant, 'silverback');
+  assert.equal(missing.player.monsterVariant, 'silverback');
+
+  const nonApe = await placeSRDMonster('baboon', 4, 'albino');
+  assert.equal(nonApe.gm.monsterData.index, 'baboon');
+  assert.equal(Object.hasOwn(nonApe.gm, 'monsterVariant'), false,
+    'unsupported creatures must not persist an Ape appearance field');
+  assert.equal(Object.hasOwn(nonApe.player, 'monsterVariant'), false);
+
+  const saveFile = path.join(saveDir, 'map_state.json');
+  const persisted = await waitFor(() => {
+    if (!fs.existsSync(saveFile)) return null;
+    const state = JSON.parse(fs.readFileSync(saveFile, 'utf8'));
+    const objects = state.maps?.[pocket.key]?.objects;
+    return objects && Object.keys(objects).length >= 5 ? objects : null;
+  }, 'Ape variants to persist in map_state.json');
+  assert.equal(persisted[highland.gm.id].monsterVariant, 'highland');
+  assert.equal(persisted[invalid.gm.id].monsterVariant, 'silverback');
+  assert.equal(persisted[missing.gm.id].monsterVariant, 'silverback');
+  assert.equal(Object.hasOwn(persisted[nonApe.gm.id], 'monsterVariant'), false);
+
+  await stopServer(instance);
+  instance = await startServer(saveDir);
+
+  const reloadedGM = await connectPolling(instance.port);
+  await emitEvent(reloadedGM, 'login', 'GM');
+  await pollPackets(reloadedGM);
+  await emitEvent(reloadedGM, 'join-map', { key: pocket.key });
+  const gmState = await waitForSocketEvent(reloadedGM, 'map-state');
+  const reloadedHighland = gmState.objects.find(object => object.id === highland.gm.id);
+  const reloadedInvalid = gmState.objects.find(object => object.id === invalid.gm.id);
+  const reloadedMissing = gmState.objects.find(object => object.id === missing.gm.id);
+  const reloadedNonApe = gmState.objects.find(object => object.id === nonApe.gm.id);
+  assert.equal(reloadedHighland.monsterVariant, 'highland');
+  assert.equal(reloadedInvalid.monsterVariant, 'silverback');
+  assert.equal(reloadedMissing.monsterVariant, 'silverback');
+  assert.equal(Object.hasOwn(reloadedNonApe, 'monsterVariant'), false);
+
+  const reloadedPlayer = await connectPolling(instance.port);
+  await emitEvent(reloadedPlayer, 'login', 'alice');
+  await pollPackets(reloadedPlayer);
+  await emitEvent(reloadedPlayer, 'join-map', { key: pocket.key });
+  const playerState = await waitForSocketEvent(reloadedPlayer, 'map-state');
+  const publicHighland = playerState.objects.find(object => object.id === highland.gm.id);
+  assert.equal(publicHighland.monsterVariant, 'highland');
+  assert.equal(publicHighland.monsterData.index, 'ape');
+  assert.equal(Object.hasOwn(publicHighland.monsterData, 'hit_points'), false);
+  assert.equal(Object.hasOwn(publicHighland.monsterData, 'actions'), false);
+});

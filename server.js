@@ -75,6 +75,34 @@ const HOMEBREW_SPELL_LISTS = new Set([
 ]);
 const MONSTER_SIZES = new Set(['Tiny', 'Small', 'Medium', 'Large', 'Huge', 'Gargantuan']);
 const MONSTER_ATTACK_TYPES = new Set(['melee', 'ranged']);
+// Visual variants come from the committed monster model manifest (the same
+// file the clients render from), so the server's accept-list can never drift
+// from the assets. The ape pilot seeds itself if the manifest is missing.
+const MONSTER_MANIFEST_PATH = path.join(__dirname, 'public', 'assets', 'monsters', 'manifest.json');
+const MONSTER_VARIANT_IDS = Object.create(null);   // index -> Set<variantId>
+const MONSTER_VARIANT_DEFAULT = Object.create(null); // index -> first variant id
+function registerMonsterVariants(index, rawVariants) {
+  if (typeof index !== 'string' || !CHARACTER_REFERENCE_RE.test(index) || !Array.isArray(rawVariants)) return;
+  const ids = rawVariants
+    .map(variant => variant && typeof variant.id === 'string' && CHARACTER_REFERENCE_RE.test(variant.id) ? variant.id : null)
+    .filter(Boolean);
+  if (!ids.length) return;
+  MONSTER_VARIANT_IDS[index] = new Set(ids);
+  MONSTER_VARIANT_DEFAULT[index] = ids[0];
+}
+try {
+  const manifest = JSON.parse(fs.readFileSync(MONSTER_MANIFEST_PATH, 'utf8'));
+  const monsters = manifest && typeof manifest.monsters === 'object' && manifest.monsters ? manifest.monsters : null;
+  if (!monsters) throw new Error('missing its monsters map');
+  for (const [index, entry] of Object.entries(monsters)) {
+    if (entry && typeof entry === 'object') registerMonsterVariants(index, entry.variants);
+  }
+} catch (error) {
+  console.error(`[Monsters] Could not load model manifest: ${error.message}`);
+}
+if (!MONSTER_VARIANT_IDS.ape) registerMonsterVariants('ape', [
+  { id: 'silverback' }, { id: 'highland' }, { id: 'albino' }
+]);
 const SRD_MONSTER_PATH = path.join(__dirname, 'data', 'srd', 'monsters.json');
 const SRD_MONSTER_CATALOG = Object.create(null);
 try {
@@ -281,6 +309,17 @@ function sanitizeReferenceArray(raw, maxItems = 64, maxLength = 96) {
     values.push(reference);
   }
   return values;
+}
+
+// Visual variants are a server-owned rendering contract, not an asset path.
+// Only monsters whose manifest entry declares variants get the field, and only
+// declared IDs are accepted; anything else canonicalizes to the entry default.
+function sanitizeMonsterVariant(monsterIndex, raw) {
+  const index = typeof monsterIndex === 'string' ? monsterIndex.toLowerCase() : '';
+  const allowed = ownValue(MONSTER_VARIANT_IDS, index);
+  if (!allowed) return null;
+  const requested = sanitizeReference(raw, 32);
+  return allowed.has(requested) ? requested : MONSTER_VARIANT_DEFAULT[index];
 }
 
 function sanitizeColor(value, fallback) {
@@ -680,15 +719,23 @@ function publicCharacterProjection(raw) {
 // table-facing HP/AC information appropriate to combat.
 function publicMonsterProjection(raw) {
   const source = isRecord(raw) ? raw : {};
-  return {
+  const sourceType = source.source === 'srd-5.1' ? 'srd-5.1' : 'homebrew';
+  const projection = {
     name: boundedString(source.name, 80) || 'Creature',
     size: MONSTER_SIZES.has(source.size) ? source.size : 'Medium',
     type: boundedString(source.type, 40) || 'creature',
     color: sanitizeColor(source.color, '#b45309'),
     custom: source.custom === true,
-    source: source.source === 'srd-5.1' ? 'srd-5.1' : 'homebrew',
+    source: sourceType,
     public: true
   };
+  const index = sanitizeReference(source.index, 96);
+  // Players need a stable renderer key, but only expose an index proven to be
+  // in the vendored SRD catalog. Homebrew rules remain private GM material.
+  if (sourceType === 'srd-5.1' && index && ownValue(SRD_MONSTER_CATALOG, index)) {
+    projection.index = index;
+  }
+  return projection;
 }
 
 function projectObjectFor(username, object) {
@@ -698,7 +745,12 @@ function projectObjectFor(username, object) {
     return { ...object, characterData: publicCharacterProjection(object.characterData) };
   }
   if (object.type === 'token' && isRecord(object.monsterData)) {
-    return { ...object, monsterData: publicMonsterProjection(object.monsterData) };
+    const monsterData = publicMonsterProjection(object.monsterData);
+    const projected = { ...object, monsterData };
+    const variant = sanitizeMonsterVariant(monsterData.index, object.monsterVariant);
+    if (variant) projected.monsterVariant = variant;
+    else delete projected.monsterVariant;
+    return projected;
   }
   return object;
 }
@@ -1427,6 +1479,12 @@ function sanitizeNewObject(raw, username) {
   } else if (type !== 'token') {
     delete object.monsterData;
   }
+
+  const monsterVariant = type === 'token' && isRecord(object.monsterData)
+    ? sanitizeMonsterVariant(object.monsterData.index, object.monsterVariant)
+    : null;
+  if (monsterVariant) object.monsterVariant = monsterVariant;
+  else delete object.monsterVariant;
 
   if (object.name != null) object.name = boundedText(object.name, 40);
   if (object.color != null) {

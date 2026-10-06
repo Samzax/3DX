@@ -313,6 +313,46 @@
 .character-card-place:hover,
 .character-card-place.active { color: #fff; background: rgba(59,130,246,.42); }
 
+.monster-variant-picker {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 7px;
+}
+.monster-variant-picker legend {
+  padding: 0 4px;
+  color: #7f8897;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.monster-variant-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.monster-variant-option { position: relative; min-width: 0; cursor: pointer; }
+.monster-variant-option input { position: absolute; opacity: 0; pointer-events: none; }
+.monster-variant-option span {
+  display: block;
+  overflow: hidden;
+  padding: 6px 4px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 6px;
+  color: #9ba5b4;
+  background: rgba(255,255,255,.035);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.monster-variant-option input:checked + span {
+  border-color: rgba(96,165,250,.65);
+  color: #fff;
+  background: rgba(59,130,246,.28);
+}
+.monster-variant-option input:focus-visible + span { outline: 2px solid #93c5fd; outline-offset: 1px; }
+
 /* Selection-driven inspector: the same hierarchy serves characters, tokens,
    props and built scenery, with write controls appearing only for the GM. */
 #workspace-inspector #selection-panel { padding: 0 !important; }

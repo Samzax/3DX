@@ -1,0 +1,10 @@
+{
+  "$comment": "Per-monster overrides for tools/gen-monster-manifest.mjs. Keys are SRD monster indexes; unknown keys fail the run so typos can't silently drift. Fields: plan, params (merged over the heuristic's params), height/nameplateY (explicit values), variants (appearance variants — these become the server's accept-list too).",
+  "ape": {
+    "variants": [
+      { "id": "silverback", "label": "Silverback", "description": "Dark coat with a mature silver saddle." },
+      { "id": "highland", "label": "Highland", "description": "Dense russet-brown mountain coat." },
+      { "id": "albino", "label": "Albino", "description": "Pale coat, skin, and facial markings." }
+    ]
+  }
+}

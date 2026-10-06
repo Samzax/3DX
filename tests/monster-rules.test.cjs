@@ -53,6 +53,18 @@ test('placed monster snapshots retain rules text but omit upstream image and API
   assert.equal(Object.hasOwn(snapshot, 'url'), false);
 });
 
+test('Ape appearance variants expose stable asset IDs with a safe default', () => {
+  const ape = { index: 'ape', name: 'Ape' };
+  assert.deepEqual(monsters.monsterAppearanceVariants(ape).map(variant => variant.id), [
+    'silverback', 'highland', 'albino'
+  ]);
+  assert.equal(monsters.monsterAppearanceVariant(ape), 'silverback');
+  assert.equal(monsters.monsterAppearanceVariant(ape, 'highland'), 'highland');
+  assert.equal(monsters.monsterAppearanceVariant(ape, 'not-a-variant'), 'silverback');
+  assert.deepEqual(monsters.monsterAppearanceVariants({ index: 'baboon' }), []);
+  assert.equal(monsters.monsterAppearanceVariant({ index: 'baboon' }, 'silverback'), '');
+});
+
 test('monster stat-block markup escapes user-authored names and descriptions', () => {
   const fixture = owlbearFixture();
   fixture.name = '<img src=x onerror=alert(1)>';

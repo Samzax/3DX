@@ -9,8 +9,10 @@ import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { buildObjectFromData, applyMove } from '../shared/models.js';
 import { loadSRD, loadSRDMonsters } from '../shared/srd.js';
+import { loadMonsterModels } from '../shared/monster-models.js';
 import {
-    monsterChallengeLabel, monsterColor, monsterCombatStats, monsterStatBlockHTML, monsterTokenSnapshot
+    monsterAppearanceVariant, monsterAppearanceVariants, monsterChallengeLabel, monsterColor,
+    monsterCombatStats, monsterStatBlockHTML, monsterTokenSnapshot
 } from '../shared/monsters.js';
 import { CombatTracker, CombatOverlays, deriveCombatStats, EFFECTS, remainingFeet } from '../shared/combat.js';
 import { combatInteger } from '../shared/combat-safety.js';
@@ -108,6 +110,8 @@ let objects = [];
 let selectedObject = null;
 let selectedObjectType = null;
 let selectedObjectData = null;
+let selectedMonsterVariant = null;
+const monsterVariantChoices = new Map();
 let menuButtons = {};
 
 let socket;
@@ -328,12 +332,17 @@ function enterMap(key) {
     // reset tool state locally (no server side effects)
     selectedObjectType = null;
     selectedObjectData = null;
+    selectedMonsterVariant = null;
     currentTool = null;
     for (const k in toolMenuButtons) toolMenuButtons[k].classList.remove('active');
     document.querySelectorAll('#object-menu .menu-button, #object-menu .character-card-place').forEach(b => b.classList.remove('active'));
+    syncMonsterVariantControls();
     // clear local scene; server repopulates via 'map-state' after join-map
     if (objectNameplates) objectNameplates.clear(objects);
-    objects.forEach(o => worldGroup.remove(o));
+    objects.forEach(o => {
+        worldGroup.remove(o);
+        disposeBuiltObject(o);
+    });
     objects = [];
     ruler.removeSegments();
     showLayerGrid(key);
@@ -515,7 +524,10 @@ function initSocket() {
             'Building state reloaded from the server. Retry any unfinished edit.');
         if (selectedObject) deselectObject();
         if (objectNameplates) objectNameplates.clear(objects);
-        objects.forEach(obj => worldGroup.remove(obj));
+        objects.forEach(obj => {
+            worldGroup.remove(obj);
+            disposeBuiltObject(obj);
+        });
         objects = [];
         ruler.removeSegments();
 
@@ -722,6 +734,7 @@ function initSocket() {
             if (selectedObject === object) deselectObject();
             if (objectNameplates) objectNameplates.removeFrom(object);
             worldGroup.remove(object);
+            disposeBuiltObject(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
             if (objectNameplates) objectNameplates.sync(objects);
             syncBuildControls();
@@ -1744,6 +1757,8 @@ function addObject(position, supportY = null) {
                 color: monsterColor(monsterData),
                 monsterData
             };
+            const monsterVariant = monsterAppearanceVariant(selectedObjectData, selectedMonsterVariant);
+            if (monsterVariant) dataToSave.monsterVariant = monsterVariant;
             break;
         }
         case 'cube':
@@ -2173,6 +2188,12 @@ function setSelectedObjectType(type, data = null) {
     } else {
         selectedObjectType = type;
         selectedObjectData = data;
+        selectedMonsterVariant = type === 'monster'
+            ? monsterAppearanceVariant(data, monsterVariantChoices.get(String(data?.index || '')))
+            : null;
+        if (selectedMonsterVariant) {
+            monsterVariantChoices.set(String(data.index), selectedMonsterVariant);
+        }
         setTool('add');
 
         document.querySelectorAll('#object-menu .menu-button, #object-menu .character-card-place').forEach(btn => {
@@ -2187,18 +2208,43 @@ function setSelectedObjectType(type, data = null) {
         } else {
             if (menuButtons[type]) menuButtons[type].classList.add('active');
         }
+        syncMonsterVariantControls();
     }
 }
 
 function deselectObjectType() {
     selectedObjectType = null;
     selectedObjectData = null;
+    selectedMonsterVariant = null;
     if (currentTool === 'add') {
         setTool(null);
     }
     document.querySelectorAll('#object-menu .menu-button, #object-menu .character-card-place').forEach(btn => {
         btn.classList.remove('active');
     });
+    syncMonsterVariantControls();
+}
+
+function syncMonsterVariantControls() {
+    document.querySelectorAll('input[data-monster-variant-for]').forEach(input => {
+        const monsterIndex = input.dataset.monsterVariantFor;
+        const activeMonster = selectedObjectType === 'monster' &&
+            String(selectedObjectData?.index || '') === monsterIndex;
+        const requested = activeMonster ? selectedMonsterVariant : monsterVariantChoices.get(monsterIndex);
+        input.checked = input.value === monsterAppearanceVariant({ index: monsterIndex }, requested);
+    });
+}
+
+function setMonsterVariantChoice(monster, requested) {
+    const variant = monsterAppearanceVariant(monster, requested);
+    if (!variant) return;
+    const monsterIndex = String(monster.index || '');
+    monsterVariantChoices.set(monsterIndex, variant);
+    if (selectedObjectType === 'monster' && selectedObjectData === monster) {
+        selectedMonsterVariant = variant;
+        updateHintBar();
+    }
+    syncMonsterVariantControls();
 }
 
 function rebuildMonsterFilters(monsters) {
@@ -2293,6 +2339,41 @@ function renderMonsterLibrary() {
         place.classList.toggle('active', selectedObjectType === 'monster' && selectedObjectData === monster);
         place.addEventListener('click', () => setSelectedObjectType('monster', monster));
         card.append(summary, place);
+
+        const variants = monsterAppearanceVariants(monster);
+        if (variants.length) {
+            const picker = document.createElement('fieldset');
+            picker.className = 'monster-variant-picker';
+            const legend = document.createElement('legend');
+            legend.textContent = 'Appearance';
+            picker.appendChild(legend);
+            const options = document.createElement('div');
+            options.className = 'monster-variant-options';
+            const selectedVariant = selectedObjectType === 'monster' && selectedObjectData === monster
+                ? selectedMonsterVariant : monsterVariantChoices.get(String(monster.index || ''));
+            const currentVariant = monsterAppearanceVariant(monster, selectedVariant);
+            for (const variant of variants) {
+                const option = document.createElement('label');
+                option.className = 'monster-variant-option';
+                option.title = variant.description;
+                const input = document.createElement('input');
+                input.type = 'radio';
+                input.name = `monster-variant-${monster.index}`;
+                input.value = variant.id;
+                input.dataset.monsterVariantFor = monster.index;
+                input.checked = variant.id === currentVariant;
+                input.addEventListener('change', () => {
+                    if (!input.checked) return;
+                    setMonsterVariantChoice(monster, variant.id);
+                });
+                const label = document.createElement('span');
+                label.textContent = variant.label;
+                option.append(input, label);
+                options.appendChild(option);
+            }
+            picker.appendChild(options);
+            card.appendChild(picker);
+        }
         list.appendChild(card);
     }
     const sourceSummary = `${srdMonsters.length} SRD · ${customMonsters.length} custom`;
@@ -2678,6 +2759,7 @@ function applyStructureBatchResult(result = {}) {
         if (selectedObject === object) deselectObject();
         if (objectNameplates) objectNameplates.removeFrom(object);
         worldGroup.remove(object);
+        disposeBuiltObject(object);
         objects = objects.filter(candidate => candidate !== object);
     }
     applyBuildLevelVisibility();
@@ -3726,7 +3808,13 @@ function updateHintBar() {
     } else if (currentTool === 'ruler') {
         hint = `Ruler — LMB add point · right-CLICK restart · Esc cancel · ${cam}`;
     } else if (currentTool === 'add') {
-        hint = `Add — LMB place object · ${cam}`;
+        const variant = selectedObjectType === 'monster'
+            ? monsterAppearanceVariants(selectedObjectData).find(option => option.id === selectedMonsterVariant)
+            : null;
+        const subject = selectedObjectType === 'monster'
+            ? `${selectedObjectData?.name || 'monster'}${variant ? ` (${variant.label})` : ''}`
+            : 'object';
+        hint = `Add ${subject} — LMB place · ${cam}`;
     } else {
         hint = `${cam} · double-click hex/portal to travel`;
     }
@@ -3846,6 +3934,10 @@ loadSRD().then(srd => {
     if (pendingHomebrew) SRD.setHomebrew(pendingHomebrew);
     answerStatsPending(); // combat may have arrived before the SRD finished loading
 }).catch(e => console.error('SRD load failed (combat stat auto-fill disabled):', e));
+
+// Monster body-plan manifest: tokens built before it lands show their disc and
+// swap themselves for the model when the fetch resolves (see monster-models.js).
+loadMonsterModels();
 
 // The 1.3 MB bestiary is fetched on first Library/search interaction by
 // ensureMonsterLibraryLoaded(), keeping initial tabletop startup lean.

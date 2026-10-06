@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { loadSRD, ABILITIES, abilityMod, fmtMod, proficiencyBonus } from '../shared/srd.js';
+import { loadMonsterModels } from '../shared/monster-models.js';
 import { Terrain } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
@@ -965,6 +966,7 @@ function applyStructureBatchResult(result = {}) {
         if (selectedObject === object) deselectObject();
         if (objectNameplates) objectNameplates.removeFrom(object);
         worldGroup.remove(object);
+        disposeBuiltObject(object);
         objects = objects.filter(candidate => candidate !== object);
     }
     applyPlayerLevelVisibility();
@@ -1683,7 +1685,10 @@ function initSocket(username) {
         setViewLock(false);
         if (selectedObject) deselectObject();
         if (objectNameplates) objectNameplates.clear(objects);
-        objects.forEach(obj => worldGroup.remove(obj));
+        objects.forEach(obj => {
+            worldGroup.remove(obj);
+            disposeBuiltObject(obj);
+        });
         objects = [];
         ruler.removeSegments();
 
@@ -1849,6 +1854,7 @@ function initSocket(username) {
             if (selectedObject === object) deselectObject();
             if (objectNameplates) objectNameplates.removeFrom(object);
             worldGroup.remove(object);
+            disposeBuiltObject(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
             applyPlayerLevelVisibility();
             if (objectNameplates) objectNameplates.sync(objects);
@@ -1893,3 +1899,7 @@ loadSRD().then(srd => {
     renderHUD();
     answerStatsPending(); // combat may have arrived before the SRD finished loading
 }).catch(e => console.error('Failed to load SRD data:', e));
+
+// Monster body-plan manifest; late arrivals swap their disc placeholder in
+// place (see shared/monster-models.js).
+loadMonsterModels();

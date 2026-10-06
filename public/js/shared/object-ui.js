@@ -126,7 +126,11 @@ export class ObjectNameplates {
             if (existing && existing.userData.nameplateKey === key) continue;
             if (existing) this.removeFrom(object);
             const sprite = makeNameplate(identity.displayName, identity.color);
-            sprite.position.set(0, Math.max(0.72, (object.userData.halfHeight || 0) + 0.78), 0);
+            const requestedY = Number(object.userData.nameplateY);
+            const nameplateY = Number.isFinite(requestedY) && requestedY >= 0.72 && requestedY <= 20
+                ? requestedY
+                : Math.max(0.72, (object.userData.halfHeight || 0) + 0.78);
+            sprite.position.set(0, nameplateY, 0);
             object.add(sprite);
             object.userData.objectNameplate = sprite;
         }

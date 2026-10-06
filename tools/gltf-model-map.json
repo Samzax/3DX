@@ -1,0 +1,71 @@
+{
+  "$comment": "SRD index -> vendored CC0 GLB (public/assets/monsters/glbs/). f = file name, h = token height in world units (soles -0.1 to top), np optional nameplate Y (default h+0.42 clamped). Mapped monsters become kind:'gltf' manifest entries; anything unmapped keeps the procedural family model. Keys must exist in data/srd/monsters.json; unknown files warn as orphans.",
+  "wolf": { "f": "aa-wolf.glb", "h": 0.85 },
+  "worg": { "f": "aa-wolf.glb", "h": 1.2 },
+  "dire-wolf": { "f": "aa-wolf.glb", "h": 1.2 },
+  "winter-wolf": { "f": "aa-wolf.glb", "h": 1.2 },
+  "werewolf-wolf": { "f": "aa-wolf.glb", "h": 0.9 },
+
+  "deer": { "f": "aa-deer.glb", "h": 1.0 },
+  "elk": { "f": "aa-stag.glb", "h": 1.7 },
+  "giant-elk": { "f": "aa-stag.glb", "h": 2.6 },
+
+  "cat": { "f": "um-cat.glb", "h": 0.3 },
+  "rat": { "f": "ae-rat.glb", "h": 0.3 },
+  "giant-rat": { "f": "ae-rat.glb", "h": 0.5 },
+  "giant-rat-diseased": { "f": "ae-rat.glb", "h": 0.5 },
+  "wererat-rat": { "f": "ae-rat.glb", "h": 0.5 },
+
+  "spider": { "f": "ae-spider.glb", "h": 0.25 },
+  "giant-spider": { "f": "ae-spider.glb", "h": 0.9 },
+  "giant-wolf-spider": { "f": "ae-spider.glb", "h": 0.5 },
+  "phase-spider": { "f": "ae-spider.glb", "h": 0.9 },
+
+  "frog": { "f": "ae-frog.glb", "h": 0.3 },
+  "giant-frog": { "f": "ae-frog.glb", "h": 0.6 },
+  "giant-toad": { "f": "ae-frog.glb", "h": 0.7 },
+
+  "constrictor-snake": { "f": "ae-snake.glb", "h": 0.7 },
+  "giant-constrictor-snake": { "f": "ae-snake.glb", "h": 1.6 },
+  "poisonous-snake": { "f": "ae-snake.glb", "h": 0.3 },
+  "giant-poisonous-snake": { "f": "ae-snake.glb", "h": 0.5 },
+
+  "giant-wasp": { "f": "ae-wasp.glb", "h": 0.6 },
+
+  "crab": { "f": "en-crab-enemy.glb", "h": 0.3 },
+  "giant-crab": { "f": "en-crab-enemy.glb", "h": 0.7 },
+
+  "reef-shark": { "f": "fi-shark.glb", "h": 0.9 },
+  "hunter-shark": { "f": "fi-shark.glb", "h": 1.5 },
+  "giant-shark": { "f": "fi-shark.glb", "h": 3.0 },
+  "killer-whale": { "f": "fi-whale.glb", "h": 3.0 },
+
+  "riding-horse": { "f": "aa-horse.glb", "h": 1.7 },
+  "warhorse": { "f": "aa-horse.glb", "h": 1.9 },
+  "draft-horse": { "f": "fa-horse.glb", "h": 1.9 },
+  "pony": { "f": "aa-horse.glb", "h": 1.3 },
+  "mule": { "f": "aa-donkey.glb", "h": 1.5 },
+
+  "hawk": { "f": "um-birb.glb", "h": 0.3 },
+  "blood-hawk": { "f": "um-birb.glb", "h": 0.35 },
+
+  "triceratops": { "f": "di-triceratops.glb", "h": 2.5 },
+  "tyrannosaurus-rex": { "f": "di-t-rex.glb", "h": 3.2 },
+  "plesiosaurus": { "f": "di-apatosaurus.glb", "h": 2.2 },
+
+  "orc": { "f": "um-orc.glb", "h": 1.1 },
+  "goblin": { "f": "um-orc-enemy.glb", "h": 0.8 },
+  "tribal-warrior": { "f": "um-tribal.glb", "h": 1.1 },
+  "mage": { "f": "um-wizard.glb", "h": 1.2 },
+  "archmage": { "f": "um-wizard.glb", "h": 1.2 },
+  "assassin": { "f": "um-ninja.glb", "h": 1.1 },
+
+  "zombie": { "f": "zo-zombie.glb", "h": 1.1 },
+  "ogre-zombie": { "f": "zo-zombie.glb", "h": 2.2 },
+  "skeleton": { "f": "en-skull-enemy.glb", "h": 1.1 },
+  "ghost": { "f": "um-ghost.glb", "h": 1.3 },
+  "specter": { "f": "um-ghost.glb", "h": 1.3 },
+
+  "dretch": { "f": "um-demon.glb", "h": 0.8 },
+  "quasit": { "f": "um-blue-demon.glb", "h": 0.35 }
+}

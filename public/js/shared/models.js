@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { GRID_CELL_SIZE } from './scene.js';
 import { buildWallRun, buildFloorPatch, buildStaircase, buildRoofPatch } from './structures.js';
 import { createRigCharacter } from './charmesh.js';
+import { createMonsterTokenGroup, TOKEN_HALF_HEIGHT } from './monster-models.js';
 
 export const defaultMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
 export const selectedMaterial = new THREE.MeshLambertMaterial({ color: 0xffff44, emissive: 0xaaaa00 });
@@ -303,6 +304,24 @@ export function createPortalMesh() {
     return group;
 }
 
+// The classic token disc: still what custom/homebrew tokens render as, and
+// the placeholder a model-backed token shows until its manifest arrives.
+function buildTokenDisc(data) {
+    const sizeScale = ({ Tiny: 0.5, Small: 0.75, Medium: 1, Large: 2, Huge: 3, Gargantuan: 4 })[
+        data.monsterData && data.monsterData.size
+    ] || 1;
+    const disc = new THREE.Mesh(
+        new THREE.CylinderGeometry(
+            GRID_CELL_SIZE * 0.4 * sizeScale,
+            GRID_CELL_SIZE * 0.4 * sizeScale,
+            0.2,
+            32
+        ),
+        defaultMaterial.clone());
+    disc.material.color.set(data.color == null ? 0xdd4444 : data.color);
+    return disc;
+}
+
 // Build a synced scene object from server data ('object-added' / 'map-state').
 // Returns the mesh with userData (syncId, halfHeight, characterData/objectType)
 // filled in, or null for unknown types. The caller adds it to scene + object list.
@@ -312,19 +331,12 @@ export function buildObjectFromData(id, data) {
 
     switch (data.type) {
         case 'token': {
-            const sizeScale = ({ Tiny: 0.5, Small: 0.75, Medium: 1, Large: 2, Huge: 3, Gargantuan: 4 })[
-                data.monsterData && data.monsterData.size
-            ] || 1;
-            objectMesh = new THREE.Mesh(
-                new THREE.CylinderGeometry(
-                    GRID_CELL_SIZE * 0.4 * sizeScale,
-                    GRID_CELL_SIZE * 0.4 * sizeScale,
-                    0.2,
-                    32
-                ),
-                defaultMaterial.clone());
-            objectMesh.material.color.set(data.color == null ? 0xdd4444 : data.color);
-            halfHeight = 0.1;
+            // SRD-index tokens get their manifest model (procedural plan or
+            // vendored GLB, whichever the manifest entry says); anything else
+            // keeps the plain disc.
+            const makeDisc = () => buildTokenDisc(data);
+            objectMesh = createMonsterTokenGroup(data, makeDisc) || makeDisc();
+            halfHeight = TOKEN_HALF_HEIGHT;
             break;
         }
         case 'cube':

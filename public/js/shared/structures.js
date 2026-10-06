@@ -1020,6 +1020,14 @@ export function buildStaircase(data, opts = {}) {
 // geometry replacement). Shared unit-box geometry is skipped; only per-object
 // merged geometry (ownGeometry) and materials go.
 export function disposeBuiltObject(obj) {
+    if (!obj) return;
+    const onDispose = obj.userData && obj.userData.onDispose;
+    if (typeof onDispose === 'function') {
+        // Runtime models can cancel pending async work without taking over the
+        // shared geometry/material cleanup below.
+        obj.userData.onDispose = null;
+        onDispose();
+    }
     obj.traverse(o => {
         if (o.userData.ownGeometry && o.geometry) o.geometry.dispose();
         if (o.material) {

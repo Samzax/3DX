@@ -6,6 +6,36 @@
 
 export const MONSTER_ABILITIES = ['str', 'dex', 'con', 'int', 'wis', 'cha'];
 
+// Visual variants are deliberately keyed by stable, asset-facing IDs rather
+// than their display labels. The model manifest (monster-models.js) replaces
+// this catalog once it loads; the ape set stays as the built-in fallback for
+// tests, offline loads and the pre-manifest window.
+export const APE_APPEARANCE_VARIANTS = Object.freeze([
+    Object.freeze({ id: 'silverback', label: 'Silverback', description: 'Dark coat with a mature silver saddle.' }),
+    Object.freeze({ id: 'highland', label: 'Highland', description: 'Dense russet-brown mountain coat.' }),
+    Object.freeze({ id: 'albino', label: 'Albino', description: 'Pale coat, skin, and facial markings.' })
+]);
+
+let variantCatalog = null; // Map<index, variants> once the model manifest lands
+
+export function setMonsterVariantCatalog(catalog) {
+    variantCatalog = catalog instanceof Map && catalog.size ? catalog : null;
+}
+
+export function monsterAppearanceVariants(monster) {
+    const index = String(monster?.index || '').toLowerCase();
+    const fromCatalog = variantCatalog && variantCatalog.get(index);
+    if (fromCatalog && fromCatalog.length) return fromCatalog;
+    return index === 'ape' ? APE_APPEARANCE_VARIANTS : [];
+}
+
+export function monsterAppearanceVariant(monster, requested) {
+    const variants = monsterAppearanceVariants(monster);
+    if (!variants.length) return '';
+    const id = String(requested || '').trim().toLowerCase();
+    return variants.some(variant => variant.id === id) ? id : variants[0].id;
+}
+
 const ABILITY_FIELDS = {
     str: 'strength', dex: 'dexterity', con: 'constitution',
     int: 'intelligence', wis: 'wisdom', cha: 'charisma'
