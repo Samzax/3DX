@@ -315,15 +315,57 @@
     <!-- --- Biome palette (terrain tool on hex layers: paint hexes) --- -->
     <div id="biome-panel" class="hidden">
         <h3>Biomes</h3>
-        <div class="tp-row">
-            <button class="biome-swatch active" data-biome="plains" style="--swatch:#8bc34a" title="Plains">Plains</button>
-            <button class="biome-swatch" data-biome="forest" style="--swatch:#2e7d32" title="Forest">Forest</button>
-            <button class="biome-swatch" data-biome="mountains" style="--swatch:#8d8d93" title="Mountains">Mountains</button>
-            <button class="biome-swatch" data-biome="desert" style="--swatch:#d7b26a" title="Desert">Desert</button>
-            <button class="biome-swatch" data-biome="swamp" style="--swatch:#4e5f3a" title="Swamp">Swamp</button>
-            <button class="biome-swatch" data-biome="coast" style="--swatch:#4aa3c7" title="Coast">Coast</button>
-        </div>
+        <div class="tp-row" id="biome-swatches"></div>
         <div class="tp-hint">Click a hex to tag it; Alt+click clears. New tactical maps under a tagged hex start with matching terrain (deepest tag wins).</div>
+    </div>
+
+    <!-- --- Campaign settings (worldbuilding: identity, seed, palette, spawn) --- -->
+    <div id="campaign-panel" class="hidden">
+        <h3>Campaign</h3>
+        <div class="tp-label">Name</div>
+        <div class="tp-row"><input type="text" id="campaign-name-input" maxlength="80" placeholder="Campaign name"></div>
+        <div class="tp-label">Description</div>
+        <div class="tp-row"><textarea id="campaign-desc-input" rows="3" maxlength="400" placeholder="What is this campaign about?"></textarea></div>
+        <div class="tp-label">Style</div>
+        <div class="tp-hint" id="campaign-style-label">Grand campaign (DMG ladder)</div>
+        <div class="tp-label">Season</div>
+        <div class="tp-row" id="campaign-seasons">
+            <button class="tp-chip" data-season="spring">Spring</button>
+            <button class="tp-chip" data-season="summer">Summer</button>
+            <button class="tp-chip" data-season="autumn">Autumn</button>
+            <button class="tp-chip" data-season="winter">Winter</button>
+        </div>
+        <div class="tp-hint">Changes at once for the whole table: colder seasons bring the snowline down. Nothing is regenerated.</div>
+        <div class="tp-label">Biome palette</div>
+        <div id="campaign-biomes" class="tp-checks"></div>
+        <div class="tp-label">Spawn point</div>
+        <div class="tp-row tp-inline">
+            <input type="number" id="campaign-spawn-x" step="1" title="Spawn X">
+            <input type="number" id="campaign-spawn-z" step="1" title="Spawn Z">
+            <button id="campaign-spawn-here" class="tp-chip" title="Stage the spawn at what you're looking at (Save to apply)">Here</button>
+        </div>
+        <button id="campaign-save" class="tp-send">Save campaign</button>
+        <div id="campaign-status"></div>
+        <div class="tp-hint">Only listed biomes can be painted. Spawn is where cameras land on first entry, and region campaigns lock the navigation lens to the hex that contains it.</div>
+
+        <div class="tp-section">World</div>
+        <div class="tp-hint">Seed and shape rebuild the generated world on every screen. Ground you have sculpted or painted is kept. Check the map before you rebuild.</div>
+        <div class="tp-label">World seed</div>
+        <div class="tp-row tp-inline">
+            <input type="number" id="campaign-seed-input" min="0" max="2147483647" step="1">
+            <button id="campaign-seed-roll" class="tp-chip" title="Random seed">Roll</button>
+        </div>
+        <div class="tp-label">Shape &amp; climate</div>
+        <div id="campaign-world"></div>
+        <label class="tp-check tp-check-wide"><input type="checkbox" id="campaign-homeland"> Homeland: guarantee land around the spawn</label>
+        <div class="tp-label">Preview</div>
+        <div class="worldmap">
+            <canvas id="campaign-map"></canvas>
+            <div id="campaign-map-zoom" class="worldmap-zooms"></div>
+        </div>
+        <div class="tp-hint">The world as staged above, north up, centered on the spawn. Click the map to stage the spawn there. Rebuild world applies it and moves the homeland under it; Save campaign moves only the spawn.</div>
+        <button id="campaign-world-apply" class="tp-send tp-rebuild">Rebuild world</button>
+        <div id="campaign-world-status"></div>
     </div>
 
     <!-- --- Layer navigation (breadcrumb, top-center) --- -->

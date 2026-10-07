@@ -129,6 +129,18 @@ what makes an infinite world affordable:
 - **U4 — Windowed subscription.** Region subscribe/unsubscribe for chunks &
   objects; summary fetch for far tiers. (Doubles as fog-of-war groundwork.)
 
+## 10. Campaigns = one-world namespaces
+
+- A campaign owns a complete world instance: map files, character roster,
+  settings (seed / biome palette / spawn), presence and every synced event
+  live in per-campaign stores and Socket.IO rooms (`camp:<id>` and
+  `camp:<id>:<mapKey>`) — nothing crosses between campaigns.
+- `mapStyle: 'region'` narrows a campaign to a single province lens. The
+  server enforces it in `join-map`; the GM breadcrumb, `goUp` and both
+  screens' zoom-out caps mirror the same bound client-side.
+- The default campaign keeps the legacy root save paths; every other
+  campaign lives under `data/saves/campaigns/<id>/`.
+
 ## Open defaults (say if you disagree)
 
 - Zoom→tier thresholds (camera height at which grid switches) — I'll tune by eye.

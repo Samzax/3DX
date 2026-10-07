@@ -17,12 +17,13 @@
 //   tile) are migrated on load (applyData returns { migrated: true }).
 
 import * as THREE from 'three';
+import { SEA_LEVEL, fbm, WorldGen, SEASONS, SNOW_T } from './worldgen.js';
 import { TIER_WIDTH, worldToHexAtTier, hexCenterAtTier, hexEdgeDistance, hexDistance, HEX_FIELD_RADIUS } from './hexworld.js';
 
 export const VSPACE = 0.5;                       // world units between lattice verts
 // World sea level: real ocean water renders here, LOD rings paint blue below it,
 // and beaches form just above it. One constant so every representation agrees.
-export const SEA_LEVEL = -0.6;
+export { SEA_LEVEL };                            // defined with the generator (worldgen.js)
 export const CHUNK_VERTS = 64;                   // unique verts per chunk side
 export const CHUNK_SIZE = CHUNK_VERTS * VSPACE;  // 32 world units per chunk side
 const MESH_VERTS = CHUNK_VERTS + 1;              // 65: owned verts + 1 apron row/col
@@ -41,7 +42,8 @@ const MAT_COLORS = MATERIALS.map(m => new THREE.Color(m.color));
 // U3 world-summary (LOD) map colors per generated biome.
 const SUMMARY_COLORS = {
   plains: 0x6a9b4a, forest: 0x2e5e2a, mountains: 0x8a8a90,
-  desert: 0xcbb26a, coast: 0x9ec9a0, swamp: 0x4e5f3a
+  desert: 0xcbb26a, coast: 0x9ec9a0, swamp: 0x4e5f3a,
+  tundra: 0xa9b08a, taiga: 0x3f6b5a, snow: 0xeef2f6
 };
 const SUMMARY_SEA = 0x2f6ea5;
 
@@ -49,13 +51,18 @@ const SUMMARY_SEA = 0x2f6ea5;
 // elevation/moisture FIELDS toward these targets, so heights, biome selection
 // and materials all follow naturally (and blend continuously — no cliffs at
 // hex borders). Values sit safely inside genBiomeAt's classification bands.
+// `t` also pulls the temperature (so a painted forest thaws a frozen land and
+// painted tundra chills a warm one); mountains and coast keep the local climate.
 const BIOME_FIELDS = {
-  plains:    { e: 0.52, mo: 0.50 },
-  forest:    { e: 0.56, mo: 0.78 },
+  plains:    { e: 0.52, mo: 0.50, t: 0.55 },
+  forest:    { e: 0.56, mo: 0.78, t: 0.55 },
   mountains: { e: 0.85, mo: 0.50 },
-  desert:    { e: 0.55, mo: 0.12 },
-  swamp:     { e: 0.45, mo: 0.85 },  // renders as wet lowland (no swamp material yet)
-  coast:     { e: 0.45, mo: 0.55 }   // hugs the waterline: beaches + shallow sea
+  desert:    { e: 0.55, mo: 0.12, t: 0.70 },
+  swamp:     { e: 0.44, mo: 0.85, t: 0.58 },  // wet lowland: mud, reeds, standing trees
+  coast:     { e: 0.45, mo: 0.55 },           // hugs the waterline: beaches + shallow sea
+  tundra:    { e: 0.52, mo: 0.30, t: 0.31 },
+  taiga:     { e: 0.56, mo: 0.75, t: 0.31 },
+  snow:      { e: 0.58, mo: 0.50, t: 0.12 }
 };
 // Feather width at hex borders, as a fraction of the tier's hex width.
 const BIOME_FEATHER = 0.18;
@@ -80,22 +87,24 @@ function hashStr(s) {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
   return h >>> 0;
 }
-function lattice(seed, x, z) {
-  let h = (Math.imul(x, 374761393) ^ Math.imul(z, 668265263) ^ seed) >>> 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177) >>> 0;
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-}
-function seededNoise(seed, x, z) {
-  const ix = Math.floor(x), iz = Math.floor(z);
-  const sx = smooth(x - ix), sz = smooth(z - iz);
-  const a = lattice(seed, ix, iz), b = lattice(seed, ix + 1, iz);
-  const c = lattice(seed, ix, iz + 1), d = lattice(seed, ix + 1, iz + 1);
-  return (a * (1 - sx) + b * sx) * (1 - sz) + (c * (1 - sx) + d * sx) * sz;
-}
-function fbm(seed, x, z, oct = 4) {
-  let v = 0, amp = 0.5, f = 1;
-  for (let o = 0; o < oct; o++) { v += seededNoise(seed + o * 101, x * f, z * f) * amp; amp *= 0.5; f *= 2; }
-  return v; // ~0..1
+
+// Snow is not a splat material: every terrain vertex carries its temperature
+// (aTemp, from WorldGen) and the shader whitens whatever is colder than the
+// snowline. uSeason slides that line for the whole table without touching a
+// single mesh. Steep faces stay bare rock.
+function applySnowShader(shader, uniforms) {
+  Object.assign(shader.uniforms, uniforms);
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nattribute float aTemp;\nvarying float vSnowT;\nvarying float vSnowUp;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSnowT = aTemp;\nvSnowUp = normal.y;');
+  const line = SNOW_T.toFixed(3);
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', '#include <common>\nuniform float uSeason;\nvarying float vSnowT;\nvarying float vSnowUp;')
+    .replace('#include <color_fragment>', [
+      '#include <color_fragment>',
+      `float snowAmt = (1.0 - smoothstep(${line} - 0.025, ${line} + 0.025, vSnowT + uSeason)) * smoothstep(0.45, 0.75, abs(vSnowUp));`,
+      'diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.95, 0.98), snowAmt);'
+    ].join('\n'));
 }
 
 function newChunk() {
@@ -136,7 +145,10 @@ export class Terrain {
     // hundreds of thousands of units out. Chunk/water geometry is built LOCAL to
     // its own anchor so vertex buffers never hold large float32 values.
     this.worldOrigin = { x: 0, z: 0 };
-    this.genSeed = 1337;                    // U2: world generation seed (see genHeightAt)
+    // U2: the world generator (seed + campaign world settings; see worldgen.js).
+    this.gen = new WorldGen();
+    this.seasonOffset = 0;                  // SEASONS[season]: slides the snowline
+    this._snowUniforms = { uSeason: { value: 0 } };
     // Pocket maps are their own flat little worlds: the pages switch the
     // generator OFF there so unedited ground is implicit flat 0 (the original
     // pocket semantics), not whatever the procedural world happens to contain
@@ -176,6 +188,7 @@ export class Terrain {
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
     this.material.extensions = { derivatives: true }; // fwidth() for the AA grid (WebGL1 safety)
     this.material.onBeforeCompile = (shader) => {
+      applySnowShader(shader, this._snowUniforms);
       Object.assign(shader.uniforms, this._brushUniforms);
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vBrushWorld;')
@@ -232,7 +245,12 @@ export class Terrain {
         uDeep:      { value: new THREE.Color(0x1a4f8a) },
         uFoamColor: { value: new THREE.Color(0xf2fbff) },
         uFoamWidth: { value: 0.35 },
-        uBands:     { value: 0 }    // 0 = smooth; 3-4 = Wind-Waker banding
+        uBands:     { value: 0 },   // 0 = smooth; 3-4 = Wind-Waker banding
+        // Sea/lake ice: sea-level temperature (season included) + latitude band.
+        uIceBase:   { value: 0.55 },
+        uIceLatK:   { value: 0 },
+        uIceSpan:   { value: 200000 },
+        uOrigin:    { value: new THREE.Vector2(0, 0) }   // floating origin (x, z)
       },
       vertexShader: [
         'attribute float aDepth;',
@@ -258,6 +276,10 @@ export class Terrain {
         'uniform vec3 uFoamColor;',
         'uniform float uFoamWidth;',
         'uniform float uBands;',
+        'uniform float uIceBase;',
+        'uniform float uIceLatK;',
+        'uniform float uIceSpan;',
+        'uniform vec2 uOrigin;',
         'varying float vDepth;',
         'varying vec3 vWorld;',
         'varying vec2 vFlow;',
@@ -303,6 +325,12 @@ export class Terrain {
         '  col += glint * 0.35 + fres * 0.08;',
         '  col = mix(col, uFoamColor, foam * 0.85);',
         '  alpha = max(alpha, foam * 0.9);',
+        // 5. ice: cold water freezes over (pack ice with a noisy edge)
+        '  vec2 tw = vWorld.xz + uOrigin;',
+        '  float iceT = uIceBase + uIceLatK * clamp(tw.y / uIceSpan, -1.0, 1.0) + (vnoise(tw * 0.02) - 0.5) * 0.04;',
+        `  float ice = 1.0 - smoothstep(${(SNOW_T - 0.06).toFixed(3)}, ${(SNOW_T - 0.02).toFixed(3)}, iceT);`,
+        '  col = mix(col, vec3(0.86, 0.92, 0.96), ice * 0.92);',
+        '  alpha = max(alpha, ice * 0.93);',
         '  gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.95));',
         '}'
       ].join('\n')
@@ -381,6 +409,7 @@ export class Terrain {
         polygonOffsetFactor: ring.lod * 2,
         polygonOffsetUnits: ring.lod * 2
       });
+      ring.material.onBeforeCompile = (shader) => applySnowShader(shader, this._snowUniforms);
     }
     // Edit revisions instead of booleans: ring rebuilds are time-sliced (one
     // ring job at a time, a few rows per frame), so each ring records the
@@ -402,6 +431,7 @@ export class Terrain {
   // Advance the water animation (call once per frame from the render loop).
   tick(nowSeconds) {
     this.waterMaterial.uniforms.uTime.value = nowSeconds;
+    this.waterMaterial.uniforms.uOrigin.value.set(this.worldOrigin.x, this.worldOrigin.z);
     this.mistMaterial.uniforms.uTime.value = nowSeconds;
   }
 
@@ -412,24 +442,47 @@ export class Terrain {
   // generated chunk never needs syncing; only GM edits are stored/synced and they
   // override the generation.
 
-  // Continuous elevation field 0..1, seam-free by construction. Two scales:
-  // a continental mask (features ~100k units — a couple of 60-mile hexes) that
-  // decides where landmasses sit in a world that is mostly ocean, and the
-  // regional field (~300u features) that shapes terrain within them. Ocean
-  // floors keep a small regional swell (rare islets); continental interiors
-  // get the full range (inland mountains where the regional field runs high).
-  _genElev(wx, wz) {
-    const C = fbm(this.genSeed + 900, wx * 0.00001, wz * 0.00001, 3);
-    // fbm(3 oct) centers near 0.44; the ramp opens at its ~p65 and saturates
-    // at ~p85, leaving roughly a third of the world under continental shelves
-    // and the rest deep ocean.
-    const cont = smooth(Math.max(0, Math.min(1, (C - 0.50) / 0.08)));
-    const regional = fbm(this.genSeed, wx * 0.0035, wz * 0.0035, 4);
-    return 0.28 + cont * 0.38 + (regional - 0.5) * (0.35 + 0.40 * cont);
+  // The field math itself lives in worldgen.js (WorldGen) so the preview map
+  // and tests share it; this class adds the GM's painted-hex overrides on top.
+  get genSeed() { return this.gen.seed; }
+
+  // Adopt a campaign's generation settings ({ seed, world, season }). Returns
+  // true when generated ground changed, so the caller can regenerate() it (a
+  // reset picks the new values up by itself). A season only slides the
+  // snowline — applied here, never a reason to regenerate.
+  applyWorldSettings(settings) {
+    const src = settings || {};
+    this.setSeason(src.season);
+    if (!this.gen.set(src.seed, src.world)) return false;
+    this._fMemoX = NaN; // the fields changed: drop the memo
+    this._syncClimateUniforms();
+    return true;
   }
-  // Moisture field 0..1 — shared by heights and biome selection so terrain
-  // character and biome color always agree (dry = dunes, wet = rolling hills).
-  _genMoisture(wx, wz) { return fbm(this.genSeed + 200, wx * 0.005, wz * 0.005, 4); }
+
+  setSeason(season) {
+    const off = Object.prototype.hasOwnProperty.call(SEASONS, season) ? SEASONS[season] : 0;
+    if (off === this.seasonOffset) return;
+    this.seasonOffset = off;
+    this._snowUniforms.uSeason.value = off;
+    this._syncClimateUniforms();
+    this.rev++; // vegetation scatter re-checks what lies under snow
+  }
+  _syncClimateUniforms() {
+    const u = this.waterMaterial.uniforms, c = this.gen.seaTempUniforms();
+    u.uIceBase.value = c.base + this.seasonOffset;
+    u.uIceLatK.value = c.latK;
+    u.uIceSpan.value = c.span;
+  }
+
+  // Temperature at a world point and altitude (painted hexes included), and
+  // whether snow currently lies there (season included).
+  tempAt(wx, wz, h) {
+    if (!this.generatorOn) return 0.55;              // pockets: temperate
+    if (!this._hexTree) return this.gen.temp(wx, wz, h);
+    const f = this._fields(wx, wz);
+    return this.gen.temp(wx, wz, h, f.tt, f.tw);
+  }
+  snowAt(wx, wz, h) { return this.tempAt(wx, wz, h) + this.seasonOffset < SNOW_T; }
 
   // GM hex-biome tags override generation (the painted world). Tags are set via
   // setBiomeOverrides; hexes are resolved by the same nesting the server uses
@@ -442,15 +495,17 @@ export class Terrain {
   }
 
   // Elevation + moisture at a world point, with painted-hex warping applied
-  // shallow -> deep (a Province tag refines its Kingdom tag, etc).
+  // shallow -> deep (a Province tag refines its Kingdom tag, etc). (tt, tw) is
+  // the painted pull on temperature: target and weight (0 = unpainted).
   _fields(wx, wz) {
     // One-point memo: height and material generation both need the fields at
     // the SAME point (genHeightAt then genMaterialAt->genBiomeAt), and the
     // fields are the expensive half (11 fbm octaves). Exact-key, pure function
     // — invalidated only when the painted-hex overrides change.
     if (wx === this._fMemoX && wz === this._fMemoZ) return this._fMemo;
-    let e = this._genElev(wx, wz);
-    let mo = this._genMoisture(wx, wz);
+    let e = this.gen.elev(wx, wz);
+    let mo = this.gen.moisture(wx, wz);
+    let tt = 0, tw = 0;
     const tree = this._hexTree;
     if (tree) {
       let cx = 0, cz = 0, key = 'world';
@@ -465,6 +520,10 @@ export class Terrain {
           const w = Math.max(0, Math.min(1, hexEdgeDistance(d, lx, lz, h.q, h.r) / (TIER_WIDTH[d] * BIOME_FEATHER)));
           e += (target.e - e) * w;
           mo += (target.mo - mo) * w;
+          if (target.t != null) {
+            tt = tw > 0 ? tt + (target.t - tt) * w : target.t;
+            tw = Math.max(tw, w);
+          }
         }
         const c = hexCenterAtTier(d, h.q, h.r);
         cx += c.x; cz += c.z;
@@ -472,70 +531,28 @@ export class Terrain {
       }
     }
     this._fMemoX = wx; this._fMemoZ = wz;
-    return (this._fMemo = { e, mo });
+    return (this._fMemo = { e, mo, tt, tw });
   }
-  // Ground height at a world point. Continuous (no cliffs at biome borders) but
-  // strongly biome-differentiated via smooth masks over the same fields the
-  // biome picker uses: plains lie nearly flat, forests roll, deserts ripple
-  // with dunes, and mountain country rises into tall ridged peaks.
-  // `lod` drops the high-frequency octaves — a spectral downsample for the far
-  // LOD rings (coarse sampling of full-detail noise would alias; this doesn't).
+  // Ground height at a world point (see WorldGen.height). `lod` drops the
+  // high-frequency octaves for the far LOD rings.
   genHeightAt(wx, wz, lod = 0) {
     if (!this.generatorOn) return 0;                 // pockets: implicit flat ground
     const { e, mo } = this._fields(wx, wz);
-    // Mountain mask rises just below the mountain-biome threshold (e>0.7) so
-    // foothills stay modest instead of full ridges bleeding into other biomes.
-    const m = smooth(Math.max(0, Math.min(1, (e - 0.62) / 0.18)));
-    const wet = smooth(Math.max(0, Math.min(1, (mo - 0.38) / 0.24))); // 0 desert .. 1 forest
-    const base = (e - 0.5) * 16;                     // broad lowlands/highlands
-    // Rolling hills: amplitude grows with moisture (plains ~0.8, forest ~3.4).
-    const hills = fbm(this.genSeed + 50, wx * 0.02, wz * 0.02, Math.max(1, 4 - lod)) - 0.5;
-    let h = base + hills * (0.8 + wet * 2.6) * (1 - m * 0.6);
-    // Mountains: tall ridged peaks where the elevation field runs high.
-    const ridge = Math.pow(1 - Math.abs(2 * fbm(this.genSeed + 500, wx * 0.013, wz * 0.013, Math.max(1, 5 - lod)) - 1), 2);
-    h += ridge * m * 22;
-    // Coastal shelf: damp high-frequency relief near the waterline so shores
-    // are clean beaches with one surf line — otherwise dune/detail troughs dip
-    // under SEA_LEVEL and the coast becomes a picket fence of water slivers.
-    const shore = smooth(Math.min(1, Math.abs(h - SEA_LEVEL) / 2.5));
-    // Deserts: banded dunes (anisotropic ripple) on dry, non-mountain land.
-    if (lod < 3) {
-      const dune = fbm(this.genSeed + 300, wx * 0.05, wz * 0.014, Math.max(1, 3 - lod)) - 0.5;
-      h += dune * (1 - wet) * (1 - m) * 2.2 * shore;
-    }
-    if (lod < 2) {
-      const detail = fbm(this.genSeed + 99, wx * 0.09, wz * 0.09, Math.max(1, 3 - lod)) - 0.5;
-      h += detail * (0.6 + m * 2.0) * (0.25 + 0.75 * shore);
-    }
-    // Below the waterline the seabed falls away steeply (the shelf otherwise
-    // leaves a wide barely-submerged shelf that sits entirely inside the foam
-    // band and renders as dappled dashes instead of a tight surf line).
-    if (h < SEA_LEVEL) h = SEA_LEVEL + (h - SEA_LEVEL) * 2.2;
-    return h;
+    return this.gen.height(e, mo, wx, wz, lod);
   }
-  // Procedural biome at a world point (elevation + moisture), for material
-  // choice. Uses the same painted-hex-warped fields as genHeightAt, so painted
-  // biomes classify (and color) as what the GM painted.
+  // Procedural biome at a world point (elevation x moisture x temperature),
+  // for material choice and vegetation. Uses the same painted-hex-warped
+  // fields as genHeightAt, so painted biomes classify as what the GM painted.
   genBiomeAt(wx, wz) {
     if (!this.generatorOn) return 'plains';          // pockets: neutral ground
-    const { e, mo } = this._fields(wx, wz);
-    if (e > 0.7) return 'mountains';
-    if (e < 0.4) return 'coast';
-    if (mo < 0.38) return 'desert';
-    if (mo > 0.62) return 'forest';
-    return 'plains';
+    const { e, mo, tt, tw } = this._fields(wx, wz);
+    return this.gen.biome(e, mo, this.gen.temp(wx, wz, this.gen.estHeight(e), tt, tw));
   }
   // Material channel (0 grass,1 dirt,2 rock,3 sand) for generated ground.
   genMaterialAt(wx, wz, h) {
     if (!this.generatorOn) return 0;                 // pockets: plain grass
     if (h < SEA_LEVEL + 1.0) return 3;               // beaches ring every shore
-    const b = this.genBiomeAt(wx, wz);
-    const n = fbm(this.genSeed + 300, wx * 0.05, wz * 0.05, 2);
-    if (b === 'mountains') return h > 9 || n > 0.55 ? 2 : (n > 0.35 ? 1 : 0);
-    if (b === 'desert') return 3;
-    if (b === 'coast') return h < 0.3 ? 3 : 0;
-    if (b === 'forest') return n > 0.6 ? 1 : 0;
-    return n > 0.72 ? 1 : 0; // plains
+    return this.gen.material(this.genBiomeAt(wx, wz), h, wx, wz);
   }
 
   // Allocate a chunk filled from the generator (not synced/saved; regenerated on
@@ -619,7 +636,7 @@ export class Terrain {
       if (!moved && (ring.builtRev || 0) >= needRev) continue;
       const n = Math.floor((ring.half * 2) / ring.cell) + 1;
       if (!this._ringScratch || this._ringScratch.n < n) {
-        this._ringScratch = { n, pos: new Float32Array(n * n * 3), col: new Float32Array(n * n * 3) };
+        this._ringScratch = { n, pos: new Float32Array(n * n * 3), col: new Float32Array(n * n * 3), temp: new Float32Array(n * n) };
       }
       this._ringJob = { ring, scx, scz, n, mid: (n - 1) / 2, row: 0, rev: needRev };
       this._ringStep();
@@ -632,7 +649,7 @@ export class Terrain {
   _ringStep() {
     const job = this._ringJob, ring = job.ring;
     const { scx, scz, n, mid } = job;
-    const pos = this._ringScratch.pos, col = this._ringScratch.col;
+    const pos = this._ringScratch.pos, col = this._ringScratch.col, temp = this._ringScratch.temp;
     const tmp = this._ringTmpColor || (this._ringTmpColor = new THREE.Color());
     const t0 = performance.now();
     while (job.row < n && performance.now() - t0 < 4) {
@@ -651,6 +668,9 @@ export class Terrain {
         }
         pos[k] = wx - scx; pos[k + 1] = h - dip; pos[k + 2] = wz - scz; // anchor-local
         col[k] = tmp.r; col[k + 1] = tmp.g; col[k + 2] = tmp.b;
+        // Snow / sea ice at distance. Open sea freezes a little later than
+        // land snows over (matches the water shader's ice line).
+        temp[j * n + i] = this.tempAt(wx, wz, h) + (h < SEA_LEVEL ? 0.05 : 0);
       }
       job.row++;
     }
@@ -662,6 +682,7 @@ export class Terrain {
       geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
       geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * n * 3), 3));
+      geo.setAttribute('aTemp', new THREE.BufferAttribute(new Float32Array(n * n), 1));
       const idx = [];
       for (let j = 0; j < n - 1; j++) for (let i = 0; i < n - 1; i++) {
         // Clipmap hole: skip quads the next-finer ring is guaranteed to cover.
@@ -679,8 +700,10 @@ export class Terrain {
     }
     geo.attributes.position.array.set(pos.subarray(0, n * n * 3));
     geo.attributes.color.array.set(col.subarray(0, n * n * 3));
+    geo.attributes.aTemp.array.set(temp.subarray(0, n * n));
     geo.attributes.position.needsUpdate = true;
     geo.attributes.color.needsUpdate = true;
+    geo.attributes.aTemp.needsUpdate = true;
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
     ring.mesh.position.set(scx - this.worldOrigin.x, 0, scz - this.worldOrigin.z);
@@ -1075,6 +1098,7 @@ export class Terrain {
       geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MESH_VERTS * MESH_VERTS * 3), 3));
       geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(MESH_VERTS * MESH_VERTS * 3), 3));
       geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(MESH_VERTS * MESH_VERTS * 3), 3));
+      geo.setAttribute('aTemp', new THREE.BufferAttribute(new Float32Array(MESH_VERTS * MESH_VERTS), 1));
       c.mesh = new THREE.Mesh(geo, this.material);
       c.mesh.receiveShadow = true;
       c.mesh.castShadow = true;
@@ -1090,6 +1114,7 @@ export class Terrain {
     const pos = c.mesh.geometry.attributes.position;
     const nor = c.mesh.geometry.attributes.normal;
     const col = c.mesh.geometry.attributes.color;
+    const tmp = c.mesh.geometry.attributes.aTemp;
     const s = [0, 0, 0, 0];
     const cc = new THREE.Color();
     for (let lz = 0; lz < MESH_VERTS; lz++) {
@@ -1108,9 +1133,10 @@ export class Terrain {
         for (let m = 0; m < 4; m++) { sum += s[m]; r += MAT_COLORS[m].r * s[m]; g += MAT_COLORS[m].g * s[m]; b += MAT_COLORS[m].b * s[m]; }
         if (sum > 0) cc.setRGB(r / sum, g / sum, b / sum); else cc.copy(MAT_COLORS[0]);
         col.setXYZ(i, cc.r, cc.g, cc.b);
+        tmp.setX(i, this.tempAt(gx * VSPACE, gz * VSPACE, h));
       }
     }
-    pos.needsUpdate = true; nor.needsUpdate = true; col.needsUpdate = true;
+    pos.needsUpdate = true; nor.needsUpdate = true; col.needsUpdate = true; tmp.needsUpdate = true;
     c.mesh.geometry.computeBoundingSphere();
   }
 

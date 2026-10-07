@@ -151,6 +151,7 @@ export class Grass {
                         const pz = wz + (hash2(wx, wz + 7.7) - 0.5) * S;
                         const hy = terrain.sampleHeight(px, pz);
                         if (hy < SEA_LEVEL + 0.3) continue;                     // no underwater/beach grass
+                        if (terrain.snowAt(px, pz, hy)) continue;               // buried under snow
                         // A tight clump of blades per cell: single tiny blades
                         // read as specks, a tuft reads as grass.
                         for (let k = 0; k < cfg.CLUMP; k++) {

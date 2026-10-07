@@ -22,6 +22,41 @@ import { createTabletopWorkspace } from '../shared/workspace.js';
 import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData } from '../shared/object-ui.js';
 import { disposeBuiltObject, structureLevel, structureStoreyLevel, structureTouchesLevel, isStructureType } from '../shared/structures.js';
 import { AuthenticatedMapReload } from '../shared/sync-state.js';
+import { TIER_WIDTH } from '../shared/hexworld.js';
+import { readCampaignId, readPlayingIds } from '../shared/campaigns.js';
+
+// Tabletop screens always enter through the lobby with ?campaign=<id>.
+// &chars=id1,id2 (set by the lobby picker) narrows the HUD to those characters.
+const campaignId = readCampaignId();
+if (!campaignId) location.replace('/lobby');
+const playingIds = readPlayingIds() || []; // null = no `?chars=` narrowing
+
+// ?chars (entry picker) narrows the session to these characters; a link
+// without it plays the whole roster.
+function inPlayingParty(char) {
+    return !playingIds.length || playingIds.includes(char.id);
+}
+
+// Campaign context (campaign-joined + map-state stamps). Module scope: the
+// camera landing reads it whenever a map-state arrives.
+let campaignContext = null;
+let pendingSpawnLanding = false;   // first unified landing after (re)join uses settings.spawn
+
+// Adopt campaign settings: seed + world shape drive local generation (reset
+// picks them up automatically; without a reset, regenerate live ground only).
+function applyCampaignContext(campaign) {
+    campaignContext = campaign;
+    const settings = campaign.settings || {};
+    if (terrain && terrain.applyWorldSettings(settings) && terrainIsUnified) terrain.regenerate();
+}
+
+// Region-style campaigns lock navigation to one province lens (the server
+// enforces the same rule); the camera zoom-out stops at that lens too.
+function regionRoot() {
+    const settings = campaignContext && campaignContext.settings;
+    return settings && settings.mapStyle === 'region' && settings.regionKey
+        ? settings.regionKey : null;
+}
 
 let terrain = null; // tactical terrain (heightmap + water), GM-authored, view-only here
 let grass = null;   // instanced ground-cover grass (shared/grass.js)
@@ -1549,7 +1584,7 @@ function initSocket(username) {
     socket.on('connect', () => {
         mapReload.onConnect();
         console.log('Conectado ao servidor com ID:', socket.id);
-        socket.emit('login', username);
+        socket.emit('login', { username, campaignId, screen: 'player' });
         sessionStorage.setItem('vtt_username', username);
     });
 
@@ -1563,9 +1598,32 @@ function initSocket(username) {
         if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
 
+    // Campaign context arrives before the first map-state (server order).
+    // Adopt startKey only on first entry — on reconnect login-success already
+    // rejoins the map the player was actually looking at.
+    socket.on('campaign-joined', (campaign) => {
+        if (!campaign || campaign.ok === false) {
+            console.warn('Campaign join failed:', campaign && campaign.error);
+            location.replace('/lobby');
+            return;
+        }
+        applyCampaignContext(campaign);
+        pendingSpawnLanding = true;
+        if (currentMapKey === 'world' && campaign.startKey) currentMapKey = campaign.startKey;
+        if (workspace) workspace.setCampaign({ id: campaign.id, name: campaign.name, owner: campaign.owner });
+    });
+
+    socket.on('campaign-updated', (campaign) => {
+        if (!campaign || !campaignContext || campaign.id !== campaignContext.id) return;
+        applyCampaignContext({ ...campaignContext, ...campaign });
+        if (workspace) workspace.setCampaign({ id: campaign.id, name: campaign.name, owner: campaignContext.owner });
+    });
+
+    socket.on('campaign-deleted', () => { location.replace('/lobby'); });
+
     // --- Character data for the HUD ---
     socket.on('load-user-characters', (chars) => {
-        myCharacters = Array.isArray(chars) ? chars : [];
+        myCharacters = (Array.isArray(chars) ? chars : []).filter(inPlayingParty);
         if (!myCharacters.find(c => c.id === activeCharId)) {
             activeCharId = myCharacters[0] ? myCharacters[0].id : null;
         }
@@ -1577,7 +1635,11 @@ function initSocket(username) {
     // Instances tab: where my character tokens sit, across every map. Pushed
     // by the server on any character add/move/delete and re-requested on tab open.
     socket.on('character-instances', (data) => {
-        characterInstances = (data && Array.isArray(data.instances)) ? data.instances : [];
+        characterInstances = (data && Array.isArray(data.instances)) ? data.instances
+            : [];
+        if (playingIds.length) {
+            characterInstances = characterInstances.filter(entry => playingIds.includes(entry.charId));
+        }
         renderInstanceList();
     });
 
@@ -1590,7 +1652,7 @@ function initSocket(username) {
         if (!char || !char.id) return;
         const i = myCharacters.findIndex(c => c.id === char.id);
         if (i >= 0) myCharacters[i] = char;
-        else if (char.owner === username || (username && username.toLowerCase() === 'gm')) myCharacters.push(char);
+        else if (inPlayingParty(char) && (char.owner === username || (username && username.toLowerCase() === 'gm'))) myCharacters.push(char);
         renderHUD();
         renderCharacterMenu();
     });
@@ -1670,6 +1732,20 @@ function initSocket(username) {
     // Full map state on connect
     socket.on('map-state', (data) => {
         if (!mapReload.acceptsMapState(data.key, currentMapKey)) return;
+        // Campaign stamp: adopt settings/name even if campaign-joined was
+        // missed (late loads, room re-joins).
+        if (data.campaign) {
+            const unchanged = campaignContext && campaignContext.id === data.campaign.id &&
+                campaignContext.name === data.campaign.name &&
+                JSON.stringify(campaignContext.settings || null) ===
+                    JSON.stringify(data.campaign.settings || null);
+            if (!unchanged) {
+                const first = !campaignContext;
+                applyCampaignContext({ startKey: data.key, ...data.campaign });
+                if (first) pendingSpawnLanding = true;
+            }
+            if (workspace) workspace.setCampaign({ id: data.campaign.id, name: data.campaign.name, owner: data.campaign.owner });
+        }
         restorePlayerCutaway();
         levelView.active = 0;
         levelView.isolate = false;
@@ -1714,7 +1790,13 @@ function initSocket(username) {
                 fogMask.setList(data.fog || []);
                 if (fogOverlay) fogOverlay.setVisible(true);
                 // One continuous world: load once, then fly between provinces.
-                if (mapReload.shouldReplaceUnified(terrainIsUnified)) {
+                const replacesUnified = mapReload.shouldReplaceUnified(terrainIsUnified);
+                // Campaign seed + world shape drive local generation (reset
+                // picks them up; without a reset, regenerate ground only).
+                if (data.campaign && data.campaign.settings &&
+                    terrain.applyWorldSettings(data.campaign.settings) &&
+                    !replacesUnified && terrainIsUnified) terrain.regenerate();
+                if (replacesUnified) {
                     terrain.generatorOn = true;
                     terrain.reset();
                     if (data.terrain) terrain.applyData(data.terrain);
@@ -1724,14 +1806,26 @@ function initSocket(username) {
                 styleGroundForTerrain(plane, true);
                 // The unified world renders at every altitude (LOD rings + ocean):
                 // players can zoom out to survey, not just hug the ground.
-                controls.maxDistance = 811008;
+                // Single-region campaigns stop at the region lens instead.
+                const regionDepth = regionRoot()
+                    ? Math.max(0, regionRoot().split('/').length - 1) : null;
+                controls.maxDistance = regionDepth != null
+                    ? TIER_WIDTH[regionDepth] * 8 * 1.6
+                    : 811008;
                 if (data.worldCenter) {
-                    const c = data.worldCenter;
+                    // First entry after a (re)join lands on the campaign spawn.
+                    const spawn = pendingSpawnLanding && campaignContext && campaignContext.settings
+                        && campaignContext.settings.spawn;
+                    const c = spawn || data.worldCenter;
                     // Land with the floating origin already under the province, so
                     // scene coords start near zero however far out the world we are.
                     const o = setWorldOriginAt({ terrain, worldGroup }, c.x, c.z);
-                    controls.target.set(c.x - o.x, 0, c.z - o.z);
-                    camera.position.set(c.x - o.x + 20, 30, c.z - o.z + 20);
+                    // Land ON the ground: highlands can stand taller than the
+                    // default camera height, which would start it inside a peak.
+                    const gy = Math.max(0, terrain.sampleHeight(c.x, c.z));
+                    controls.target.set(c.x - o.x, gy, c.z - o.z);
+                    camera.position.set(c.x - o.x + 20, gy + 30, c.z - o.z + 20);
+                    pendingSpawnLanding = false;
                 }
             } else {
                 // Pockets are never fogged (entering one means you're inside).

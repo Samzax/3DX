@@ -254,6 +254,36 @@
 #biome-panel .biome-swatch:hover { background: var(--btn-bg-hover); }
 #biome-panel .biome-swatch.active { background: var(--swatch); color: #101014; font-weight: 700; }
 #biome-panel .biome-swatch:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
+
+/* --- Campaign settings panel (worldbuilding) --- */
+#campaign-panel .tp-label { font-size: 11px; text-transform: uppercase; color: var(--text-dim); margin: 10px 0 5px; letter-spacing: .5px; }
+#campaign-panel .tp-row { display: flex; flex-wrap: wrap; gap: 5px; }
+#campaign-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin: 4px 0 2px; }
+#campaign-panel .tp-inline { display: flex; gap: 6px; align-items: stretch; }
+#campaign-panel .tp-inline input { flex: 1 1 auto; min-width: 0; }
+#campaign-panel input[type=text],
+#campaign-panel input[type=number],
+#campaign-panel textarea {
+  width: 100%; background: #1a1a1f; color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: var(--btn-radius);
+  font-size: 12px; padding: 5px 7px; font-family: inherit;
+}
+#campaign-panel input:focus, #campaign-panel textarea:focus { outline: none; border-color: var(--accent-warm); }
+#campaign-panel .tp-checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 4px 8px; }
+#campaign-panel .tp-check { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #cbd0d8; cursor: pointer; }
+#campaign-panel .tp-check input { accent-color: var(--accent-warm); }
+#campaign-panel .tp-chip {
+  padding: 4px 9px; font-size: 12px; background: var(--btn-bg); color: var(--text);
+  border: 1px solid var(--panel-border); border-radius: var(--btn-radius); cursor: pointer;
+}
+#campaign-panel .tp-chip:hover { background: var(--btn-bg-hover); }
+#campaign-panel .tp-send { width: 100%; margin-top: 10px; padding: 7px; background: var(--accent-warm); color: #101014; border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; font-weight: 700; }
+#campaign-panel .tp-send:hover { filter: brightness(1.12); }
+#campaign-status, #campaign-world-status { min-height: 14px; margin-top: 6px; font-size: 11px; color: var(--text-dim); }
+#campaign-panel .tp-chip.active { background: var(--accent-warm); color: #101014; border-color: var(--accent-warm); font-weight: 700; }
+#campaign-panel .tp-section { margin: 18px 0 4px; padding-top: 14px; border-top: 1px solid var(--panel-border); font-size: 15px; font-weight: 700; color: var(--text); }
+#campaign-panel .tp-check-wide { margin-top: 10px; }
+#campaign-panel .tp-rebuild { background: #b4532a; color: #fff; }
 #terrain-panel .tp-reset { width: 100%; margin-top: 10px; padding: 7px; background: #5d2f2f; color: var(--text); border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; }
 #terrain-panel .tp-reset:hover { background: #733a3a; }
 

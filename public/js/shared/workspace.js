@@ -55,6 +55,85 @@ export function createTabletopWorkspace({
     let dockIsVisible = false;
     let shortcutDialog = null;
 
+    // --- Campaign switcher (top bar): name button -> settings / back to lobby.
+    // Built from JS so both screens get identical markup without shell edits.
+    let campaignButton = null;
+    let campaignMenu = null;
+    let campaignSettingsAction = null;
+    let campaignIdForLinks = null;
+
+    function closeCampaignMenu() {
+        if (!campaignMenu || !campaignButton) return;
+        campaignMenu.classList.add('hidden');
+        campaignButton.setAttribute('aria-expanded', 'false');
+    }
+
+    function ensureCampaignUi() {
+        if (campaignButton) return true;
+        const actions = document.querySelector('#workspace-topbar .workspace-actions');
+        if (!actions) return false;
+        const wrapper = document.createElement('div');
+        wrapper.className = 'campaign-switcher';
+        campaignButton = document.createElement('button');
+        campaignButton.id = 'btn-campaign-switcher';
+        campaignButton.type = 'button';
+        campaignButton.className = 'workspace-top-button';
+        campaignButton.setAttribute('aria-haspopup', 'true');
+        campaignButton.setAttribute('aria-expanded', 'false');
+        campaignButton.textContent = 'Campaign';
+        campaignMenu = document.createElement('div');
+        campaignMenu.id = 'campaign-menu';
+        campaignMenu.className = 'hidden';
+        const name = document.createElement('div');
+        name.id = 'campaign-menu-name';
+        const settings = document.createElement('button');
+        settings.type = 'button';
+        settings.dataset.campaignMenu = 'settings';
+        settings.textContent = 'Campaign settings';
+        settings.classList.add('hidden');
+        const lobby = document.createElement('button');
+        lobby.type = 'button';
+        lobby.dataset.campaignMenu = 'lobby';
+        lobby.textContent = 'Switch campaign';
+        campaignMenu.append(name, settings, lobby);
+        wrapper.append(campaignButton, campaignMenu);
+        actions.insertBefore(wrapper, actions.firstChild);
+
+        campaignButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const open = campaignMenu.classList.contains('hidden');
+            campaignMenu.classList.toggle('hidden', !open);
+            campaignButton.setAttribute('aria-expanded', String(open));
+        });
+        campaignMenu.addEventListener('click', (event) => {
+            const item = event.target.closest('[data-campaign-menu]');
+            if (!item) return;
+            const action = item.dataset.campaignMenu;
+            closeCampaignMenu();
+            if (action === 'lobby') window.location.href = '/lobby';
+            else if (action === 'settings' && campaignSettingsAction) campaignSettingsAction();
+        });
+        document.addEventListener('click', (event) => {
+            if (campaignButton && !campaignButton.contains(event.target) &&
+                campaignMenu && !campaignMenu.contains(event.target)) closeCampaignMenu();
+        });
+        return true;
+    }
+
+    function setCampaign(campaign, { canManage = false, onSettings = null } = {}) {
+        campaignSettingsAction = onSettings;
+        campaignIdForLinks = campaign && campaign.id ? campaign.id : null;
+        if (!ensureCampaignUi()) return;
+        const name = campaign && campaign.name ? campaign.name : 'Campaign';
+        campaignButton.textContent = name;
+        campaignButton.title = canManage ? `${name} — campaign menu` : name;
+        const nameLabel = campaignMenu.querySelector('#campaign-menu-name');
+        if (nameLabel) nameLabel.textContent = name;
+        const settingsItem = campaignMenu.querySelector('[data-campaign-menu="settings"]');
+        if (settingsItem) settingsItem.classList.toggle('hidden', !canManage);
+        closeCampaignMenu();
+    }
+
     function setInspectorOpen(open) {
         if (!inspector) return;
         inspector.classList.toggle('is-closed', !open);
@@ -133,8 +212,13 @@ export function createTabletopWorkspace({
     function openStudio(path = '/', title = 'Character Studio') {
         if (!studio || !studioFrame) return;
         if (studioTitle) studioTitle.textContent = title;
-        const next = new URL(path, window.location.origin).href;
-        if (studioFrame.src !== next) studioFrame.src = next;
+        // The Studio keeps the campaign context (roster scoping, save targets).
+        const next = new URL(path, window.location.origin);
+        if (campaignIdForLinks && !next.searchParams.has('campaign')) {
+            next.searchParams.set('campaign', campaignIdForLinks);
+        }
+        const href = next.href;
+        if (studioFrame.src !== href) studioFrame.src = href;
         studio.classList.remove('hidden');
         studio.setAttribute('aria-hidden', 'false');
     }
@@ -267,6 +351,7 @@ export function createTabletopWorkspace({
         setMode,
         setLocation,
         setUser,
+        setCampaign,
         openStudio,
         closeStudio,
         openShortcuts,

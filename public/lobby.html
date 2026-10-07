@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D VTT - Campaigns</title>
+    <link rel="stylesheet" href="/css/tabletop.css">
+    <link rel="stylesheet" href="/css/lobby.css">
+
+    <!-- Socket.IO client (served by server.js) -->
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="lobby-page">
+    <!-- Login Modal -->
+<div id="login-overlay">
+  <div id="login-modal">
+    <h2>&#128214; 3D VTT Login</h2>
+    <input
+      type="text"
+      id="username-input"
+      placeholder="Enter your username"
+      autocomplete="username"
+      maxlength="20"
+    />
+    <button id="login-btn">Login</button>
+    <div id="login-error" class="hidden"></div>
+  </div>
+</div>
+
+    <header id="lobby-topbar">
+        <div class="workspace-brand">
+            <span class="workspace-logo">3D</span>
+            <span class="workspace-product">3DX Tabletop</span>
+            <span class="workspace-role">Campaigns</span>
+        </div>
+        <div class="lobby-topbar-actions">
+            <span id="lobby-user" class="workspace-user"></span>
+            <a class="workspace-top-button" href="/" title="Character Studio">Studio</a>
+            <a class="workspace-top-button" href="/homebrew" title="Homebrew studio">Homebrew</a>
+        </div>
+    </header>
+
+    <main id="lobby-main">
+        <div class="lobby-section-head">
+            <div>
+                <h1>Your campaigns</h1>
+                <p class="lobby-sub">Enter a table as GM, or as one of your characters.</p>
+            </div>
+            <button id="btn-new-campaign" class="lobby-primary" disabled>+ New campaign</button>
+        </div>
+        <div id="lobby-campaign-list" class="lobby-grid" aria-live="polite">
+            <p class="lobby-empty">Waiting for the campaign list&hellip;</p>
+        </div>
+    </main>
+
+    <!-- Enter as player: pick which of your characters you are playing -->
+    <div id="party-overlay" class="hidden">
+        <div id="party-modal" role="dialog" aria-modal="true" aria-labelledby="party-title">
+            <h2 id="party-title">Who are you playing?</h2>
+            <p id="party-sub" class="lobby-sub"></p>
+            <div id="party-list"></div>
+            <div id="party-error" class="hidden"></div>
+            <div class="lobby-modal-actions">
+                <button id="party-all" class="lobby-secondary">Play all</button>
+                <button id="party-enter" class="lobby-primary">Enter campaign</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- New campaign wizard: identity -> world -> biomes -> spawn -> party -->
+    <div id="wizard-overlay" class="hidden">
+        <div id="wizard-modal" role="dialog" aria-modal="true" aria-labelledby="wizard-title">
+            <header class="wizard-header">
+                <h2 id="wizard-title">New campaign</h2>
+                <ol id="wizard-steps">
+                    <li data-step="1" class="active">Identity</li>
+                    <li data-step="2">World</li>
+                    <li data-step="3">Biomes</li>
+                    <li data-step="4">Spawn</li>
+                    <li data-step="5">Party</li>
+                </ol>
+            </header>
+
+            <div class="wizard-body">
+                <section class="wizard-step" data-step="1">
+                    <label for="wizard-name">Campaign name <span class="wizard-required">*</span></label>
+                    <input id="wizard-name" type="text" maxlength="80" placeholder="Curse of the Amber King" />
+                    <label for="wizard-description">Description</label>
+                    <textarea id="wizard-description" maxlength="400" rows="3"
+                        placeholder="A one-line pitch shown on the lobby card."></textarea>
+                </section>
+
+                <section class="wizard-step hidden" data-step="2">
+                    <fieldset>
+                        <legend>Map style</legend>
+                        <label class="wizard-radio">
+                            <input type="radio" name="wizard-style" value="ladder" checked />
+                            <span><strong>Grand campaign</strong> &mdash; the DMG ladder: Continent (60 mi) &rarr; Kingdom (6 mi) &rarr; Province (1 mi) &rarr; Tactical (5 ft).</span>
+                        </label>
+                        <label class="wizard-radio">
+                            <input type="radio" name="wizard-style" value="region" />
+                            <span><strong>Single region</strong> &mdash; a fixed province view around the spawn; zoom-out above it is hidden.</span>
+                        </label>
+                    </fieldset>
+                    <label>World</label>
+                    <div id="wizard-world"></div>
+                    <label for="wizard-seed">World seed</label>
+                    <div class="wizard-inline">
+                        <input id="wizard-seed" type="number" min="0" max="2147483647" value="1337" />
+                        <button id="wizard-seed-roll" class="lobby-secondary" type="button" title="Random seed">&#127922;</button>
+                    </div>
+                    <div class="wizard-map-slot" data-slot="2">
+                        <div id="wizard-map" class="worldmap">
+                            <canvas id="wizard-map-canvas"></canvas>
+                            <div id="wizard-map-zoom" class="worldmap-zooms"></div>
+                        </div>
+                    </div>
+                    <p class="lobby-sub">This map is the world your seed and settings build, north up, centered on the spawn. Roll the seed until you like it &mdash; everything here can be changed later in Campaign settings.</p>
+                </section>
+
+                <section class="wizard-step hidden" data-step="3">
+                    <p class="lobby-sub">Biomes the GM may paint. The generator still produces all terrain; painting overrides hex by hex.</p>
+                    <div id="wizard-biomes" class="wizard-biomes"></div>
+                </section>
+
+                <section class="wizard-step hidden" data-step="4">
+                    <p class="lobby-sub">Click the map to place the spawn &mdash; where cameras land on first entry. You can re-set it in-world later.</p>
+                    <div class="wizard-map-slot" data-slot="4"></div>
+                    <div class="wizard-inline wizard-spawn-row">
+                        <label for="wizard-spawn-x">X</label>
+                        <input id="wizard-spawn-x" type="number" value="0" />
+                        <label for="wizard-spawn-z">Z</label>
+                        <input id="wizard-spawn-z" type="number" value="0" />
+                    </div>
+                    <label class="wizard-radio"><input id="wizard-homeland" type="checkbox" checked /> <span><strong>Homeland</strong> &mdash; guarantee land around the spawn (the dashed ring). Without it the spawn may be open sea.</span></label>
+                </section>
+
+                <section class="wizard-step hidden" data-step="5">
+                    <p class="lobby-sub">Copy characters from your other campaigns into this one &mdash; or create a fresh one in the studio.</p>
+                    <div id="wizard-party-list" class="wizard-party"></div>
+                    <a id="wizard-create-character" class="lobby-secondary" href="/">Create a character</a>
+                </section>
+            </div>
+
+            <footer class="wizard-footer">
+                <button id="wizard-back" class="lobby-secondary" disabled>Back</button>
+                <div id="wizard-error" class="hidden"></div>
+                <button id="wizard-next" class="lobby-primary">Next</button>
+                <button id="wizard-create" class="lobby-primary hidden">Create campaign</button>
+                <button id="wizard-enter" class="lobby-primary hidden">Enter campaign</button>
+            </footer>
+        </div>
+    </div>
+
+    <script type="module" src="/js/pages/lobby.js"></script>
+</body>
+</html>

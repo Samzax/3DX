@@ -5,8 +5,14 @@ import {
   abilityMod, fmtMod, proficiencyBonus
 } from '../shared/srd.js';
 import { setupLoginModal } from '../shared/login.js';
+import { readCampaignId } from '../shared/campaigns.js';
 import { createCharacterModel, disposeModel } from '../shared/models.js';
 import { createRigCharacter, releaseRigCharacter, tickRigCharacters } from '../shared/charmesh.js';
+
+// The Studio keeps campaign context via ?campaign=<id> (workspace append);
+// without it the login lands in the default campaign roster.
+const campaignId = readCampaignId();
+let activeCampaign = null;   // { id, name, ... } from campaign-joined
 
 let SRD = null;
 let pendingHomebrew = null;
@@ -508,6 +514,7 @@ function buildSaveObject() {
     appearance: { height:ap.height, build:ap.build, headSize:ap.headSize, armLength:ap.armLength, legLength:ap.legLength, colors:{...ap.colors} },
     equipment: { armor: char.equipment.armor, shield: !!char.equipment.shield, weapons: [...char.equipment.weapons], items: [...char.equipment.items] },
     spells: [...char.spells],
+    ...(char.hp ? { hp: { current: char.hp.current } } : {}),
     // back-compat for existing token renderers
     color: ap.colors.torso,
     stats: { ...char.baseAbilities },
@@ -531,6 +538,10 @@ function loadIntoBuilder(c) {
     armLength: c.appearance.armLength ?? 1, legLength: c.appearance.legLength ?? 1,
     colors: { ...DEFAULT_COLORS, ...(c.appearance.colors || (c.color?{torso:c.color}:{})) }
   };
+  // Live HP rides along so export -> import round-trips combat state; the
+  // server only honors it for NEW records (existing ones keep their HP).
+  char.hp = (c.hp && typeof c.hp.current === 'number')
+    ? { current: Math.max(0, Math.min(999, Math.floor(c.hp.current))) } : null;
   const reconciled = reconcileChar();
   activeTab = 'identity'; renderTabs(); buildModel(); refresh();
   msg('Loaded ' + (c.name||'character') + (reconciled ? ' (deleted homebrew reset to defaults)' : ''));
@@ -581,15 +592,88 @@ async function startApp() {
     socket.emit('save-character', { charData: buildSaveObject(), username });
   };
   $('new-btn').onclick = () => { char = defaultChar(); applyPreset(char.race); activeTab='identity'; renderTabs(); buildModel(); refresh(); msg('New character'); };
+
+  // Export/import: the current sheet as a JSON file. Export prefers the
+  // editor state (with saved HP merged in); import always lands as a NEW
+  // character (stale ids/owners from other campaigns are stripped).
+  $('export-btn').onclick = () => {
+    const data = buildSaveObject();
+    delete data.id;
+    const saved = (window._chars || []).find(entry => entry.id === char.id);
+    if (saved && saved.hp && saved.hp.current != null) data.hp = { current: saved.hp.current };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = (char.name || 'character').replace(/[^\w\-. ]+/g, '').trim() || 'character';
+    link.download += '.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+    msg('Exported ' + (char.name || 'character'));
+  };
+  $('import-btn').onclick = () => $('import-file').click();
+  $('import-file').onchange = async (event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = '';   // re-picking the same file must fire again
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('not a character file');
+      if (typeof data.name !== 'string' && !data.race && !data.classes) throw new Error('not a character export');
+      delete data.id;
+      delete data.owner;
+      loadIntoBuilder(data);
+      msg('Imported ' + (char.name || 'character') + ' — Save to add it to this roster');
+    } catch (error) {
+      msg('Import failed: ' + error.message, true);
+    }
+  };
+
+  // Switch which campaign roster this Studio edits (no ?campaign deep link).
+  const campaignSelect = $('campaign-select');
+  if (campaignSelect) campaignSelect.onchange = (event) => {
+    const id = event.target.value;
+    if (!socket || !id || (activeCampaign && activeCampaign.id === id)) return;
+    socket.emit('join-campaign', { id, screen: 'studio' });
+    const url = new URL(window.location.href);
+    url.searchParams.set('campaign', id);
+    history.replaceState(null, '', url);
+  };
 }
 
 /* ---------- Login + socket ---------- */
 const login = setupLoginModal((u) => {
   socket = io();
-  socket.on('connect', () => socket.emit('login', u));
+  socket.on('connect', () => {
+    // Studio screen: join the campaign roster without a map room.
+    socket.emit('login', { username: u, campaignId: campaignId || undefined, screen: 'studio' });
+  });
   socket.on('login-success', (data) => {
     username = data.username; sessionStorage.setItem('vtt_username', username);
     login.hide(); startApp();
+    socket.emit('get-campaigns');
+  });
+  socket.on('campaign-joined', (campaign) => {
+    if (!campaign || campaign.ok === false) {
+      msg('Campaign unavailable' + (campaign && campaign.error ? ': ' + campaign.error : ''), true);
+      return;
+    }
+    activeCampaign = campaign;
+    const select = document.getElementById('campaign-select');
+    if (select && campaign.id) select.value = campaign.id;
+    const note = document.getElementById('campaign-select-note');
+    if (note) note.textContent = 'Roster of "' + campaign.name + '".';
+  });
+  socket.on('campaign-list', (payload) => {
+    const list = payload && Array.isArray(payload.campaigns) ? payload.campaigns : [];
+    const select = document.getElementById('campaign-select');
+    if (!select) return;
+    const current = activeCampaign ? activeCampaign.id : (campaignId || 'default');
+    select.innerHTML = list.map(entry =>
+      `<option value="${esc(entry.id)}">${esc(entry.name)}</option>`).join('');
+    if (list.some(entry => entry.id === current)) select.value = current;
+    select.disabled = list.length <= 1;
   });
   socket.on('load-user-characters', renderSaved);
   socket.on('load-homebrew', (hb) => {

@@ -394,8 +394,11 @@ function atomicWriteFile(filePath, contents) {
   }
 }
 
-function loadJSON(filename, defaultValue, validate = () => true) {
-  const filePath = path.join(DATA_DIR, filename);
+// Every save file lives either in DATA_DIR (registry, homebrew and the
+// default campaign's legacy files) or in a per-campaign subdirectory; `dir`
+// selects the base so the same helpers serve both layouts.
+function loadJSON(filename, defaultValue, validate = () => true, dir = activeStore ? activeStore.dir : DATA_DIR) {
+  const filePath = path.join(dir, filename);
   const backupPath = filePath + '.bak';
   if (fs.existsSync(filePath)) {
     try {
@@ -446,11 +449,12 @@ function validatorForSave(filename) {
   if (filename === 'map_state.json') return validMapSaveData;
   if (filename === 'characters.json') return isRecord;
   if (filename === 'homebrew.json') return validHomebrewSaveData;
+  if (filename === 'campaigns.json') return validCampaignsSaveData;
   return () => true;
 }
 
-function saveJSON(filename, data) {
-  const filePath = path.join(DATA_DIR, filename);
+function saveJSON(filename, data, dir = activeStore ? activeStore.dir : DATA_DIR) {
+  const filePath = path.join(dir, filename);
   const backupPath = filePath + '.bak';
   try {
     const contents = JSON.stringify(data, null, 2) + '\n';
@@ -479,8 +483,8 @@ function saveJSON(filename, data) {
 // primary may contain the rejected half of that transaction, so rotating it
 // would poison the last-known-good backup. Rewrite only the primary and leave
 // the existing backup untouched for crash/corruption recovery.
-function rewriteJSONPrimary(filename, data) {
-  const filePath = path.join(DATA_DIR, filename);
+function rewriteJSONPrimary(filename, data, dir = activeStore ? activeStore.dir : DATA_DIR) {
+  const filePath = path.join(dir, filename);
   try {
     if (!validatorForSave(filename)(data)) throw new Error('data has an invalid shape');
     atomicWriteFile(filePath, JSON.stringify(data, null, 2) + '\n');
@@ -495,8 +499,8 @@ function rewriteJSONPrimary(filename, data) {
 // generation. A normal save keeps the previous primary as `.bak`, which is
 // useful for one-file edits but would let one corrupt primary roll only half
 // of an HP transaction back. Refresh both backups after both primaries commit.
-function rewriteJSONBackup(filename, data) {
-  const backupPath = path.join(DATA_DIR, filename) + '.bak';
+function rewriteJSONBackup(filename, data, dir = activeStore ? activeStore.dir : DATA_DIR) {
+  const backupPath = path.join(dir, filename) + '.bak';
   try {
     if (!validatorForSave(filename)(data)) throw new Error('data has an invalid shape');
     atomicWriteFile(backupPath, JSON.stringify(data, null, 2) + '\n');
@@ -507,13 +511,16 @@ function rewriteJSONBackup(filename, data) {
   }
 }
 
-// Load state (per-map: { maps: { [key]: { objects, rulers } } })
-let mapData = loadJSON('map_state.json', { maps: {} }, validMapSaveData);
-const maps = mapData.maps;
-for (const map of Object.values(maps)) {
-  if (!map.objects) map.objects = {};
-  if (!map.rulers) map.rulers = {};
-}
+// ===== Campaign stores =====
+// Each campaign owns a `maps` record and a character roster in its own save
+// files. Node executes every socket handler to completion synchronously (all
+// persistence below is sync), so binding the *active* store into these
+// module-level handles around a handler is re-entrancy safe: withStore saves
+// and restores the previous binding, and no other handler can interleave.
+let activeStore = null;
+let maps = {};
+let charactersDB = {};
+const stores = new Map();
 
 // Get (or lazily create) a single map's state by its path key (e.g. "world", "world/2,-1")
 function getMap(key) {
@@ -529,7 +536,11 @@ function mapForRead(key) {
 }
 
 function saveMaps() {
-  return saveJSON('map_state.json', { maps });
+  return saveJSON('map_state.json', { maps }, activeStore ? activeStore.dir : DATA_DIR);
+}
+
+function saveCharacters() {
+  return saveJSON('characters.json', charactersDB, activeStore ? activeStore.dir : DATA_DIR);
 }
 
 // Map mutators update the in-memory record first because persistence is
@@ -647,6 +658,243 @@ function knownMapKey(raw, fallback = null) {
   return Object.prototype.hasOwnProperty.call(maps, key) ? key : fallback;
 }
 
+// ===== Campaigns =====
+// A campaign is one table: an owner (its GM), worldbuilding settings and its
+// own isolated store (maps + roster + fog + combat). The registry lives in
+// data/saves/campaigns.json; the default campaign keeps the legacy root files
+// so existing installs and tests migrate with zero file moves.
+const DEFAULT_CAMPAIGN_ID = 'default';
+const MAX_CAMPAIGNS = 100;
+const MAX_CAMPAIGN_NAME = 80;
+const MAX_CAMPAIGN_DESCRIPTION = 400;
+const BIOME_KEYS = ['plains', 'forest', 'mountains', 'desert', 'swamp', 'coast', 'tundra', 'taiga', 'snow'];
+// Seasons are table state: they slide the snowline on every screen (worldgen.js SEASONS).
+const SEASON_KEYS = ['summer', 'autumn', 'winter', 'spring'];
+// Generator knob bounds; mirrors worldgen.js WORLD_LIMITS.
+const WORLD_LIMITS = {
+  ocean: [10, 90], landSize: [50, 300], wetness: [-100, 100], temperature: [-100, 100],
+  latitude: [0, 100], rugged: [-100, 100], zones: [0, 100]
+};
+const CAMPAIGN_STYLES = new Set(['ladder', 'region']);
+
+function validCampaignsSaveData(value) {
+  return isRecord(value) &&
+    (!hasOwn(value, 'campaigns') || isRecord(value.campaigns));
+}
+
+function defaultCampaignSettings() {
+  return {
+    mapStyle: 'ladder',
+    seed: 1337,
+    biomes: [...BIOME_KEYS],
+    spawn: { x: 0, z: 0 },
+    // World shape (client generator knobs; mirrors worldgen.js WORLD_DEFAULTS —
+    // these defaults reproduce the original world exactly).
+    world: { ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0, home: null },
+    season: 'summer',
+    regionKey: null
+  };
+}
+
+// Axial hex (q,r) of the pointy-top hex containing (x,z) at a tier width.
+// Cube-rounding mirrors shared/hexworld.js worldToHexAtTier — keep in sync.
+function worldToHexAtTier(depth, x, z) {
+  const R = TIER_WIDTH[depth] / SQRT3;
+  const qf = (SQRT3 / 3 * x - 1 / 3 * z) / R;
+  const rf = (2 / 3 * z) / R;
+  let rq = Math.round(qf), ry = Math.round(-qf - rf), rr = Math.round(rf);
+  const dq = Math.abs(rq - qf), dy = Math.abs(ry - (-qf - rf)), dr = Math.abs(rr - rf);
+  if (dq > dy && dq > dr) rq = -ry - rr;
+  else if (dy <= dr) rr = -rq - ry;
+  return { q: rq, r: rr };
+}
+
+// Province lens (world/<kingdom>/<province>) whose hexes contain the spawn.
+function regionKeyForSpawn(x, z) {
+  const wx = Number(x) || 0, wz = Number(z) || 0;
+  const kingdom = worldToHexAtTier(0, wx, wz);
+  // Each tier's lattice is centered on its parent hex: resolve the province
+  // from the point LOCAL to the kingdom hex center, not the world origin.
+  const kc = hexCenterAtTier(0, kingdom.q, kingdom.r);
+  const province = worldToHexAtTier(1, wx - kc.x, wz - kc.z);
+  return `world/${kingdom.q},${kingdom.r}/${province.q},${province.r}`;
+}
+
+// Settings are server-derived: the region key always follows the spawn so a
+// client can never widen the bounds of a single-region campaign.
+function sanitizeCampaignSettings(raw) {
+  const source = isRecord(raw) ? raw : {};
+  const settings = defaultCampaignSettings();
+  if (CAMPAIGN_STYLES.has(source.mapStyle)) settings.mapStyle = source.mapStyle;
+  const seed = boundedInteger(source.seed, 0, 0x7fffffff, null);
+  if (seed != null) settings.seed = seed;
+  if (Array.isArray(source.biomes)) {
+    const biomes = BIOME_KEYS.filter(key => source.biomes.includes(key));
+    if (biomes.length) settings.biomes = biomes;
+  }
+  const spawn = sanitizeXZ(source.spawn);
+  if (spawn) settings.spawn = spawn;
+  if (isRecord(source.world)) {
+    const w = source.world, world = { home: sanitizeXZ(w.home) };
+    for (const key of Object.keys(WORLD_LIMITS)) {
+      world[key] = boundedInteger(w[key], WORLD_LIMITS[key][0], WORLD_LIMITS[key][1], settings.world[key]);
+    }
+    settings.world = world;
+  }
+  if (SEASON_KEYS.includes(source.season)) settings.season = source.season;
+  if (settings.mapStyle === 'region') {
+    settings.regionKey = regionKeyForSpawn(settings.spawn.x, settings.spawn.z);
+  }
+  return settings;
+}
+
+function sanitizeCampaignRecord(raw, id) {
+  if (!isRecord(raw)) return null;
+  const owner = boundedString(raw.owner, MAX_USERNAME_LENGTH) || 'gm';
+  return {
+    id,
+    name: boundedText(raw.name, MAX_CAMPAIGN_NAME) || 'Untitled campaign',
+    description: boundedText(raw.description, MAX_CAMPAIGN_DESCRIPTION),
+    owner,
+    createdAt: boundedInteger(raw.createdAt, 0, 0x7fffffffffff, 0),
+    settings: sanitizeCampaignSettings(raw.settings)
+  };
+}
+
+let campaignsData = loadJSON('campaigns.json', { campaigns: {} }, validCampaignsSaveData);
+const campaigns = {};
+for (const [storedId, rawCampaign] of Object.entries(campaignsData.campaigns || {})) {
+  const id = sanitizeReference(storedId, 40);
+  const campaign = id && sanitizeCampaignRecord(rawCampaign, id);
+  if (campaign) campaigns[id] = campaign;
+}
+campaignsData.campaigns = campaigns;
+
+function campaignById(id) {
+  return typeof id === 'string' && hasOwn(campaigns, id) ? campaigns[id] : null;
+}
+
+function saveCampaigns() {
+  return saveJSON('campaigns.json', campaignsData);
+}
+
+// The default campaign is the migration target for legacy single-world saves
+// and the implicit target of a plain (legacy) login.
+function ensureDefaultCampaign() {
+  if (campaignById(DEFAULT_CAMPAIGN_ID)) return false;
+  campaigns[DEFAULT_CAMPAIGN_ID] = {
+    id: DEFAULT_CAMPAIGN_ID,
+    name: 'Default Campaign',
+    description: '',
+    owner: 'gm',
+    createdAt: Date.now(),
+    settings: defaultCampaignSettings()
+  };
+  saveCampaigns();
+  return true;
+}
+ensureDefaultCampaign();
+
+// Save files: the default campaign keeps the legacy root paths; every other
+// campaign gets its own subdirectory.
+function campaignDir(id) {
+  return id === DEFAULT_CAMPAIGN_ID ? DATA_DIR : path.join(DATA_DIR, 'campaigns', id);
+}
+
+function loadCampaignMaps(dir) {
+  const data = loadJSON('map_state.json', { maps: {} }, validMapSaveData, dir);
+  const loaded = data.maps;
+  for (const map of Object.values(loaded)) {
+    if (!map.objects) map.objects = {};
+    if (!map.rulers) map.rulers = {};
+  }
+  return loaded;
+}
+
+function loadCampaignCharacters(dir) {
+  const loaded = loadJSON('characters.json', {}, isRecord, dir);
+  const db = {};
+  for (const [storedId, rawCharacter] of Object.entries(loaded)) {
+    const character = sanitizeCharacterPayload(rawCharacter);
+    const id = sanitizeReference(rawCharacter && rawCharacter.id, 80) ||
+      sanitizeReference(storedId, 80);
+    if (!character || !id) continue;
+    character.id = id;
+    character.owner = boundedString(rawCharacter.owner, MAX_USERNAME_LENGTH) || 'gm';
+    db[id] = character;
+  }
+  return db;
+}
+
+function withStore(store, fn) {
+  const previous = activeStore;
+  const previousMaps = maps;
+  const previousCharacters = charactersDB;
+  activeStore = store;
+  maps = store.maps;
+  charactersDB = store.characters;
+  try {
+    return fn();
+  } finally {
+    activeStore = previous;
+    maps = previousMaps;
+    charactersDB = previousCharacters;
+  }
+}
+
+// Lazily load a campaign's store; the boot migrations run once per store on
+// first touch (they are written against the bound `maps` handle).
+function storeFor(campaignId) {
+  const id = campaignId || DEFAULT_CAMPAIGN_ID;
+  let store = stores.get(id);
+  if (!store) {
+    if (!campaignById(id)) return null;
+    const dir = campaignDir(id);
+    try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { console.error(`Error creating campaign folder for ${id}:`, e); }
+    store = { id, dir, maps: loadCampaignMaps(dir), characters: loadCampaignCharacters(dir) };
+    stores.set(id, store);
+    withStore(store, () => {
+      migrateTacticalToWorld();
+      migrateHexLayerRename();
+      migrateUnifiedLensObjects();
+      normalizePersistedCombatState();
+    });
+  }
+  return store;
+}
+
+function activeCampaignId() {
+  return activeStore ? activeStore.id : DEFAULT_CAMPAIGN_ID;
+}
+
+function activeCampaign() {
+  return campaignById(activeCampaignId());
+}
+
+// Rooms are namespaced per campaign so two worlds can never cross-talk.
+function campRoom(campaignId) { return 'camp:' + campaignId; }
+function mapRoom(campaignId, key) { return 'camp:' + campaignId + ':' + key; }
+
+function isCampaignGMFor(campaignId, username) {
+  if (!username) return false;
+  if (isGM(username)) return true;
+  const campaign = campaignById(campaignId);
+  // Case-insensitive like the global `gm` name: "Teste" still owns TESTE's table.
+  return !!(campaign && String(campaign.owner).toLowerCase() === String(username).toLowerCase());
+}
+
+// Role inside the campaign the current handler is bound to. Homebrew content
+// and login identity keep using the global isGM.
+function isCampaignGM(username) {
+  return isCampaignGMFor(activeCampaignId(), username);
+}
+
+function campaignSettings() {
+  const campaign = activeCampaign();
+  return (campaign && campaign.settings) || defaultCampaignSettings();
+}
+
+
 // ===== Fog of war (U4, docs/unified-world-design.md) =====
 // Players free-roam the camera but only RECEIVE content inside regions the GM
 // has revealed. The mask is a set of hexes on a GLOBAL province-pitch lattice
@@ -685,7 +933,7 @@ function ownsObject(username, obj) {
     obj.characterData && obj.characterData.owner === username);
 }
 function objectVisibleTo(username, obj) {
-  if (isGM(username)) return true;
+  if (isCampaignGM(username)) return true;
   if (ownsObject(username, obj)) return true;
   const p = obj.position || {};
   return isRevealedAt(p.x, p.z);
@@ -739,7 +987,7 @@ function publicMonsterProjection(raw) {
 }
 
 function projectObjectFor(username, object) {
-  if (!object || isGM(username)) return object;
+  if (!object || isCampaignGM(username)) return object;
   if (object.type === 'character' && isRecord(object.characterData)) {
     if (object.characterData.owner === username) return object;
     return { ...object, characterData: publicCharacterProjection(object.characterData) };
@@ -767,7 +1015,7 @@ function filterTerrainForPlayer(t) {
 }
 // Per-socket emit to a room (fog filtering needs to know WHO receives).
 function emitToRoom(key, exceptSocket, fn) {
-  const room = io.sockets.adapter.rooms.get(key);
+  const room = io.sockets.adapter.rooms.get(mapRoom(activeCampaignId(), key));
   if (!room) return;
   for (const sid of room) {
     if (exceptSocket && sid === exceptSocket.id) continue;
@@ -783,29 +1031,81 @@ function stateKey(key) { return isUnifiedKey(key) ? WORLD_KEY : key; }
 
 // Emit to every socket currently viewing the unified world (any lens), not just
 // one room. Per-socket so fog filtering can decide what each player receives.
+// Scoped to the campaign the emitting handler is bound to.
 function emitToUnified(exceptSocket, fn) {
+  const campaignId = activeCampaignId();
   for (const sock of io.sockets.sockets.values()) {
     if (exceptSocket && sock.id === exceptSocket.id) continue;
     if (!sock.username) continue;
+    if (sock.campaignId !== campaignId) continue;
     if (!isUnifiedKey(sock.currentMapKey || '')) continue;
     fn(sock);
   }
 }
 
-// Presence roster: every logged-in socket and where it is. Broadcast to the
-// whole server (usernames aren't secret); the GM View tool uses it to list
-// live players it can steer. Fired on login, join-map and disconnect.
-function broadcastPresence() {
-  const players = [];
+// Detach a socket from a campaign's rooms (used by delete-campaign where the
+// loop runs outside that socket's own connection scope).
+function leaveCampaignRoomsFor(sock, campaignId) {
+  if (sock.currentMapKey) sock.leave(mapRoom(campaignId, sock.currentMapKey));
+  sock.leave(campRoom(campaignId));
+}
+
+// Own-character summaries for the lobby's "enter as player" picker. Only the
+// requesting user's own sheets are listed, so this leaks nothing; the broadcast
+// campaign-list omits rosters (fetch get-campaigns when a picker opens).
+function ownedCharacterSummaries(campaignId, username) {
+  const store = storeFor(campaignId);
+  if (!store) return [];
+  return withStore(store, () => Object.values(charactersDB)
+    .filter(char => char.owner === username)
+    .map(char => ({ id: char.id, name: char.name })));
+}
+
+// Lobby projection: every campaign with its online headcount. Broadcast to the
+// lobby room only (a player may later get a "my campaigns" filter here).
+function campaignsPayload(username) {
+  const online = {};
   for (const sock of io.sockets.sockets.values()) {
-    if (!sock.username) continue;
-    players.push({
+    if (sock.username && sock.campaignId) {
+      online[sock.campaignId] = (online[sock.campaignId] || 0) + 1;
+    }
+  }
+  return Object.values(campaigns).map(c => ({
+    id: c.id,
+    name: c.name,
+    description: c.description,
+    owner: c.owner,
+    createdAt: c.createdAt,
+    settings: c.settings,
+    online: online[c.id] || 0,
+    myCharacters: username ? ownedCharacterSummaries(c.id, username) : undefined
+  }));
+}
+
+function pushCampaignList() {
+  io.to('lobby').emit('campaign-list', { campaigns: campaignsPayload() });
+}
+
+// Presence roster: every logged-in socket inside each campaign and where it is.
+// Broadcast per campaign room (usernames aren't secret); the GM View tool uses
+// it to list live players it can steer. Fired on login, join/leave, join-map
+// and disconnect, plus a lobby-level campaign list refresh.
+function broadcastPresence() {
+  const byCampaign = new Map();
+  for (const sock of io.sockets.sockets.values()) {
+    if (!sock.username || !sock.campaignId) continue;
+    let list = byCampaign.get(sock.campaignId);
+    if (!list) { list = []; byCampaign.set(sock.campaignId, list); }
+    list.push({
       username: sock.username,
       mapKey: sock.currentMapKey || 'world',
-      isGM: isGM(sock.username)
+      isGM: isCampaignGMFor(sock.campaignId, sock.username)
     });
   }
-  io.emit('players-updated', { players });
+  for (const [campaignId, players] of byCampaign) {
+    io.to(campRoom(campaignId)).emit('players-updated', { players });
+  }
+  pushCampaignList();
 }
 
 // Character-instance index (player right-menu "Instances" tab): every placed
@@ -817,7 +1117,7 @@ function characterInstancesFor(username) {
   for (const key of Object.keys(maps)) {
     for (const obj of Object.values(maps[key].objects || {})) {
       if (obj.type !== 'character' || !obj.characterData) continue;
-      if (!isGM(username) && obj.characterData.owner !== username) continue;
+      if (!isCampaignGM(username) && obj.characterData.owner !== username) continue;
       const meta = maps[key].meta || {};
       instances.push({
         id: obj.id,
@@ -834,11 +1134,15 @@ function characterInstancesFor(username) {
   }
   return instances;
 }
-// Live refresh: whenever a character token is added/moved/deleted anywhere,
-// every logged-in socket gets its (personalized) instance list again.
+// Live refresh: whenever a character token is added/moved/deleted anywhere in
+// the active campaign, every socket of that campaign gets its (personalized)
+// instance list again.
 function pushCharacterInstances() {
+  const campaignId = activeCampaignId();
   for (const sock of io.sockets.sockets.values()) {
-    if (sock.username) sock.emit('character-instances', { instances: characterInstancesFor(sock.username) });
+    if (sock.username && sock.campaignId === campaignId) {
+      sock.emit('character-instances', { instances: characterInstancesFor(sock.username) });
+    }
   }
 }
 
@@ -884,13 +1188,12 @@ function migrateTacticalToWorld() {
   saveMaps();
   console.log(`[MIGRATE] Folded ${legacy.length} tactical island(s) into the unified world (${WORLD_KEY}).`);
 }
-migrateTacticalToWorld();
 
 // One-time migration: the hex ladder gained a layer (Continent 60mi > Kingdom 6mi
 // > Province 1mi > Tactical). Old depth-2 tactical maps (world/q,r/q,r) become
 // Province hex layers, so their content moves to the center sub-hex (.../0,0).
 // Portal targets and pocket parent links pointing at moved keys are rewritten.
-{
+function migrateHexLayerRename() {
   const renames = {};
   for (const key of Object.keys(maps)) {
     const m = maps[key];
@@ -946,19 +1249,6 @@ function migrateUnifiedLensObjects() {
     console.log(`[MIGRATE] Folded ${moved} lens object(s) and legacy combat state into ${WORLD_KEY}.`);
   }
 }
-migrateUnifiedLensObjects();
-
-const loadedCharactersDB = loadJSON('characters.json', {}, isRecord);
-let charactersDB = {};
-for (const [storedId, rawCharacter] of Object.entries(loadedCharactersDB)) {
-  const character = sanitizeCharacterPayload(rawCharacter);
-  const id = sanitizeReference(rawCharacter && rawCharacter.id, 80) ||
-    sanitizeReference(storedId, 80);
-  if (!character || !id) continue;
-  character.id = id;
-  character.owner = boundedString(rawCharacter.owner, MAX_USERNAME_LENGTH) || 'gm';
-  charactersDB[id] = character;
-}
 
 // Custom races/classes are table-shared. Monster definitions are scoped below
 // so players do not receive every GM-authored stat block over the socket.
@@ -992,6 +1282,7 @@ app.use('/data/srd', express.static(path.join(__dirname, 'data', 'srd')));
 // doesn't reject the whole app when the repo lives under a dot-directory
 // (e.g. a git worktree inside a hidden folder).
 app.get('/', (req, res) => res.sendFile('creator.html', { root: PUBLIC_DIR }));
+app.get('/lobby', (req, res) => res.sendFile('lobby.html', { root: PUBLIC_DIR }));
 app.get('/gm', (req, res) => res.sendFile('gm.html', { root: PUBLIC_DIR }));
 app.get('/player', (req, res) => res.sendFile('player.html', { root: PUBLIC_DIR }));
 app.get('/homebrew', (req, res) => res.sendFile('homebrew.html', { root: PUBLIC_DIR }));
@@ -1015,14 +1306,14 @@ function homebrewPayloadFor(username) {
 // Helper: Check if user can access character
 function canAccessCharacter(username, character) {
   if (!username || !character) return false;
-  return isGM(username) || character.owner === username;
+  return isCampaignGM(username) || character.owner === username;
 }
 
 // Character lists are role-scoped in one place so every request path gives the
 // GM the complete roster while players only receive their own characters.
 function charactersAccessibleTo(username) {
   const characters = Object.values(charactersDB);
-  return isGM(username) ? characters : characters.filter(char =>
+  return isCampaignGM(username) ? characters : characters.filter(char =>
     canAccessCharacter(username, char)
   );
 }
@@ -1408,8 +1699,10 @@ function sanitizeHomebrewPayload(type, raw) {
 }
 
 function emitCharacterChange(event, payload, owner) {
+  const campaignId = activeCampaignId();
   for (const sock of io.sockets.sockets.values()) {
-    if (isGM(sock.username) || sock.username === owner) sock.emit(event, payload);
+    if (sock.campaignId !== campaignId) continue;
+    if (isCampaignGMFor(campaignId, sock.username) || sock.username === owner) sock.emit(event, payload);
   }
 }
 
@@ -1429,7 +1722,7 @@ function sanitizeNewObject(raw, username) {
   }
   const type = String(raw.type || '');
   if (!OBJECT_TYPES.has(type)) return { error: 'Unknown object type' };
-  if (!isGM(username) && type !== 'character') return { error: 'GM only' };
+  if (!isCampaignGM(username) && type !== 'character') return { error: 'GM only' };
   const position = sanitizePosition(raw.position);
   if (!position) return { error: 'Invalid object position' };
 
@@ -1446,7 +1739,7 @@ function sanitizeNewObject(raw, username) {
     if (!character || !canAccessCharacter(username, character)) {
       return { error: 'You can only place an accessible saved character' };
     }
-    if (!isGM(username) && playerCharacterInstanceCount(username) >= MAX_PLAYER_CHARACTER_INSTANCES) {
+    if (!isCampaignGM(username) && playerCharacterInstanceCount(username) >= MAX_PLAYER_CHARACTER_INSTANCES) {
       return { error: `Character instance limit reached (${MAX_PLAYER_CHARACTER_INSTANCES})` };
     }
     object.characterData = cloneJSON(character);
@@ -1851,13 +2144,17 @@ function normalizePersistedCombat(raw) {
   };
 }
 
-for (const [key, map] of Object.entries(maps)) {
-  if (!hasOwn(map, 'combat')) continue;
-  const normalized = normalizePersistedCombat(map.combat);
-  if (normalized) map.combat = normalized;
-  else {
-    console.warn(`[COMBAT] Dropping malformed persisted combat on ${key}.`);
-    delete map.combat;
+// Boot normalization: drop/repair malformed persisted combat on every store
+// that gets loaded (runs inside withStore for each campaign).
+function normalizePersistedCombatState() {
+  for (const [key, map] of Object.entries(maps)) {
+    if (!hasOwn(map, 'combat')) continue;
+    const normalized = normalizePersistedCombat(map.combat);
+    if (normalized) map.combat = normalized;
+    else {
+      console.warn(`[COMBAT] Dropping malformed persisted combat on ${key}.`);
+      delete map.combat;
+    }
   }
 }
 
@@ -2025,7 +2322,7 @@ const PUBLIC_COMBATANT_FIELDS = [
 // Encounter-facing status is shared at the table, but a character's sheet
 // choices and stable character id remain private to its owner and the GM.
 function projectCombatFor(username, combat) {
-  if (!combat || isGM(username) || !isRecord(combat.combatants)) return combat;
+  if (!combat || isCampaignGM(username) || !isRecord(combat.combatants)) return combat;
   const combatants = {};
   for (const [id, combatant] of Object.entries(combat.combatants)) {
     if (!isRecord(combatant) || combatant.owner === username) {
@@ -2066,7 +2363,7 @@ function emitCombatState(key) {
   discardPendingCombatLogs(state);
   for (const queued of pending) {
     if (isUnifiedKey(queued.key)) emitToUnified(null, (sock) => sock.emit('combat-log', queued.entry));
-    else io.to(queued.key).emit('combat-log', queued.entry);
+    else io.to(mapRoom(activeCampaignId(), queued.key)).emit('combat-log', queued.entry);
   }
   if (isUnifiedKey(key)) {
     emitToUnified(null, (sock) => sock.emit('combat-updated', projectCombatFor(sock.username, state)));
@@ -2273,12 +2570,96 @@ function removeCombatant(key, combat, id) {
   combat.order = combat.order.filter(x => x !== id);
 }
 
+// Load the default campaign (and run its boot migrations) before any client
+// can ask for state.
+storeFor(DEFAULT_CAMPAIGN_ID);
+
 // Socket.io connection handling
 io.on('connection', (socket) => {
   console.log(`[+] Client connected: ${socket.id}`);
 
-  // Login event
-  socket.on('login', (username) => {
+  // Campaign membership. On connect the socket sits in the lobby until a
+  // login (legacy payloads implicitly enter the default campaign) or an
+  // explicit join-campaign picks a world.
+  socket.campaignId = null;
+  socket.currentMapKey = null;
+  socket.contextMapKey = null;
+  socket.join('lobby');
+
+  // Run a campaign-scoped event with that campaign's maps/roster bound into
+  // the module-level handles. Pre-login sockets fall back to the default
+  // store so the handlers' own auth checks answer exactly as before.
+  function onCampaign(event, handler) {
+    socket.on(event, (payload) => {
+      let campaignId = socket.campaignId;
+      if (!campaignId && !socket.username) campaignId = DEFAULT_CAMPAIGN_ID;
+      if (!campaignId) { socket.emit('error', 'Not in a campaign'); return; }
+      const store = storeFor(campaignId);
+      if (!store) { socket.emit('error', 'Unknown campaign'); return; }
+      withStore(store, () => handler(payload));
+    });
+  }
+
+  function leaveCampaignRooms(campaignId) {
+    if (socket.currentMapKey) socket.leave(mapRoom(campaignId, socket.currentMapKey));
+    socket.leave(campRoom(campaignId));
+  }
+
+  // Attach this socket to a campaign: rooms, roster, instances and (for the
+  // tabletop screens) the first authoritative map-state. `screen: 'studio'`
+  // attaches without a map room — the creator only needs the roster.
+  function enterCampaign(campaignId, screen, opts = {}) {
+    const campaign = campaignById(campaignId);
+    if (!campaign) {
+      socket.emit('campaign-joined', { ok: false, id: campaignId || null, error: 'Unknown campaign' });
+      return false;
+    }
+    const previous = socket.campaignId;
+    if (previous) leaveCampaignRooms(previous);
+    if (previous !== campaignId) socket.leave('lobby');
+    socket.campaignId = campaignId;
+    socket.join(campRoom(campaignId));
+    const settings = campaign.settings;
+    const startKey = settings.mapStyle === 'region' && settings.regionKey
+      ? settings.regionKey : DEFAULT_MAP_KEY;
+    const startRoom = isTacticalPath(startKey) ? WORLD_KEY : startKey;
+    // Emitted before the snapshot so the client can adopt startKey and pass
+    // its map-state guard on the very first frame.
+    socket.emit('campaign-joined', {
+      ok: true,
+      id: campaignId,
+      name: campaign.name,
+      owner: campaign.owner,
+      settings,
+      startKey
+    });
+    const store = storeFor(campaignId);
+    if (store) {
+      withStore(store, () => {
+        if (screen === 'studio') {
+          socket.currentMapKey = null;
+          socket.contextMapKey = null;
+        } else {
+          socket.currentMapKey = startRoom;
+          socket.contextMapKey = startKey;
+          socket.join(mapRoom(campaignId, startRoom));
+        }
+        socket.emit('load-user-characters', charactersAccessibleTo(socket.username));
+        socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
+        if (opts.beforeMapState) opts.beforeMapState();
+        if (socket.currentMapKey) sendMapState(socket.currentMapKey, socket.contextMapKey);
+      });
+    }
+    broadcastPresence();
+    return true;
+  }
+
+  // Login event. Accepts a legacy plain username (implicitly enters the
+  // default campaign) or { username, campaignId?, screen? } where screen is
+  // 'gm'|'player'|'tabletop', 'studio' (creator: roster only) or 'lobby'.
+  socket.on('login', (payload) => {
+    const username = typeof payload === 'string'
+      ? payload : (isRecord(payload) ? payload.username : null);
     if (typeof username !== 'string') {
       socket.emit('error', 'Invalid username');
       return;
@@ -2298,23 +2679,211 @@ io.on('connection', (socket) => {
       isGM: isGM(socket.username)
     });
 
-    // Send accessible characters
-    socket.emit('load-user-characters', charactersAccessibleTo(socket.username));
-
-    // Seed the Instances tab (kept live by pushCharacterInstances afterwards).
-    socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
-
     // Races/classes are shared content; monster rules are GM/author scoped.
-    socket.emit('load-homebrew', homebrewPayloadFor(socket.username));
+    const sendHomebrew = () => socket.emit('load-homebrew', homebrewPayloadFor(socket.username));
 
-    // Send the first map snapshot only after the role is known. The GM gets the
-    // unfiltered world; players get fog filtering plus their owned-token pass.
-    if (socket.currentMapKey) sendMapState(socket.currentMapKey, socket.contextMapKey);
+    const options = isRecord(payload) ? payload : {};
+    if (options.screen === 'lobby') {
+      if (socket.campaignId) { leaveCampaignRooms(socket.campaignId); socket.campaignId = null; }
+      socket.join('lobby');
+      sendHomebrew();
+      pushCampaignList();
+      return;
+    }
+    const requested = boundedString(options.campaignId, 40);
+    const targetId = campaignById(requested) ? requested
+      : (campaignById(DEFAULT_CAMPAIGN_ID) ? DEFAULT_CAMPAIGN_ID : null);
+    if (!targetId) {
+      sendHomebrew();
+      socket.emit('campaign-joined', { ok: false, error: 'No campaign available' });
+      return;
+    }
+    enterCampaign(targetId, options.screen === 'studio' ? 'studio' : 'tabletop',
+      { beforeMapState: sendHomebrew });
+  });
+
+  // --- Campaign registry (lobby) ---
+  socket.on('get-campaigns', () => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    socket.emit('campaign-list', { campaigns: campaignsPayload(socket.username) });
+  });
+
+  socket.on('create-campaign', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const name = boundedText(payload && payload.name, MAX_CAMPAIGN_NAME);
+    if (!name) { socket.emit('error', 'Campaign name required'); return; }
+    if (Object.keys(campaigns).length >= MAX_CAMPAIGNS) {
+      socket.emit('error', `Campaign limit reached (${MAX_CAMPAIGNS})`);
+      return;
+    }
+    const id = crypto.randomUUID().slice(0, 8);
+    const campaign = {
+      id,
+      name,
+      description: boundedText(payload.description, MAX_CAMPAIGN_DESCRIPTION),
+      owner: socket.username,
+      createdAt: Date.now(),
+      settings: sanitizeCampaignSettings(payload.settings)
+    };
+    campaigns[id] = campaign;
+    if (!saveCampaigns()) {
+      delete campaigns[id];
+      socket.emit('error', 'Could not save the campaign');
+      return;
+    }
+    console.log(`[CAMPAIGN] "${campaign.name}" (${id}) created by ${socket.username}`);
+    socket.emit('campaign-created', { id });
+    pushCampaignList();
+  });
+
+  socket.on('join-campaign', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const id = boundedString(payload && payload.id, 40);
+    enterCampaign(id, payload && payload.screen === 'studio' ? 'studio' : 'tabletop');
+  });
+
+  socket.on('leave-campaign', () => {
+    if (socket.campaignId) leaveCampaignRooms(socket.campaignId);
+    socket.campaignId = null;
+    socket.currentMapKey = null;
+    socket.contextMapKey = null;
+    socket.join('lobby');
+    socket.emit('campaign-left', {});
     broadcastPresence();
   });
 
+  // Worldbuilding settings: an allow-listed patch applied by the campaign GM.
+  // The region key is always re-derived from the spawn, never trusted.
+  socket.on('update-campaign-settings', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const id = boundedString(payload && payload.id, 40);
+    const campaign = campaignById(id);
+    if (!campaign) { socket.emit('error', 'Unknown campaign'); return; }
+    if (!isCampaignGMFor(id, socket.username)) { socket.emit('error', 'GM only'); return; }
+    const requested = isRecord(payload.settings) ? payload.settings : {};
+    const merged = {
+      mapStyle: campaign.settings.mapStyle,
+      seed: requested.seed !== undefined ? requested.seed : campaign.settings.seed,
+      // An empty palette is "not specified", not "no biomes" — sanitize would
+      // expand it to every default anyway, so keep the existing palette explicit.
+      biomes: (Array.isArray(requested.biomes) && requested.biomes.length)
+        ? requested.biomes
+        : campaign.settings.biomes,
+      spawn: requested.spawn !== undefined ? requested.spawn : campaign.settings.spawn,
+      world: requested.world !== undefined ? requested.world : campaign.settings.world,
+      season: requested.season !== undefined ? requested.season : campaign.settings.season,
+      regionKey: campaign.settings.regionKey
+    };
+    const previous = snapshotField(campaign, 'settings');
+    campaign.settings = sanitizeCampaignSettings(merged);
+    if (requested.name != null) campaign.name = boundedText(requested.name, MAX_CAMPAIGN_NAME) || campaign.name;
+    if (requested.description != null) campaign.description = boundedText(requested.description, MAX_CAMPAIGN_DESCRIPTION);
+    if (!saveCampaigns()) {
+      restoreField(campaign, 'settings', previous);
+      socket.emit('error', 'Could not save the campaign settings');
+      return;
+    }
+    const settings = campaign.settings;
+    io.to(campRoom(id)).emit('campaign-updated', {
+      id, name: campaign.name, description: campaign.description, settings
+    });
+    pushCampaignList();
+  });
+
+  socket.on('delete-campaign', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const id = boundedString(payload && payload.id, 40);
+    if (id === DEFAULT_CAMPAIGN_ID) { socket.emit('error', 'The default campaign cannot be deleted'); return; }
+    const campaign = campaignById(id);
+    if (!campaign) { socket.emit('error', 'Unknown campaign'); return; }
+    if (!isCampaignGMFor(id, socket.username)) { socket.emit('error', 'GM only'); return; }
+    const previousRecord = snapshotField(campaigns, id);
+    delete campaigns[id];
+    if (!saveCampaigns()) {
+      restoreField(campaigns, id, previousRecord);
+      socket.emit('error', 'Could not delete the campaign');
+      return;
+    }
+    stores.delete(id);
+    const dir = campaignDir(id);
+    if (dir !== DATA_DIR) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); }
+      catch (e) { console.error(`Error removing campaign files for ${id}:`, e); }
+    }
+    console.log(`[CAMPAIGN] "${campaign.name}" (${id}) deleted by ${socket.username}`);
+    // Kick everyone inside back to the lobby.
+    let requesterKicked = false;
+    for (const sock of io.sockets.sockets.values()) {
+      if (sock.campaignId !== id) continue;
+      leaveCampaignRoomsFor(sock, id);
+      sock.campaignId = null;
+      sock.currentMapKey = null;
+      sock.contextMapKey = null;
+      sock.join('lobby');
+      sock.emit('campaign-deleted', { id });
+      if (sock === socket) requesterKicked = true;
+    }
+    // The requester may sit in the lobby (or another campaign) — ack them too.
+    if (!requesterKicked) socket.emit('campaign-deleted', { id });
+    pushCampaignList();
+  });
+
+  // Deep-copy a character from one campaign into another (the wizard's party
+  // step runs from the lobby, so the target is explicit; omitted = the acting
+  // campaign). New id, same owner, sheet and HP copied.
+  socket.on('copy-character', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const fromCampaignId = boundedString(payload && payload.fromCampaignId, 40);
+    const charId = boundedText(payload && payload.charId, 80);
+    if (!fromCampaignId || !charId) { socket.emit('error', 'Invalid copy request'); return; }
+    const toCampaignId = boundedString(payload && payload.toCampaignId, 40) || socket.campaignId;
+    if (!toCampaignId || !campaignById(toCampaignId)) {
+      socket.emit('error', 'No target campaign');
+      return;
+    }
+    const sourceStore = storeFor(fromCampaignId);
+    const sourceChar = sourceStore && ownValue(sourceStore.characters, charId);
+    if (!sourceChar) { socket.emit('error', 'Character not found'); return; }
+    const allowedSource = sourceChar.owner === socket.username ||
+      isCampaignGMFor(fromCampaignId, socket.username) ||
+      isGM(socket.username);
+    // Writing into another campaign needs authority over the target too
+    // (same-campaign copies are already the source check).
+    const allowedTarget = toCampaignId === fromCampaignId ||
+      isCampaignGMFor(toCampaignId, socket.username) ||
+      isGM(socket.username);
+    if (!allowedSource || !allowedTarget) { socket.emit('error', 'Permission denied'); return; }
+    const targetStore = storeFor(toCampaignId);
+    if (!targetStore) { socket.emit('error', 'Unknown campaign'); return; }
+    withStore(targetStore, () => {
+      const owner = sourceChar.owner;
+      const ownerCount = Object.values(charactersDB).filter(char => char.owner === owner).length;
+      if (ownerCount >= MAX_CHARACTERS_PER_OWNER) {
+        socket.emit('error', `Character limit reached (${MAX_CHARACTERS_PER_OWNER} per user)`);
+        return;
+      }
+      const copy = cloneJSON(sourceChar);
+      delete copy.id;
+      const charData = sanitizeCharacterPayload(copy);
+      if (!charData) { socket.emit('error', 'Invalid character'); return; }
+      charData.id = crypto.randomUUID();
+      charData.owner = owner;
+      const previousCharacter = snapshotField(charactersDB, charData.id);
+      charactersDB[charData.id] = charData;
+      if (!saveJSON('characters.json', charactersDB)) {
+        restoreField(charactersDB, charData.id, previousCharacter);
+        socket.emit('error', 'Could not copy the character');
+        return;
+      }
+      console.log(`[COPY] ${sourceChar.name} (${fromCampaignId} -> ${toCampaignId}) for ${socket.username}`);
+      socket.emit('character-saved-success', charData);
+      socket.emit('load-user-characters', charactersAccessibleTo(socket.username));
+      emitCharacterChange('character-updated', charData, charData.owner);
+    });
+  });
+
   // Get characters (filtered by permission)
-  socket.on('get-characters', () => {
+  onCampaign('get-characters', () => {
     if (!socket.username) {
       socket.emit('error', 'Not logged in');
       return;
@@ -2324,7 +2893,7 @@ io.on('connection', (socket) => {
   });
 
   // Save character
-  socket.on('save-character', (payload) => {
+  onCampaign('save-character', (payload) => {
     if (!socket.username) {
       socket.emit('error', 'Not logged in');
       return;
@@ -2385,7 +2954,7 @@ io.on('connection', (socket) => {
   });
 
   // Delete character
-  socket.on('delete-character', (payload) => {
+  onCampaign('delete-character', (payload) => {
     if (!socket.username) {
       socket.emit('error', 'Not logged in');
       return;
@@ -2428,7 +2997,7 @@ io.on('connection', (socket) => {
   });
 
   // Update a character's current HP (live, persisted, broadcast to everyone).
-  socket.on('update-hp', (payload) => {
+  onCampaign('update-hp', (payload) => {
     if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
     const id = isRecord(payload) ? sanitizeReference(payload.id, 80) : null;
     const char = id && ownValue(charactersDB, id);
@@ -2561,10 +3130,10 @@ io.on('connection', (socket) => {
   // Hex-tier layers are zoom lenses over the same world: they keep their own
   // room (objects/rulers/tags) but also carry the world terrain + center.
   function sendMapState(roomKey, contextKey) {
-    const m = isGM(socket.username) ? getMap(roomKey) : mapForRead(roomKey);
+    const m = isCampaignGM(socket.username) ? getMap(roomKey) : mapForRead(roomKey);
     const ctx = contextKey || roomKey;
     const extra = {};
-    const gm = isGM(socket.username);
+    const gm = isCampaignGM(socket.username);
     const unified = isUnifiedKey(roomKey);
     if (unified) {
       extra.worldCenter = provinceWorldCenter(ctx);
@@ -2586,6 +3155,12 @@ io.on('connection', (socket) => {
     objectsOut = objectsOut.map(object => projectObjectFor(socket.username, object));
     socket.emit('map-state', {
       key: ctx,
+      // The campaign stamp lets the client adopt settings/startKey even when
+      // it never saw campaign-joined (late loads, room re-joins).
+      campaign: (() => {
+        const c = activeCampaign();
+        return c ? { id: c.id, name: c.name, owner: c.owner, settings: c.settings } : null;
+      })(),
       objects: objectsOut,
       rulers: Object.values(m.rulers),
       terrain: terrainOut,
@@ -2597,29 +3172,38 @@ io.on('connection', (socket) => {
     });
   }
 
-  // Establish the default room on transport connect, but do not send a
-  // fog-filtered anonymous snapshot. Login sends the first authoritative
-  // role-aware map-state below.
-  socket.currentMapKey = DEFAULT_MAP_KEY;
-  socket.contextMapKey = DEFAULT_MAP_KEY;
-  socket.join(DEFAULT_MAP_KEY);
+  // No room is joined until a campaign is entered (login / join-campaign);
+  // transport connect parks the socket in the lobby.
 
   // Switch this socket to a different map. Tactical paths are routed to the one
   // continuous world (WORLD_KEY) so provinces share terrain; hex tiers and
   // pockets keep their own rooms.
-  socket.on('join-map', (payload) => {
+  onCampaign('join-map', (payload) => {
     if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
     const requestedKey = payload && payload.key != null ? payload.key : DEFAULT_MAP_KEY;
     const reqKey = knownMapKey(requestedKey);
     if (!reqKey) { socket.emit('error', 'Unknown map'); return; }
     const roomKey = isTacticalPath(reqKey) ? WORLD_KEY : reqKey;
+    // Region-style campaigns expose one province lens (plus the pockets and
+    // tactical store beneath it); continent/kingdom/other-province lenses and
+    // legacy stores are out of bounds.
+    const settings = campaignSettings();
+    if (settings.mapStyle === 'region' && settings.regionKey) {
+      const underRegion = reqKey === settings.regionKey ||
+        reqKey.startsWith(settings.regionKey + '/');
+      const allowed = underRegion ||
+        reqKey.startsWith('pocket/') ||
+        reqKey === WORLD_KEY;
+      if (!allowed) { socket.emit('error', 'Unknown map'); return; }
+    }
+    const campaignId = activeCampaignId();
     if (socket.currentMapKey && socket.currentMapKey !== roomKey) {
-      socket.leave(socket.currentMapKey);
+      socket.leave(mapRoom(campaignId, socket.currentMapKey));
     }
     socket.currentMapKey = roomKey;
     socket.contextMapKey = reqKey;
-    socket.join(roomKey);
-    if (isGM(socket.username) || hasOwn(maps, roomKey)) getMap(roomKey);
+    socket.join(mapRoom(campaignId, roomKey));
+    if (isCampaignGM(socket.username) || hasOwn(maps, roomKey)) getMap(roomKey);
     if (roomKey === WORLD_KEY) ensureWorld();
     console.log(`[MAP] ${socket.username || socket.id} -> ${reqKey}${roomKey !== reqKey ? ' [' + roomKey + ']' : ''}`);
     sendMapState(roomKey, reqKey);
@@ -2628,13 +3212,18 @@ io.on('connection', (socket) => {
 
   // Tag a hex on the current (hex-layer) map with a biome; null clears the tag.
   // Tags color the hex on the GM screen and seed new tactical maps beneath it.
-  const BIOME_KEYS = ['plains', 'forest', 'mountains', 'desert', 'swamp', 'coast'];
-  socket.on('update-hex', (payload) => {
-    if (!isGM(socket.username)) { socket.emit('error', 'GM only'); return; }
+  onCampaign('update-hex', (payload) => {
+    if (!isCampaignGM(socket.username)) { socket.emit('error', 'GM only'); return; }
     const q = Math.round(Number(payload && payload.q)), r = Math.round(Number(payload && payload.r));
     if (!isFinite(q) || !isFinite(r) || Math.abs(q) > 64 || Math.abs(r) > 64) return;
     const biome = payload.biome == null ? null : String(payload.biome);
     if (biome !== null && !BIOME_KEYS.includes(biome)) return;
+    // The campaign's palette (settings.biomes) decides which tags the GM may
+    // paint; unknown keys stay silently ignored, out-of-palette ones answer.
+    if (biome !== null && !(campaignSettings().biomes || BIOME_KEYS).includes(biome)) {
+      socket.emit('error', 'Biome is not in this campaign palette');
+      return;
+    }
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
     if (!isWorldHexPath(key)) return; // tags live on hex-tier layers only
     const map = getMap(key);
@@ -2650,13 +3239,13 @@ io.on('connection', (socket) => {
     }
     // Global broadcast (not just the layer's room): painted biomes override
     // terrain generation, so every client rendering the world needs the change.
-    io.emit('hex-updated', { key, hex: hk, biome });
+    io.to(campRoom(activeCampaignId())).emit('hex-updated', { key, hex: hk, biome });
   });
 
   // Create a pocket map (dungeon/cave/room): its own map key outside the hex tree,
   // entered through portal objects. Ships with an exit portal back to the parent.
-  socket.on('create-pocket-map', (payload) => {
-    if (!isGM(socket.username)) { socket.emit('error', 'GM only'); return; }
+  onCampaign('create-pocket-map', (payload) => {
+    if (!isCampaignGM(socket.username)) { socket.emit('error', 'GM only'); return; }
     const name = String((payload && payload.name) || 'Pocket').trim().slice(0, 40) || 'Pocket';
     const clampDim = (v) => Math.max(4, Math.min(256, Math.floor(Number(v) || 24)));
     const width = clampDim(payload && payload.width);
@@ -2683,7 +3272,7 @@ io.on('connection', (socket) => {
     socket.emit('pocket-created', { key, name });
   });
 
-  socket.on('add-object', (data) => {
+  onCampaign('add-object', (data) => {
     if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
@@ -2774,10 +3363,10 @@ io.on('connection', (socket) => {
   // Atomic whole-building operations. The client names a stable building and
   // supplies the exact source ids it observed; the server re-derives that set,
   // transforms every piece, persists once, then sends one canonical result.
-  socket.on('structure-batch', (payload) => {
+  onCampaign('structure-batch', (payload) => {
     const requestId = sanitizeStructureIdentity(payload && payload.requestId);
     const reject = (reason) => socket.emit('structure-batch-rejected', { requestId, reason });
-    if (!isGM(socket.username)) { reject('GM only'); return; }
+    if (!isCampaignGM(socket.username)) { reject('GM only'); return; }
     if (!isRecord(payload) || serializedBytes(payload) > MAX_OBJECT_BYTES) {
       reject('Invalid or oversized building edit');
       return;
@@ -2814,7 +3403,7 @@ io.on('connection', (socket) => {
       const send = (recipient) => {
         let created = result.created;
         let updated = result.updated;
-        if (key === WORLD_KEY && !isGM(recipient.username)) {
+        if (key === WORLD_KEY && !isCampaignGM(recipient.username)) {
           created = created.filter(object => objectVisibleTo(recipient.username, object));
           updated = updated.filter(entry => {
             const object = updatedObjects.get(entry.id) || ownValue(map.objects, entry.id);
@@ -3033,7 +3622,7 @@ io.on('connection', (socket) => {
 
   // Player right-menu "Instances" tab: on-demand refresh of this user's placed
   // character tokens across all maps (GM: everyone's), with location + spawner.
-  socket.on('get-character-instances', () => {
+  onCampaign('get-character-instances', () => {
     if (!socket.username) return;
     socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
   });
@@ -3042,7 +3631,7 @@ io.on('connection', (socket) => {
   // this accepts the token's map key so it can remove a token without first
   // navigating to that map. Players may remove only their own tokens; the GM
   // may remove any character token.
-  socket.on('delete-character-instance', (payload) => {
+  onCampaign('delete-character-instance', (payload) => {
     if (!socket.username || !payload || !payload.id) return;
     const requestedKey = knownMapKey(payload.mapKey != null ? payload.mapKey : (socket.currentMapKey || DEFAULT_MAP_KEY));
     if (!requestedKey) return;
@@ -3051,7 +3640,7 @@ io.on('connection', (socket) => {
     if (!map) return;
     const id = boundedText(payload.id, 80);
     const obj = ownValue(map.objects, id);
-    if (!obj || obj.type !== 'character' || (!isGM(socket.username) && !ownsObject(socket.username, obj))) {
+    if (!obj || obj.type !== 'character' || (!isCampaignGM(socket.username) && !ownsObject(socket.username, obj))) {
       return;
     }
     const previousCombat = snapshotField(map, 'combat');
@@ -3081,15 +3670,15 @@ io.on('connection', (socket) => {
     }
     const event = { id };
     if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', event));
-    else io.to(key).emit('object-deleted', event);
+    else io.to(mapRoom(activeCampaignId(), key)).emit('object-deleted', event);
     pushCharacterInstances();
     if (combatChanged) emitCombatState(key);
   });
 
   // Context-inspector presentation edits plus the build tool's bounded,
   // per-cell wall-opening and floor/roof tile geometry patches.
-  socket.on('update-object', (payload) => {
-    if (!isGM(socket.username)) return;
+  onCampaign('update-object', (payload) => {
+    if (!isCampaignGM(socket.username)) return;
     if (!isRecord(payload) || serializedBytes(payload) > MAX_OBJECT_BYTES) return;
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
@@ -3150,12 +3739,12 @@ io.on('connection', (socket) => {
         if (objectVisibleTo(sock.username, obj)) sock.emit('object-updated', event);
       });
     } else {
-      io.to(key).emit('object-updated', event);
+      io.to(mapRoom(activeCampaignId(), key)).emit('object-updated', event);
     }
     if (combatant) emitCombatState(key);
   });
 
-  socket.on('move-object', (data) => {
+  onCampaign('move-object', (data) => {
     if (!socket.username || !isRecord(data)) return;
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
@@ -3166,7 +3755,7 @@ io.on('connection', (socket) => {
     const event = { id, position };
     // Players manipulate only their own character instances. The GM remains
     // authoritative for generic tokens, creatures, props and structures.
-    if (!isGM(socket.username) && !ownsObject(socket.username, controlledObject)) {
+    if (!isCampaignGM(socket.username) && !ownsObject(socket.username, controlledObject)) {
       // Correct a visible object's optimistic client move, but do not disclose
       // the current position of an object that fog has removed from this player.
       if (!isUnifiedKey(key) || objectVisibleTo(socket.username, controlledObject)) {
@@ -3193,7 +3782,7 @@ io.on('connection', (socket) => {
     const c = combat && combat.started && ownValue(combat.combatants, id);
     if (c) {
       const old = sanitizePosition(controlledObject.position) || { x: 0, y: 0, z: 0 };
-      const gm = isGM(socket.username);
+      const gm = isCampaignGM(socket.username);
       const isTheirTurn = combat.activeId === id && c.owner === socket.username;
       if (!gm && (!isTheirTurn || hasEffect(c, 'down'))) {
         socket.emit('object-moved', { id, position: old });
@@ -3233,13 +3822,13 @@ io.on('connection', (socket) => {
       return;
     }
     if (!isUnifiedKey(key)) {
-      socket.to(key).emit('object-moved', event);
+      socket.to(mapRoom(activeCampaignId(), key)).emit('object-moved', event);
     } else {
       // Fog of war: an object crossing the reveal boundary pops into (full
       // object) or out of (delete) existence for players — hidden objects
       // simply don't exist on their side.
       emitToUnified(socket, (sock) => {
-        if (isGM(sock.username) || ownsObject(sock.username, obj)) {
+        if (isCampaignGM(sock.username) || ownsObject(sock.username, obj)) {
           sock.emit('object-moved', event);
           return;
         }
@@ -3256,13 +3845,13 @@ io.on('connection', (socket) => {
     if (c) emitCombatState(key);
   });
 
-  socket.on('delete-object', (data) => {
+  onCampaign('delete-object', (data) => {
     if (!socket.username) return;
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
     const id = data && data.id ? boundedText(data.id, 80) : '';
     const obj = id ? ownValue(map.objects, id) : null;
-    if (obj && (isGM(socket.username) || ownsObject(socket.username, obj))) {
+    if (obj && (isCampaignGM(socket.username) || ownsObject(socket.username, obj))) {
       const wasCharacter = obj.type === 'character';
       const previousCombat = snapshotField(map, 'combat');
       let combatChanged = false;
@@ -3291,7 +3880,7 @@ io.on('connection', (socket) => {
       }
       const event = { id };
       if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', event));
-      else io.to(key).emit('object-deleted', event);
+      else io.to(mapRoom(activeCampaignId(), key)).emit('object-deleted', event);
       if (wasCharacter) pushCharacterInstances();
       if (combatChanged) emitCombatState(key);
     }
@@ -3342,14 +3931,14 @@ io.on('connection', (socket) => {
     combatDeny('Could not save the combat update');
     return false;
   }
-  function canControl(c) { return isGM(socket.username) || (!!c.owner && c.owner === socket.username); }
+  function canControl(c) { return isCampaignGM(socket.username) || (!!c.owner && c.owner === socket.username); }
   const clampInt = (v, min, max, dflt) => {
     v = Number(v);
     return isFinite(v) ? Math.max(min, Math.min(max, Math.round(v))) : dflt;
   };
 
-  socket.on('combat-start', () => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-start', () => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
     if (map.combat) return combatDeny('Combat already running');
@@ -3366,8 +3955,8 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-end', () => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-end', () => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const map = getMap(key);
     if (!map.combat) return;
@@ -3380,7 +3969,7 @@ io.on('connection', (socket) => {
   // numbers. Strictly first write wins — later edits go through
   // combat-update-combatant. (Accepting repeats would echo forever: every
   // broadcast triggers the clients' auto-fill pass again.)
-  socket.on('combat-set-stats', (payload) => {
+  onCampaign('combat-set-stats', (payload) => {
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && ownValue(combat.combatants, payload.combatantId);
@@ -3435,13 +4024,13 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-roll-initiative', (payload) => {
+  onCampaign('combat-roll-initiative', (payload) => {
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && ownValue(combat.combatants, payload.combatantId);
     if (!c) return;
     if (!canControl(c)) return combatDeny('Not your combatant');
-    if (c.initiative != null && !isGM(socket.username)) return combatDeny('Initiative already rolled');
+    if (c.initiative != null && !isCampaignGM(socket.username)) return combatDeny('Initiative already rolled');
     const previousCombat = snapshotField(getMap(key), 'combat');
     const die = rollDie(20);
     c.initiative = die + c.initMod;
@@ -3458,8 +4047,8 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-begin', () => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-begin', () => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || combat.started) return;
@@ -3469,7 +4058,7 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-action', (payload) => {
+  onCampaign('combat-action', (payload) => {
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || !combat.started || !payload) return;
@@ -3584,19 +4173,19 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat, stagedCharacterHP);
   });
 
-  socket.on('combat-end-turn', () => {
+  onCampaign('combat-end-turn', () => {
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || !combat.started) return;
     const active = combat.activeId && ownValue(combat.combatants, combat.activeId);
-    if (!isGM(socket.username) && !(active && active.owner === socket.username)) return combatDeny('Not your turn');
+    if (!isCampaignGM(socket.username) && !(active && active.owner === socket.username)) return combatDeny('Not your turn');
     const previousCombat = snapshotField(getMap(key), 'combat');
     advanceTurn(key, combat);
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-set-turn', (payload) => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-set-turn', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && combat.started && payload && ownValue(combat.combatants, payload.combatantId);
@@ -3606,8 +4195,8 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-update-combatant', (payload) => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-update-combatant', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && ownValue(combat.combatants, payload.combatantId);
@@ -3640,8 +4229,8 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat, stagedCharacterHP);
   });
 
-  socket.on('combat-set-order', (payload) => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-set-order', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     if (!combat || !payload || !Array.isArray(payload.order)) return;
@@ -3653,8 +4242,8 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-remove-combatant', (payload) => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-remove-combatant', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && ownValue(combat.combatants, payload.combatantId);
@@ -3665,8 +4254,8 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-add-combatant', (payload) => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-add-combatant', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const map = getMap(key);
@@ -3681,8 +4270,8 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('combat-effect', (payload) => {
-    if (!isGM(socket.username)) return combatDeny('GM only');
+  onCampaign('combat-effect', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
     const c = combat && payload && ownValue(combat.combatants, payload.combatantId);
@@ -3694,13 +4283,13 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
-  socket.on('add-ruler', (data) => {
+  onCampaign('add-ruler', (data) => {
     if (!socket.username || !isRecord(data) || !Array.isArray(data.points)) return;
     if (data.points.length < 2 || data.points.length > MAX_RULER_POINTS || serializedBytes(data) > 64 * 1024) return;
     const points = data.points.map(sanitizePosition);
     if (points.some(point => !point)) return;
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
-    const map = ownValue(maps, key) || (isGM(socket.username) ? getMap(key) : null);
+    const map = ownValue(maps, key) || (isCampaignGM(socket.username) ? getMap(key) : null);
     if (!map) return;
     if (Object.keys(map.rulers).length >= MAX_RULERS) return;
     const id = crypto.randomUUID();
@@ -3716,13 +4305,13 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Could not save the ruler');
       return;
     }
-    io.to(key).emit('ruler-added', newRuler);
+    io.to(mapRoom(activeCampaignId(), key)).emit('ruler-added', newRuler);
   });
 
-  socket.on('clear-rulers', () => {
+  onCampaign('clear-rulers', () => {
     if (!socket.username) return;
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
-    const map = ownValue(maps, key) || (isGM(socket.username) ? getMap(key) : null);
+    const map = ownValue(maps, key) || (isCampaignGM(socket.username) ? getMap(key) : null);
     if (!map) return;
     const previousRulers = snapshotField(map, 'rulers');
     map.rulers = {};
@@ -3731,7 +4320,7 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Could not clear the rulers');
       return;
     }
-    io.to(key).emit('rulers-cleared');
+    io.to(mapRoom(activeCampaignId(), key)).emit('rulers-cleared');
   });
 
   // Terrain edits (GM-authored), chunked format v2:
@@ -3748,10 +4337,10 @@ io.on('connection', (socket) => {
   // only then publishes the canonical result. Pocket clears use the same
   // request/ack path, so the requesting GM never has to optimistically clear a
   // local half of the state while another save is still outstanding.
-  socket.on('reset-terrain', (payload) => {
+  onCampaign('reset-terrain', (payload) => {
     const requestId = sanitizeStructureIdentity(payload && payload.requestId);
     const reject = (reason) => socket.emit('terrain-reset-rejected', { requestId, reason });
-    if (!isGM(socket.username)) { reject('GM only'); return; }
+    if (!isCampaignGM(socket.username)) { reject('GM only'); return; }
     if (!isRecord(payload) || serializedBytes(payload) > 1024 || !requestId) {
       reject('Invalid terrain reset request');
       return;
@@ -3830,11 +4419,11 @@ io.on('connection', (socket) => {
     }
 
     if (key !== WORLD_KEY) {
-      io.to(key).emit('terrain-reset-applied', result);
+      io.to(mapRoom(activeCampaignId(), key)).emit('terrain-reset-applied', result);
       return;
     }
     emitToUnified(null, (recipient) => {
-      if (isGM(recipient.username)) {
+      if (isCampaignGM(recipient.username)) {
         recipient.emit('terrain-reset-applied', result);
         return;
       }
@@ -3846,8 +4435,8 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('update-terrain', (data) => {
-    if (!isGM(socket.username)) { socket.emit('error', 'GM only'); return; }
+  onCampaign('update-terrain', (data) => {
+    if (!isCampaignGM(socket.username)) { socket.emit('error', 'GM only'); return; }
     if (!isRecord(data) || serializedBytes(data) > MAX_TERRAIN_UPDATE_BYTES) return;
     const key = socket.currentMapKey || DEFAULT_MAP_KEY;
     const accepted = {};
@@ -3916,12 +4505,12 @@ io.on('connection', (socket) => {
       return;
     }
     if (!isUnifiedKey(key)) {
-      socket.to(key).emit('terrain-updated', accepted);
+      socket.to(mapRoom(activeCampaignId(), key)).emit('terrain-updated', accepted);
       return;
     }
     // Fog of war: players only receive chunk edits inside revealed hexes.
     emitToRoom(key, socket, (sock) => {
-      if (isGM(sock.username)) { sock.emit('terrain-updated', accepted); return; }
+      if (isCampaignGM(sock.username)) { sock.emit('terrain-updated', accepted); return; }
       const out = { ...accepted };
       if (out.chunks) {
         const chunks = {};
@@ -3938,8 +4527,8 @@ io.on('connection', (socket) => {
   // --- Fog of war (U4): the GM reveals/hides fog hexes; players get the mask
   // plus the content that just became visible (or lose what was hidden).
   const FOG_HEX_RE = /^-?\d+,-?\d+$/;
-  socket.on('update-fog', (payload) => {
-    if (!isGM(socket.username)) return;
+  onCampaign('update-fog', (payload) => {
+    if (!isCampaignGM(socket.username)) return;
     if (!payload || !Array.isArray(payload.hexes)) return;
     const revealed = !!payload.revealed;
     const world = ensureWorld();
@@ -3967,7 +4556,7 @@ io.on('connection', (socket) => {
     }
     // Global broadcast (like hex-updated): every client rendering the unified
     // world keeps the mask, whichever room it currently sits in.
-    io.emit('fog-updated', { hexes: changed, revealed });
+    io.to(campRoom(activeCampaignId())).emit('fog-updated', { hexes: changed, revealed });
     // Content delta for players in unified rooms: what the toggle uncovered
     // (full objects + terrain chunks) or swallowed (object deletes; the client
     // drops its own chunks for hidden hexes — it knows the mask).
@@ -3984,7 +4573,7 @@ io.on('connection', (socket) => {
       }
     }
     for (const sock of io.sockets.sockets.values()) {
-      if (!sock.username || isGM(sock.username) || !isUnifiedKey(sock.currentMapKey || '')) continue;
+      if (!sock.username || isCampaignGM(sock.username) || !isUnifiedKey(sock.currentMapKey || '')) continue;
       const m = getMap(WORLD_KEY);
       for (const obj of Object.values(m.objects)) {
         if (ownsObject(sock.username, obj)) continue; // visible either way
@@ -4011,7 +4600,7 @@ io.on('connection', (socket) => {
     const gmKey = socket.currentMapKey || DEFAULT_MAP_KEY;
     const unified = isUnifiedKey(gmKey);
     for (const sock of io.sockets.sockets.values()) {
-      if (sock === socket || !sock.username || isGM(sock.username)) continue;
+      if (sock === socket || !sock.username || isCampaignGM(sock.username)) continue;
       // Relocating commands (Bring to my view) carry a mapKey and reach the
       // target wherever they are; framing/release commands only touch players
       // already sharing the GM's space.
@@ -4023,8 +4612,8 @@ io.on('connection', (socket) => {
       fn(sock);
     }
   }
-  socket.on('camera-command', (payload) => {
-    if (!isGM(socket.username)) return;
+  onCampaign('camera-command', (payload) => {
+    if (!isCampaignGM(socket.username)) return;
     const pose = payload && payload.pose;
     if (!pose || !finitePoint(pose.pos) || !finitePoint(pose.look)) return;
     // A relocating command carries the GM's mapKey: the player joins that map
@@ -4039,8 +4628,8 @@ io.on('connection', (socket) => {
     forEachCameraTarget(String(payload.target || 'all').toLowerCase(), !!mapKey,
       (sock) => sock.emit('camera-goto', msg));
   });
-  socket.on('camera-release', (payload) => {
-    if (!isGM(socket.username)) return;
+  onCampaign('camera-release', (payload) => {
+    if (!isCampaignGM(socket.username)) return;
     forEachCameraTarget(String((payload && payload.target) || 'all').toLowerCase(), true,
       (sock) => sock.emit('camera-unlock'));
   });

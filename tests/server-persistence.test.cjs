@@ -138,6 +138,22 @@ async function waitForSocketEvent(session, eventName, timeoutMs = 5000) {
   throw new Error(`timed out waiting for socket event ${eventName}`);
 }
 
+// Same as waitForSocketEvent but collects several events across batches â€”
+// the server often queues them together, so draining for one would consume
+// the others.
+async function waitForSocketEvents(session, eventNames, timeoutMs = 5000) {
+  const remaining = new Set(eventNames);
+  const seen = {};
+  const deadline = Date.now() + timeoutMs;
+  while (remaining.size && Date.now() < deadline) {
+    for (const [name, payload] of socketEvents(await pollPackets(session))) {
+      if (remaining.has(name)) { seen[name] = payload; remaining.delete(name); }
+    }
+  }
+  if (remaining.size) throw new Error(`timed out waiting for socket events ${[...remaining].join(', ')}`);
+  return seen;
+}
+
 async function waitFor(predicate, description) {
   const deadline = Date.now() + 5000;
   let lastError;
@@ -617,7 +633,13 @@ test('non-owners receive only public character render data on maps and reveals',
   await waitForSocketEvent(gm, 'object-added');
   await emitEvent(gm, 'update-fog', { hexes: ['0,0'], revealed: true });
   assertPublicProjection(await waitForSocketEvent(player, 'object-added'));
-  const anonymousEvents = socketEvents(await pollPackets(anonymous));
+  // Nothing is globally broadcast any more (fog/objects stay campaign-scoped),
+  // so an anonymous socket that hears nothing within a settle window is the
+  // proof that no object/terrain data leaked to it.
+  const anonymousEvents = socketEvents(await Promise.race([
+    pollPackets(anonymous).catch(() => []),
+    new Promise((resolve) => setTimeout(() => resolve([]), 1500))
+  ]));
   assert.equal(anonymousEvents.some(([name]) =>
     name === 'object-added' || name === 'terrain-updated'
   ), false);
@@ -2177,4 +2199,284 @@ test('Ape model variants canonicalize, project publicly, and survive restart', {
   assert.equal(publicHighland.monsterData.index, 'ape');
   assert.equal(Object.hasOwn(publicHighland.monsterData, 'hit_points'), false);
   assert.equal(Object.hasOwn(publicHighland.monsterData, 'actions'), false);
+});
+
+// Silence probe: nothing may arrive for a socket, or only unrelated chatter —
+// never the named events. Used for cross-campaign leak checks.
+async function assertNoEvents(session, forbidden, ms = 1200) {
+  const packets = await Promise.race([
+    pollPackets(session).catch(() => []),
+    new Promise((resolve) => setTimeout(() => resolve([]), ms))
+  ]);
+  const seen = socketEvents(packets).map(([name]) => name);
+  for (const name of forbidden) {
+    assert.equal(seen.includes(name), false, `${name} must not reach this socket`);
+  }
+}
+
+test('campaigns isolate rooms, rosters, and settings authority', { timeout: 30000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-campaigns-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const player = await connectPolling(instance.port);
+
+  // A legacy plain-string login auto-joins the default campaign and gets the
+  // campaign stamp before the first snapshot.
+  await emitEvent(gm, 'login', 'GM');
+  const gmBoot = await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  assert.equal(gmBoot['campaign-joined'].ok, true);
+  assert.equal(gmBoot['campaign-joined'].id, 'default');
+  assert.equal(gmBoot['map-state'].campaign.id, 'default');
+
+  await emitEvent(player, 'login', { username: 'alice' });
+  const aliceBoot = await waitForSocketEvents(player, ['campaign-joined', 'map-state']);
+  assert.equal(aliceBoot['campaign-joined'].id, 'default');
+  assert.equal(aliceBoot['map-state'].campaign.id, 'default');
+
+  // The GM creates a region-style campaign; the server derives the region key.
+  await emitEvent(gm, 'create-campaign', {
+    name: 'Second Age',
+    settings: { seed: 42, mapStyle: 'region', spawn: { x: 6400, z: -12800 } }
+  });
+  const created = await waitForSocketEvent(gm, 'campaign-created');
+  assert.match(created.id, /^[0-9a-f]{8}$/);
+
+  await emitEvent(gm, 'join-campaign', { id: created.id });
+  const gmJoin = await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  const settings = gmJoin['campaign-joined'].settings;
+  assert.equal(gmJoin['campaign-joined'].id, created.id);
+  assert.equal(gmJoin['campaign-joined'].name, 'Second Age');
+  assert.equal(gmJoin['campaign-joined'].owner, 'GM');
+  assert.equal(settings.seed, 42);
+  assert.equal(settings.mapStyle, 'region');
+  assert.match(settings.regionKey, /^world\/-?\d+,-?\d+\/-?\d+,-?\d+$/);
+  // World shape defaults to the original generator when not specified.
+  assert.deepEqual(settings.world, {
+    ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0, home: null
+  });
+  assert.equal(settings.season, 'summer');
+  assert.equal(gmJoin['campaign-joined'].startKey, settings.regionKey);
+  assert.equal(gmJoin['map-state'].campaign.id, created.id);
+  assert.equal(gmJoin['map-state'].key, settings.regionKey);
+
+  // Region campaigns confine navigation to the region lens.
+  await emitEvent(gm, 'join-map', { key: 'world/0,0' });
+  assert.equal(await waitForSocketEvent(gm, 'error'), 'Unknown map');
+  await emitEvent(gm, 'join-map', { key: settings.regionKey });
+  assert.equal((await waitForSocketEvent(gm, 'map-state')).key, settings.regionKey);
+  const tactical = `${settings.regionKey}/0,0`;
+  await emitEvent(gm, 'join-map', { key: tactical });
+  assert.equal((await waitForSocketEvent(gm, 'map-state')).key, tactical);
+
+  // An object dropped in campaign B never reaches the default campaign.
+  await emitEvent(gm, 'join-campaign', { id: created.id });
+  await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  await emitEvent(gm, 'add-object', {
+    type: 'token', position: { x: 2, y: 0, z: -2 }, label: 'B-only'
+  });
+  const gmToken = await waitForSocketEvent(gm, 'object-added');
+  assert.equal(gmToken.label, 'B-only');
+  await assertNoEvents(player, ['object-added', 'map-state']);
+
+  // Players cannot rewrite another campaign's worldbuilding.
+  await emitEvent(player, 'update-campaign-settings', { id: created.id, settings: { seed: 999 } });
+  assert.equal(await waitForSocketEvent(player, 'error'), 'GM only');
+
+  // The owner updates the spawn; the region key is re-derived server-side.
+  const previousRegionKey = settings.regionKey;
+  await emitEvent(gm, 'update-campaign-settings', {
+    id: created.id, settings: {
+      seed: 43, spawn: { x: 126720, z: 0 },
+      world: { ocean: 999, landSize: 150, wetness: -30, temperature: -70, zones: 60, home: { x: 5, z: 6 } },
+      season: 'winter'
+    }
+  });
+  const updated = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.equal(updated.settings.seed, 43);
+  // World shape is clamped server-side; the region lens is the kingdom hex
+  // around the spawn (two continent hexes east of the origin).
+  assert.deepEqual(updated.settings.world, {
+    ocean: 90, landSize: 150, wetness: -30, temperature: -70, latitude: 0, rugged: 0, zones: 60, home: { x: 5, z: 6 }
+  });
+  assert.equal(updated.settings.season, 'winter');
+  assert.equal(updated.settings.regionKey, 'world/2,0/0,0');
+  assert.notEqual(updated.settings.regionKey, previousRegionKey);
+  assert.match(updated.settings.regionKey, /^world\/-?\d+,-?\d+\/-?\d+,-?\d+\/?$/);
+
+  // Rosters are per campaign: this character lives only in B.
+  await emitEvent(gm, 'save-character', { charData: {
+    name: 'Region Bard', race: 'human', background: 'entertainer',
+    classes: [{ class: 'bard', level: 3 }],
+    abilities: { str: 10, dex: 14, con: 12, int: 10, wis: 10, cha: 16 },
+    hp: { current: 24 }
+  } });
+  const bard = await waitForSocketEvent(gm, 'character-saved-success');
+  assert.equal(bard.name, 'Region Bard');
+
+  // Back in default the roster must not carry B's characters.
+  await emitEvent(gm, 'join-campaign', { id: 'default' });
+  const backHome = await waitForSocketEvents(gm, ['campaign-joined', 'load-user-characters', 'map-state']);
+  assert.equal(backHome['map-state'].campaign.id, 'default');
+  assert.equal(
+    backHome['load-user-characters'].some((char) => char.name === 'Region Bard'),
+    false
+  );
+  assert.equal(
+    backHome['load-user-characters'].some((char) => char.id === bard.id),
+    false
+  );
+
+  // Non-owners may not delete the campaign.
+  await emitEvent(player, 'delete-campaign', { id: created.id });
+  assert.equal(await waitForSocketEvent(player, 'error'), 'GM only');
+
+  // Rejoining B confirms its roster persisted there, then the owner deletes
+  // it and is kicked back to the lobby.
+  await emitEvent(gm, 'join-campaign', { id: created.id });
+  const rejoin = await waitForSocketEvents(gm, ['campaign-joined', 'load-user-characters', 'map-state']);
+  assert.equal(rejoin['map-state'].campaign.id, created.id);
+  assert.equal(
+    rejoin['load-user-characters'].some((char) => char.name === 'Region Bard'),
+    true
+  );
+
+  await emitEvent(gm, 'delete-campaign', { id: created.id });
+  const kicked = await waitForSocketEvents(gm, ['campaign-deleted']);
+  assert.equal(kicked['campaign-deleted'].id, created.id);
+  assert.equal(fs.existsSync(path.join(saveDir, 'campaigns', created.id)), false);
+
+  await emitEvent(gm, 'get-campaigns', null);
+  const listed = await waitForSocketEvent(gm, 'campaign-list');
+  assert.deepEqual(listed.campaigns.map((campaign) => campaign.id), ['default']);
+
+  // The default campaign still holds its own roster (the region bard did not
+  // leak in on either side).
+  await emitEvent(gm, 'join-campaign', { id: 'default' });
+  const finalHome = await waitForSocketEvents(gm, ['campaign-joined', 'load-user-characters', 'map-state']);
+  assert.equal(
+    finalHome['load-user-characters'].some((char) => char.name === 'Region Bard'),
+    false
+  );
+});
+
+
+test('copy-character moves sheets across campaigns from the lobby', { timeout: 30000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-copy-char-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  await emitEvent(gm, 'login', 'GM');
+  await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+
+  // A character in the default campaign, HP included.
+  await emitEvent(gm, 'save-character', { charData: {
+    name: 'Copy Rogue', race: 'elf', background: 'criminal',
+    classes: [{ class: 'rogue', level: 4 }],
+    abilities: { str: 10, dex: 16, con: 12, int: 12, wis: 10, cha: 10 },
+    hp: { current: 7 }
+  } });
+  const rogue = await waitForSocketEvent(gm, 'character-saved-success');
+  assert.equal(rogue.hp.current, 7);
+
+  await emitEvent(gm, 'create-campaign', { name: 'Copy Cats' });
+  const created = await waitForSocketEvent(gm, 'campaign-created');
+
+  // A lobby socket (the wizard's vantage point) copies into the new campaign.
+  const gmLobby = await connectPolling(instance.port);
+  await emitEvent(gmLobby, 'login', { username: 'GM', screen: 'lobby' });
+  await waitForSocketEvents(gmLobby, ['login-success', 'campaign-list']);
+
+  // No explicit target and no joined campaign: refused.
+  await emitEvent(gmLobby, 'copy-character', { fromCampaignId: 'default', charId: rogue.id });
+  assert.equal(await waitForSocketEvent(gmLobby, 'error'), 'No target campaign');
+
+  await emitEvent(gmLobby, 'copy-character', {
+    fromCampaignId: 'default', charId: rogue.id, toCampaignId: created.id
+  });
+  const copied = await waitForSocketEvent(gmLobby, 'character-saved-success');
+  assert.notEqual(copied.id, rogue.id);
+  assert.equal(copied.name, 'Copy Rogue');
+  assert.equal(copied.owner, 'GM');
+  assert.equal(copied.hp.current, 7);
+  assert.equal(copied.classes[0].level, 4);
+
+  // Another user without authority over the source may not copy.
+  const bob = await connectPolling(instance.port);
+  await emitEvent(bob, 'login', { username: 'bob', screen: 'lobby' });
+  await waitForSocketEvents(bob, ['login-success', 'campaign-list']);
+  await emitEvent(bob, 'copy-character', {
+    fromCampaignId: 'default', charId: rogue.id, toCampaignId: created.id
+  });
+  assert.equal(await waitForSocketEvent(bob, 'error'), 'Permission denied');
+
+  // The copy lives only in the new campaign; the original stays in default.
+  await emitEvent(gm, 'join-campaign', { id: created.id });
+  const inCopy = await waitForSocketEvents(gm, ['campaign-joined', 'load-user-characters']);
+  assert.equal(inCopy['load-user-characters'].some((char) => char.id === copied.id), true);
+  assert.equal(inCopy['load-user-characters'].some((char) => char.id === rogue.id), false);
+
+  await emitEvent(gm, 'join-campaign', { id: 'default' });
+  const inDefault = await waitForSocketEvents(gm, ['campaign-joined', 'load-user-characters']);
+  assert.equal(inDefault['load-user-characters'].some((char) => char.id === rogue.id), true);
+  assert.equal(inDefault['load-user-characters'].some((char) => char.id === copied.id), false);
+});
+
+
+test('campaign palette gates hex painting and survives an empty request', { timeout: 30000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-hex-palette-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  await emitEvent(gm, 'login', 'GM');
+  await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+
+  // Narrow the default campaign's palette to a single biome.
+  await emitEvent(gm, 'update-campaign-settings', {
+    id: 'default', settings: { biomes: ['plains'] }
+  });
+  const narrowed = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.deepEqual(narrowed.settings.biomes, ['plains']);
+
+  // An empty biome list means "not specified": the palette must not reset.
+  await emitEvent(gm, 'update-campaign-settings', {
+    id: 'default', settings: { biomes: [] }
+  });
+  const stillPlains = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.deepEqual(stillPlains.settings.biomes, ['plains']);
+
+  // Hex tags only exist on hex-tier layers.
+  await emitEvent(gm, 'join-map', { key: 'world/0,0' });
+  const hexState = await waitForSocketEvents(gm, ['map-state']);
+  assert.equal(hexState['map-state'].key, 'world/0,0');
+
+  await emitEvent(gm, 'update-hex', { q: 0, r: 0, biome: 'desert' });
+  assert.equal(await waitForSocketEvent(gm, 'error'), 'Biome is not in this campaign palette');
+
+  await emitEvent(gm, 'update-hex', { q: 0, r: 0, biome: 'plains' });
+  const painted = await waitForSocketEvent(gm, 'hex-updated');
+  assert.equal(painted.key, 'world/0,0');
+  assert.equal(painted.hex, '0,0');
+  assert.equal(painted.biome, 'plains');
 });

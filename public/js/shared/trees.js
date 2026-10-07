@@ -103,6 +103,9 @@ const OAK = 0, PINE = 1, BUSH = 2, POPLAR = 3;
 
 function speciesFor(biome, r) {
     if (biome === 'mountains') return r < 0.9 ? PINE : BUSH;
+    if (biome === 'taiga') return r < 0.92 ? PINE : BUSH;            // conifer country
+    if (biome === 'tundra') return BUSH;                             // stunted scrub
+    if (biome === 'swamp') return r < 0.5 ? OAK : r < 0.85 ? BUSH : POPLAR;
     if (biome === 'forest') return r < 0.42 ? OAK : r < 0.78 ? PINE : r < 0.9 ? BUSH : POPLAR;
     return r < 0.58 ? OAK : r < 0.85 ? BUSH : POPLAR;              // plains / coast
 }
@@ -142,8 +145,10 @@ export class Trees {
                     for (let kz = k0z; kz < k1z; kz++) {
                         const wx = kx * STEP, wz = kz * STEP;
                         const biome = terrain.genBiomeAt(wx, wz);
-                        const dens = biome === 'forest' ? 0.55 : biome === 'mountains' ? 0.2
-                                   : biome === 'coast' ? 0.14 : biome === 'plains' ? 0.1 : 0; // desert: none
+                        const dens = biome === 'forest' ? 0.55 : biome === 'taiga' ? 0.45
+                                   : biome === 'swamp' ? 0.3 : biome === 'mountains' ? 0.2
+                                   : biome === 'coast' ? 0.14 : biome === 'plains' ? 0.1
+                                   : biome === 'tundra' ? 0.03 : 0;            // desert / snowfield: none
                         if (dens === 0 || hash2(wx * 0.7, wz * 0.9) > dens) continue;
                         const m = terrain.dominantMaterial(wx, wz);
                         if (m === 2 || m === 3) continue;                    // no trees on rock/sand

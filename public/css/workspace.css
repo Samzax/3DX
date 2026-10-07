@@ -92,6 +92,44 @@
 .workspace-top-button:hover { background: rgba(255,255,255,.12); border-color: var(--workspace-line); }
 .workspace-top-button[aria-expanded="true"],
 .workspace-top-button.is-active { color: #fff; background: rgba(59,130,246,.3); border-color: rgba(112,167,255,.4); }
+
+/* Campaign switcher (top bar): name + dropdown (settings GM-only, lobby). */
+.campaign-switcher { position: relative; display: inline-flex; }
+#btn-campaign-switcher { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#campaign-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 210px;
+  background: var(--panel-bg, rgba(18,18,23,.96));
+  border: 1px solid var(--panel-border, #3d3d48);
+  border-radius: 10px;
+  box-shadow: 0 12px 34px rgba(0,0,0,.5);
+  padding: 6px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+#campaign-menu-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  padding: 7px 10px 5px;
+  overflow-wrap: anywhere;
+}
+#campaign-menu button {
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text, #f0f0f0);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+#campaign-menu button:hover { background: rgba(255,255,255,.1); }
 .workspace-help-button { width: 31px; padding: 0; font-weight: 850; }
 .workspace-top-button.is-your-turn {
   color: #10151d;

@@ -46,10 +46,18 @@
           <div class="mods" id="mods" style="margin-top:6px;"></div>
           <button class="btn btn-accent" id="save-btn" style="width:100%; margin-top:12px;">Save character</button>
           <button class="btn btn-ghost btn-sm" id="new-btn" style="width:100%; margin-top:6px;">New / clear</button>
+          <div style="display:flex; gap:6px; margin-top:6px;">
+            <button class="btn btn-ghost btn-sm" id="export-btn" style="flex:1;" title="Download this character as JSON">Export</button>
+            <button class="btn btn-ghost btn-sm" id="import-btn" style="flex:1;" title="Load a character JSON (saved as a new character)">Import</button>
+          </div>
+          <input type="file" id="import-file" accept=".json,application/json" class="hidden">
           <div class="msg" id="msg"></div>
         </div>
         <div class="panel" style="padding:12px;">
-          <h3 style="font-size:14px; margin-bottom:8px;">Saved characters</h3>
+          <h3 style="font-size:14px; margin-bottom:8px;">Campaign roster</h3>
+          <select id="campaign-select" style="width:100%; background:#1a1a1f; color:#e8e8ee; border:1px solid var(--panel-border,#333); border-radius:6px; padding:6px; font-size:13px;"></select>
+          <div id="campaign-select-note" style="font-size:11px; color:var(--muted); margin-top:4px;"></div>
+          <h3 style="font-size:14px; margin:12px 0 8px;">Saved characters</h3>
           <div class="saved" id="saved"><p style="color:var(--muted); font-size:13px;">None yet.</p></div>
         </div>
       </div>

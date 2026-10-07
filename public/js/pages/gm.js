@@ -4,6 +4,8 @@
 
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
+import { createWorldSettings } from '../shared/worldsettings.js';
+import { createWorldMap } from '../shared/worldmap.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
@@ -32,6 +34,11 @@ import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { createTabletopWorkspace } from '../shared/workspace.js';
 import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData } from '../shared/object-ui.js';
 import { AuthenticatedMapReload } from '../shared/sync-state.js';
+import { readCampaignId } from '../shared/campaigns.js';
+
+// Tabletop screens always enter through the lobby with ?campaign=<id>.
+const campaignId = readCampaignId();
+if (!campaignId) location.replace('/lobby');
 
 const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -158,6 +165,10 @@ let currentMapKey = 'world';
 let currentMapMeta = null;          // pocket metadata ({kind,name,width,height,parentKey})
 let terrainIsUnified = false;       // is the loaded terrain the shared continuous world?
 const mapReload = new AuthenticatedMapReload();
+// Campaign context (campaign-joined + map-state stamps). Module scope: the
+// breadcrumb, region gating and camera landing all read it.
+let campaignContext = null;
+let pendingSpawnLanding = false;    // first unified landing after (re)join uses settings.spawn
 let hexGridGroup = null;
 let boundsRect = null;              // pocket boundary rectangle
 let pendingPortal = null;           // portal placement waiting for 'pocket-created'
@@ -169,8 +180,15 @@ const BIOMES = {
     mountains: { color: 0x8d8d93, label: 'Mountains' },
     desert:    { color: 0xd7b26a, label: 'Desert' },
     swamp:     { color: 0x4e5f3a, label: 'Swamp' },
-    coast:     { color: 0x4aa3c7, label: 'Coast' }
+    coast:     { color: 0x4aa3c7, label: 'Coast' },
+    tundra:    { color: 0xa9b08a, label: 'Tundra' },
+    taiga:     { color: 0x3f6b5a, label: 'Taiga' },
+    snow:      { color: 0xe6edf3, label: 'Snowfield' }
 };
+// World section state: the shared controls + preview map, and whether the GM
+// has staged world edits that are not applied yet.
+let campaignWorld = null, campaignMap = null;
+let campaignWorldDirty = false, campaignWorldSaved = null;
 let currentBiome = 'plains';
 let hexTags = {};                   // "q,r" -> { biome } for the current map
 let hexTree = {};                   // all layers' tags (feeds the terrain generator)
@@ -319,7 +337,22 @@ function measurePath(points) {
 const emitRuler = (data) => socket.emit('add-ruler', data);
 
 // --- Drill-down navigation ---
+// Region-style campaigns expose one province lens: navigation may go deeper
+// (or into pockets) but never above the region root. The server enforces the
+// same rule; this just keeps the breadcrumb honest.
+function regionRoot() {
+    const settings = campaignContext && campaignContext.settings;
+    return settings && settings.mapStyle === 'region' && settings.regionKey
+        ? settings.regionKey : null;
+}
+function outsideRegion(key) {
+    const root = regionRoot();
+    if (!root) return false;
+    if (key.startsWith('pocket/')) return false;
+    return !(key === root || key.startsWith(root + '/'));
+}
 function enterMap(key) {
+    if (outsideRegion(key)) return;
     restoreBuildCutaway();
     currentMapKey = key;
     // World position of this layer's hex field (hex lenses are world-scale).
@@ -382,7 +415,9 @@ function goUp() {
         return;
     }
     if (mapDepth(currentMapKey) <= 0) return;
-    enterMap(currentMapKey.split('/').slice(0, -1).join('/'));
+    const upKey = currentMapKey.split('/').slice(0, -1).join('/');
+    if (outsideRegion(upKey)) return; // region campaigns stop at their root
+    enterMap(upKey);
 }
 function descendInto(q, r) {
     if (mapDepth(currentMapKey) >= TACTICAL_DEPTH) return; // tactical is the leaf
@@ -407,8 +442,8 @@ function updateBreadcrumb() {
     for (let i = 1; i < segs.length; i++) labels.push(layerName(i) + ' (' + segs[i] + ')');
     const depth = mapDepth(currentMapKey);
     const scale = HEX_SCALES[depth] ? `each hex = ${HEX_SCALES[depth].miles} mi` : 'each square = 5 ft';
-    bc.textContent = labels.join('  ›  ') + '   —   ' + scale;
-    if (up) up.disabled = (depth === 0);
+    bc.textContent = labels.join('  \u2192  ') + '   \u2014   ' + scale;
+    if (up) up.disabled = depth === 0 || currentMapKey === regionRoot();
 }
 function onDoubleClick(event) {
     // Double-click finishes a river draft.
@@ -475,8 +510,8 @@ function initSocket() {
         clearPendingStructureBatches(
             'Connection restored; building state will be reloaded.', true);
         console.log('Conectado ao servidor com ID:', socket.id);
-        // Auto-login as GM on this single connection
-        socket.emit('login', 'GM');
+        // Auto-login as GM into this screen's campaign.
+        socket.emit('login', { username: 'GM', campaignId, screen: 'gm' });
         sessionStorage.setItem('vtt_username', 'GM');
     });
 
@@ -489,6 +524,48 @@ function initSocket() {
         // an older/legacy pre-login path must not satisfy reconnect recovery.
         if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
     });
+
+    // Campaign context arrives before the first map-state (server order).
+    // Adopt startKey only on first entry — on reconnect login-success already
+    // rejoins the map the GM was actually looking at.
+    function applyCampaignContext(campaign) {
+        const previousPalette = campaignContext && campaignContext.settings
+            ? campaignContext.settings.biomes : null;
+        campaignContext = campaign;
+        const settings = campaign.settings || {};
+        // Seed + world shape drive local generation — set before the first
+        // reset, and regenerate live ground only when they actually changed.
+        if (terrain && terrain.applyWorldSettings(settings) && terrainIsUnified) terrain.regenerate();
+        const paletteChanged = previousPalette &&
+            JSON.stringify(previousPalette) !== JSON.stringify(settings.biomes);
+        renderBiomeSwatches();
+        if (paletteChanged) updateHintBar();
+        fillCampaignPanel();
+    }
+
+    socket.on('campaign-joined', (campaign) => {
+        if (!campaign || campaign.ok === false) {
+            console.warn('Campaign join failed:', campaign && campaign.error);
+            location.replace('/lobby');
+            return;
+        }
+        applyCampaignContext(campaign);
+        pendingSpawnLanding = true;
+        if (currentMapKey === 'world' && campaign.startKey) currentMapKey = campaign.startKey;
+        if (workspace) workspace.setCampaign(
+            { id: campaign.id, name: campaign.name, owner: campaign.owner },
+            { canManage: true, onSettings: () => workspace.showPanel('campaign-panel') });
+    });
+
+    socket.on('campaign-updated', (campaign) => {
+        if (!campaign || !campaignContext || campaign.id !== campaignContext.id) return;
+        applyCampaignContext({ ...campaignContext, ...campaign });
+        if (workspace) workspace.setCampaign(
+            { id: campaign.id, name: campaign.name, owner: campaignContext.owner },
+            { canManage: true, onSettings: () => workspace.showPanel('campaign-panel') });
+    });
+
+    socket.on('campaign-deleted', () => { location.replace('/lobby'); });
 
     socket.on('load-user-characters', (characters) => {
         allCharacters = Array.isArray(characters) ? characters : [];
@@ -520,6 +597,23 @@ function initSocket() {
     socket.on('map-state', (data) => {
         // Only a matching post-login state may satisfy reconnect recovery.
         if (!mapReload.acceptsMapState(data.key, currentMapKey)) return;
+        // Campaign stamp: adopt settings/name even if campaign-joined was
+        // missed (late loads, room re-joins). Refill only on real changes so
+        // the settings panel never clobbers mid-edit.
+        if (data.campaign) {
+            const unchanged = campaignContext && campaignContext.id === data.campaign.id &&
+                campaignContext.name === data.campaign.name &&
+                JSON.stringify(campaignContext.settings || null) ===
+                    JSON.stringify(data.campaign.settings || null);
+            if (!unchanged) {
+                const first = !campaignContext;
+                applyCampaignContext({ startKey: data.key, ...data.campaign });
+                if (first) pendingSpawnLanding = true;
+            }
+            if (workspace) workspace.setCampaign(
+                { id: data.campaign.id, name: data.campaign.name, owner: data.campaign.owner },
+                { canManage: true, onSettings: () => workspace.showPanel('campaign-panel') });
+        }
         clearPendingStructureBatches(
             'Building state reloaded from the server. Retry any unfinished edit.');
         if (selectedObject) deselectObject();
@@ -562,7 +656,14 @@ function initSocket() {
                 // One continuous world (tactical leaves AND hex-tier lenses):
                 // load it once, then just fly the camera between layers (no
                 // reload flash, no re-applying 1000s of chunks every hop).
-                if (mapReload.shouldReplaceUnified(terrainIsUnified)) {
+                const replacesUnified = mapReload.shouldReplaceUnified(terrainIsUnified);
+                // Campaign seed + world shape drive local generation. A fresh
+                // reset picks them up automatically; without a reset, regenerate
+                // generated ground only (GM-edited chunks stay).
+                if (data.campaign && data.campaign.settings &&
+                    terrain.applyWorldSettings(data.campaign.settings) &&
+                    !replacesUnified && terrainIsUnified) terrain.regenerate();
+                if (replacesUnified) {
                     terrain.generatorOn = true;
                     terrain.reset();
                     undoStack.length = 0; redoStack.length = 0;
@@ -575,19 +676,32 @@ function initSocket() {
                 // The Fog tool may have been selected before this state landed.
                 if (fogOverlay) fogOverlay.setVisible(fogActive());
                 if (data.worldCenter) {
-                    const c = data.worldCenter;   // fly to this layer's spot in the world
+                    // First entry after a (re)join lands on the campaign spawn;
+                    // later navigations center on the layer as before.
+                    const spawn = pendingSpawnLanding && campaignContext && campaignContext.settings
+                        && campaignContext.settings.spawn;
+                    const c = spawn || data.worldCenter;
                     // Land with the floating origin already under it, so scene
                     // coords start near zero however far out the world we are.
                     const o = setWorldOriginAt({ terrain, worldGroup }, c.x, c.z);
                     const sx = c.x - o.x, sz = c.z - o.z;
                     controls.target.set(sx, 0, sz);
+                    pendingSpawnLanding = false;
                     const depth = mapDepth(currentMapKey);
+                    const regionDepth = regionRoot() ? Math.max(0, regionRoot().split('/').length - 1) : null;
                     if (depth >= TACTICAL_DEPTH) {
-                        camera.position.set(sx + 20, 30, sz + 20);
+                        // Land ON the ground: highlands can stand taller than the
+                        // default camera height, which would start it inside a peak.
+                        const gy = Math.max(0, terrain.sampleHeight(c.x, c.z));
+                        controls.target.y = gy;
+                        camera.position.set(sx + 20, gy + 30, sz + 20);
                         // The unified world renders at every altitude (LOD rings +
                         // ocean), so don't wall the zoom-out at tactical height —
-                        // let it climb to the continent-lens ceiling.
-                        controls.maxDistance = 811008;
+                        // let it climb to the continent-lens ceiling. Single-region
+                        // campaigns stop at the region lens instead.
+                        controls.maxDistance = regionDepth != null
+                            ? TIER_WIDTH[regionDepth] * 8 * 1.6
+                            : 811008;
                     } else {
                         // Hex lens: high enough that the layer's field fills the view.
                         const alt = TIER_WIDTH[depth] * 8;
@@ -771,6 +885,7 @@ function init() {
             'selection-panel': { title: 'Selection', kicker: 'Selected object' },
             'terrain-panel': { title: 'Terrain', kicker: 'Author' },
             'biome-panel': { title: 'Biomes', kicker: 'World' },
+            'campaign-panel': { title: 'Campaign', kicker: 'World' },
             'build-panel': { title: 'Build', kicker: 'Author' },
             'fog-panel': { title: 'Fog of War', kicker: 'Visibility' },
             'view-panel': { title: 'Direct Players', kicker: 'Session' }
@@ -1069,10 +1184,15 @@ function init() {
     });
     renderViewPlayers(); // empty-roster placeholder until players-updated lands
 
-    // Biome palette (hex layers).
-    document.querySelectorAll('#biome-panel .biome-swatch').forEach(btn => {
-        btn.addEventListener('click', () => setBiome(btn.dataset.biome));
+    // Biome palette (hex layers). Delegated so palette re-renders (campaign
+    // settings changes) keep working without re-binding.
+    const biomePanel = document.getElementById('biome-panel');
+    if (biomePanel) biomePanel.addEventListener('click', (event) => {
+        const btn = event.target.closest('.biome-swatch');
+        if (btn) setBiome(btn.dataset.biome);
     });
+    renderBiomeSwatches();
+    wireCampaignPanel();
 
     const upBtn = document.getElementById('btn-up');
     if (upBtn) upBtn.addEventListener('click', goUp);
@@ -3494,9 +3614,181 @@ function updateTerrainPanel() {
     updateHintBar();
 }
 function setBiome(key) {
+    const palette = allowedBiomes();
+    if (!palette.includes(key)) key = palette[0] || 'plains';
     currentBiome = key;
     document.querySelectorAll('#biome-panel .biome-swatch').forEach(b =>
         b.classList.toggle('active', b.dataset.biome === key));
+}
+
+// Campaign palette: only biomes the campaign allows can be painted (the server
+// enforces the same list on update-hex).
+function allowedBiomes() {
+    const settings = campaignContext && campaignContext.settings;
+    const palette = settings && Array.isArray(settings.biomes) ? settings.biomes : null;
+    return (palette && palette.length) ? palette.filter(key => BIOMES[key]) : Object.keys(BIOMES);
+}
+
+function renderBiomeSwatches() {
+    const container = document.getElementById('biome-swatches');
+    if (!container) return;
+    const palette = allowedBiomes();
+    container.innerHTML = palette.map(key => {
+        const entry = BIOMES[key];
+        const hex = '#' + entry.color.toString(16).padStart(6, '0');
+        const active = key === currentBiome ? ' active' : '';
+        return `<button class="biome-swatch${active}" data-biome="${key}" style="--swatch:${hex}" title="${entry.label}">${entry.label}</button>`;
+    }).join('');
+    if (!palette.includes(currentBiome)) setBiome(palette[0] || 'plains');
+}
+
+// --- Campaign settings panel (worldbuilding: name/seed/palette/spawn) ---
+
+function renderCampaignBiomeChecks() {
+    const box = document.getElementById('campaign-biomes');
+    if (!box) return;
+    const selected = allowedBiomes();
+    box.innerHTML = Object.keys(BIOMES).map(key =>
+        `<label class="tp-check"><input type="checkbox" value="${key}" ${selected.includes(key) ? 'checked' : ''}> ${BIOMES[key].label}</label>`
+    ).join('');
+}
+
+function fillCampaignPanel() {
+    if (!campaignContext) return;
+    const settings = campaignContext.settings || {};
+    // Never clobber a field the GM is typing in.
+    const setVal = (id, value) => {
+        const el = document.getElementById(id);
+        if (el && document.activeElement !== el) el.value = value;
+    };
+    setVal('campaign-name-input', campaignContext.name || '');
+    setVal('campaign-desc-input', campaignContext.description || '');
+    const spawn = settings.spawn || { x: 0, z: 0 };
+    setVal('campaign-spawn-x', String(spawn.x));
+    setVal('campaign-spawn-z', String(spawn.z));
+    // Staged world edits survive unrelated updates (a season change, a rename):
+    // the controls only reload when the saved seed/world actually changed.
+    const savedWorld = JSON.stringify([settings.seed, settings.world || null]);
+    if (campaignWorld && (savedWorld !== campaignWorldSaved || !campaignWorldDirty)) {
+        campaignWorldSaved = savedWorld;
+        campaignWorldDirty = false;
+        setVal('campaign-seed-input', String(settings.seed != null ? settings.seed : 1337));
+        campaignWorld.set(settings.world);
+        const homeEl = document.getElementById('campaign-homeland');
+        if (homeEl) homeEl.checked = !!(settings.world && settings.world.home);
+        const worldStatus = document.getElementById('campaign-world-status');
+        if (worldStatus && worldStatus.textContent === 'Rebuilding\u2026') worldStatus.textContent = 'World rebuilt.';
+    }
+    document.querySelectorAll('#campaign-seasons [data-season]').forEach(b =>
+        b.classList.toggle('active', b.dataset.season === (settings.season || 'summer')));
+    if (campaignMap) campaignMap.render();
+    renderCampaignBiomeChecks();
+    const styleEl = document.getElementById('campaign-style-label');
+    if (styleEl) styleEl.textContent = settings.mapStyle === 'region'
+        ? 'Single region' : 'Grand campaign (DMG ladder)';
+    const status = document.getElementById('campaign-status');
+    if (status && status.textContent === 'Saving\u2026') status.textContent = 'Saved.';
+}
+
+function stagedSpawn() {
+    return {
+        x: Math.round(Number(document.getElementById('campaign-spawn-x').value) || 0),
+        z: Math.round(Number(document.getElementById('campaign-spawn-z').value) || 0)
+    };
+}
+// The staged { seed, world }. The homeland stays where it was anchored unless
+// the GM stages a new spawn here: a rebuild then re-anchors it under that spawn
+// (saving a moved spawn on its own never drags the landmass along).
+function stagedWorldSettings() {
+    const saved = (campaignContext && campaignContext.settings) || {};
+    const seed = Math.floor(Number(document.getElementById('campaign-seed-input').value));
+    const spawn = stagedSpawn(), savedSpawn = saved.spawn || { x: 0, z: 0 };
+    const spawnMoved = spawn.x !== savedSpawn.x || spawn.z !== savedSpawn.z;
+    const savedHome = (saved.world || {}).home;
+    return {
+        seed: Number.isFinite(seed) && seed >= 0 ? seed : 1337,
+        world: {
+            ...campaignWorld.get(),
+            home: document.getElementById('campaign-homeland').checked
+                ? ((savedHome && !spawnMoved) ? savedHome : spawn)
+                : null
+        },
+        season: saved.season
+    };
+}
+
+function wireCampaignPanel() {
+    const markWorldDirty = () => { campaignWorldDirty = true; campaignMap.render(); };
+    campaignWorld = createWorldSettings(document.getElementById('campaign-world'), { onChange: markWorldDirty });
+    campaignMap = createWorldMap(document.getElementById('campaign-map'), {
+        zoomEl: document.getElementById('campaign-map-zoom'),
+        getSettings: stagedWorldSettings,
+        getSpawn: stagedSpawn,
+        onPick: (point) => {
+            document.getElementById('campaign-spawn-x').value = String(point.x);
+            document.getElementById('campaign-spawn-z').value = String(point.z);
+            const status = document.getElementById('campaign-status');
+            if (status) status.textContent = 'Spawn staged \u2014 Save or Rebuild applies it.';
+        }
+    });
+    ['campaign-seed-input', 'campaign-homeland'].forEach(id =>
+        document.getElementById(id).addEventListener('input', markWorldDirty));
+    ['campaign-spawn-x', 'campaign-spawn-z'].forEach(id =>
+        document.getElementById(id).addEventListener('input', () => campaignMap.render()));
+
+    const save = document.getElementById('campaign-save');
+    if (save) save.addEventListener('click', () => {
+        if (!socket || !campaignContext) return;
+        const biomes = [...document.querySelectorAll('#campaign-biomes input:checked')]
+            .map(input => input.value);
+        socket.emit('update-campaign-settings', {
+            id: campaignContext.id,
+            name: document.getElementById('campaign-name-input').value.trim(),
+            description: document.getElementById('campaign-desc-input').value.trim(),
+            settings: { biomes, spawn: stagedSpawn() }
+        });
+        const status = document.getElementById('campaign-status');
+        if (status) status.textContent = 'Saving\u2026';
+    });
+    const apply = document.getElementById('campaign-world-apply');
+    if (apply) apply.addEventListener('click', () => {
+        if (!socket || !campaignContext) return;
+        const staged = stagedWorldSettings();
+        campaignWorldDirty = false;
+        socket.emit('update-campaign-settings', {
+            id: campaignContext.id,
+            // The spawn rides along: the preview map shows the world AND
+            // the staged spawn, so rebuilding must not snap it back.
+            settings: { seed: staged.seed, world: staged.world, spawn: stagedSpawn() }
+        });
+        const status = document.getElementById('campaign-world-status');
+        if (status) status.textContent = 'Rebuilding\u2026';
+    });
+    const seasons = document.getElementById('campaign-seasons');
+    if (seasons) seasons.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-season]');
+        if (!button || !socket || !campaignContext) return;
+        socket.emit('update-campaign-settings', {
+            id: campaignContext.id, settings: { season: button.dataset.season }
+        });
+    });
+    const roll = document.getElementById('campaign-seed-roll');
+    if (roll) roll.addEventListener('click', () => {
+        const input = document.getElementById('campaign-seed-input');
+        if (input) input.value = String(Math.floor(Math.random() * 2147483647));
+        markWorldDirty();
+    });
+    const here = document.getElementById('campaign-spawn-here');
+    if (here) here.addEventListener('click', () => {
+        const p = sceneToWorld(controls.target);
+        const xEl = document.getElementById('campaign-spawn-x');
+        const zEl = document.getElementById('campaign-spawn-z');
+        if (xEl) xEl.value = String(Math.round(p.x));
+        if (zEl) zEl.value = String(Math.round(p.z));
+        if (campaignMap) campaignMap.render();
+        const status = document.getElementById('campaign-status');
+        if (status) status.textContent = 'Spawn staged \u2014 Save or Rebuild applies it.';
+    });
 }
 function setBrushMode(mode) {
     if (mode !== 'river') cancelRiverDraft();
