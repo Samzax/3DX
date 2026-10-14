@@ -70,6 +70,11 @@ export function createTabletopScene(container) {
         MIDDLE: THREE.MOUSE.PAN,
         RIGHT: THREE.MOUSE.ROTATE
     };
+    // Ctrl+left drag pans too. OrbitControls turns a modified ROTATE into a pan, so
+    // the left button is handed to it only for that press (capture: runs first).
+    renderer.domElement.addEventListener('pointerdown', (e) => {
+        controls.mouseButtons.LEFT = isCameraClick(e) ? THREE.MOUSE.ROTATE : null;
+    }, true);
 
     // Stylized fill: a hemisphere light (warm sky from above, warm earth bounce
     // from below) instead of flat white ambient. This is what turns flat Lambert
@@ -79,7 +84,9 @@ export function createTabletopScene(container) {
     // over-lighting saturates colors toward white/yellow.
     scene.add(new THREE.HemisphereLight(0xcfe3f2, 0x8f7f5f, 0.55));
     const dirLight = new THREE.DirectionalLight(0xffe8c4, 0.9);
-    dirLight.position.set(10, 20, 5);
+    dirLight.position.set(10, 20, 5);          // re-aimed every frame by updateWorldFollow
+    dirLight.shadow.camera.near = 1;
+    dirLight.shadow.camera.far = 900;
     dirLight.castShadow = true;
     dirLight.shadow.camera.top = 500;
     dirLight.shadow.camera.bottom = -500;
@@ -105,6 +112,22 @@ export function createTabletopScene(container) {
     plane.rotation.x = -Math.PI / 2;
     plane.receiveShadow = true;
     plane.name = "tabletop";
+    // The plane is not drawn inside uGroundCut (see setGroundCut): terrain dug
+    // below the implicit floor shows there instead of being covered up.
+    const groundCut = { value: new THREE.Vector4(0, 0, 0, 0) };
+    plane.userData.groundCut = groundCut;
+    plane.material.onBeforeCompile = (shader) => {
+        shader.uniforms.uGroundCut = groundCut;
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nvarying vec2 vCutPos;')
+            .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCutPos = (modelMatrix * vec4(position, 1.0)).xz;');
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', '#include <common>\nuniform vec4 uGroundCut;\nvarying vec2 vCutPos;')
+            .replace('#include <clipping_planes_fragment>', [
+                '#include <clipping_planes_fragment>',
+                'if (vCutPos.x > uGroundCut.x && vCutPos.y > uGroundCut.y && vCutPos.x < uGroundCut.z && vCutPos.y < uGroundCut.w) discard;'
+            ].join('\n'));
+    };
     scene.add(plane);
 
     // Kept for API compat but hidden: the grid is now drawn in the terrain
@@ -234,24 +257,48 @@ export class CameraFly {
 // actually fills the world with ground; the plane is just a thin backdrop under
 // it. Call each frame from onTick. `grid.userData.wanted === false` keeps the
 // grid off for layers that shouldn't show a square grid.
-export function updateWorldFollow({ plane, grid, dirLight }, center) {
+export function updateWorldFollow({ plane, grid, dirLight, camera }, center) {
     const sx = Math.round(center.x), sz = Math.round(center.z);
     if (grid && grid.visible) grid.position.set(sx, grid.position.y, sz);
     // Move the plane even while invisible: it stays the raycast anchor for
     // ground picks when the LOD rings are the visible ground.
     if (plane) plane.position.set(sx, plane.position.y, sz);
     if (dirLight) {
-        dirLight.position.set(center.x + 10, 20, center.z + 5);
-        dirLight.target.position.set(center.x, 0, center.z);
+        dirLight.position.set(center.x + SUN_DIR.x * SUN_DIST, center.y + SUN_DIR.y * SUN_DIST, center.z + SUN_DIR.z * SUN_DIST);
+        dirLight.target.position.set(center.x, center.y, center.z);
+        if (camera) fitSunShadow(dirLight, camera.position.distanceTo(center));
     }
 }
 
-export function startRenderLoop({ renderer, scene, camera, controls, onTick }) {
+// Sun direction (toward the light): ~40 degrees up, so slopes and props throw
+// readable relief instead of the flat look of a near-overhead sun. This is the
+// default; atmosphere.js swings it through the day (and onto the moon at night).
+export const SUN_DIR =new THREE.Vector3(0.62, 0.64, 0.45).normalize();
+const SUN_DIST = 320;
+// The shadow map is a fixed 2048px, so its frustum follows the zoom: a tight
+// box up close (crisp contact shadows under tokens/trees) widening in steps as
+// the camera pulls back. normalBias is in world units and must shrink with the
+// texel, or close-up shadows detach from whatever casts them.
+const SHADOW_STEPS = [60, 120, 240, 500];
+function fitSunShadow(dirLight, dist) {
+    const want = dist * 2.4;
+    let half = SHADOW_STEPS[SHADOW_STEPS.length - 1];
+    for (const s of SHADOW_STEPS) { if (want <= s) { half = s; break; } }
+    const cam = dirLight.shadow.camera;
+    if (cam.right === half) return;
+    cam.left = -half; cam.right = half; cam.top = half; cam.bottom = -half;
+    cam.updateProjectionMatrix();
+    dirLight.shadow.normalBias = Math.max(0.12, 1.5 * half / 500);
+}
+
+// `render` replaces the plain scene draw (the token-vision pass: visionfx.js).
+export function startRenderLoop({ renderer, scene, camera, controls, onTick, render }) {
     (function animate() {
         requestAnimationFrame(animate);
         if (onTick) onTick();
         controls.update();
-        renderer.render(scene, camera);
+        if (render) render();
+        else renderer.render(scene, camera);
     })();
 }
 
@@ -263,6 +310,17 @@ export function styleGroundForTerrain(plane, on) {
     plane.visible = true;
     plane.position.y = on ? -0.02 : 0;
     plane.material.color.set(on ? 0x4a7a3a : 0x4a4a4a);
+}
+
+// Stop drawing the backdrop plane inside a scene-space rectangle
+// ({ x0, z0, x1, z1 }, or null for none). Pocket maps pass the bounds of their
+// dug terrain, so pits and chasms cut below the floor are visible; the plane
+// keeps its place as the ground-pick target either way.
+export function setGroundCut(plane, rect) {
+    const cut = plane && plane.userData.groundCut;
+    if (!cut) return;
+    if (rect) cut.value.set(rect.x0, rect.z0, rect.x1, rect.z1);
+    else cut.value.set(0, 0, 0, 0);
 }
 
 // Boundary rectangle for finite pocket maps (dungeons/rooms), W x H cells centered
@@ -278,6 +336,11 @@ export function buildBoundsRect(widthCells, heightCells, color = 0xffdd55) {
         new THREE.BufferGeometry().setFromPoints(pts),
         new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 })
     );
+}
+
+// Ctrl+left is a camera pan, not a tool click: pages skip it in their pointer handlers.
+export function isCameraClick(event) {
+    return event.button === 0 && (event.ctrlKey || event.metaKey) && event.pointerType !== 'touch';
 }
 
 // Right-drag orbits the camera, so a contextmenu event only counts as a deliberate

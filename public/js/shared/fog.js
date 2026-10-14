@@ -70,11 +70,61 @@ export class FogMask {
 // Geometry is built LOCAL to a quantized center (float32 stays precise) and
 // only rebuilt when the mask, the center bucket, or the zoom bucket changes.
 export class FogOverlay {
-    constructor(parent, { color = 0x11141b, opacity = 0.93 } = {}) {
-        this.material = new THREE.MeshBasicMaterial({
-            color, transparent: true, opacity,
-            side: THREE.DoubleSide, depthWrite: false
+    constructor(parent, { color = 0x11141b, opacity = 0.93, altitude = FOG_ALTITUDE } = {}) {
+        this.altitude = altitude;
+        // Unexplored country lies under a slow-drifting cloud bank rather than
+        // a flat dark sheet: world-anchored noise in two scales (so it reads
+        // from token height and from survey altitude alike) shades the base
+        // color from deep shadow to pale mist. Opacity only wavers a little —
+        // the sheet must keep hiding what the server withholds.
+        this.material = new THREE.ShaderMaterial({
+            transparent: true, side: THREE.DoubleSide, depthWrite: false, fog: true,
+            uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+                uColor: { value: new THREE.Color(color) },
+                uOpacity: { value: opacity },
+                uCenter: { value: new THREE.Vector2() },
+                uTime: { value: 0 }
+            }]),
+            vertexShader: [
+                '#include <common>',
+                '#include <fog_pars_vertex>',
+                'uniform vec2 uCenter;',
+                'varying vec2 vFogWorld;',
+                'void main() {',
+                '  vFogWorld = position.xz + uCenter;',
+                '  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);',
+                '  gl_Position = projectionMatrix * mvPosition;',
+                '  #include <fog_vertex>',
+                '}'
+            ].join('\n'),
+            fragmentShader: [
+                '#include <common>',
+                '#include <fog_pars_fragment>',
+                'uniform vec3 uColor;',
+                'uniform float uOpacity;',
+                'uniform float uTime;',
+                'varying vec2 vFogWorld;',
+                'float fHash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }',
+                'float fNoise(vec2 p) {',
+                '  vec2 i = floor(p), f = fract(p);',
+                '  f = f * f * (3.0 - 2.0 * f);',
+                '  return mix(mix(fHash(i), fHash(i + vec2(1.0, 0.0)), f.x), mix(fHash(i + vec2(0.0, 1.0)), fHash(i + vec2(1.0, 1.0)), f.x), f.y);',
+                '}',
+                'float fBillow(vec2 p) { return fNoise(p) * 0.55 + fNoise(p * 2.1 + 7.3) * 0.3 + fNoise(p * 4.3 + 1.9) * 0.15; }',
+                'void main() {',
+                '  float px = max(fwidth(vFogWorld.x), fwidth(vFogWorld.y));',
+                '  vec2 drift = vec2(uTime * 2.2, uTime * 1.3);',
+                '  float near = fBillow((vFogWorld + drift) / 140.0) * (1.0 - smoothstep(25.0, 110.0, px));',
+                '  float mid = fBillow((vFogWorld + drift * 6.0) / 2600.0) * (1.0 - smoothstep(500.0, 2200.0, px));',
+                '  float far = fBillow(vFogWorld / 52000.0);',
+                '  float c = clamp(near * 0.55 + mid * 0.6 + far * 0.55 - 0.25, 0.0, 1.0);',
+                '  vec3 col = mix(uColor * 0.7, uColor * 2.3 + vec3(0.07, 0.08, 0.10), c * c);',
+                '  gl_FragColor = vec4(col, uOpacity * (0.95 + 0.05 * c));',
+                '  #include <fog_fragment>',
+                '}'
+            ].join('\n')
         });
+        this.material.extensions = { derivatives: true };
         this.group = new THREE.Group();
         this.mesh = null;
         this._key = '';
@@ -84,10 +134,16 @@ export class FogOverlay {
         this.group.visible = !!v;
         if (!v) this._key = ''; // force a fresh build on re-show
     }
+    setAltitude(alt) {
+        if (this.altitude === alt) return;
+        this.altitude = alt;
+        if (this.mesh) this.mesh.position.y = alt;
+    }
     // centerX/centerZ: world coords of the view target; dist: camera distance
     // (drives how far the sheet must extend before scene fog swallows it).
     update(mask, centerX, centerZ, dist) {
         if (!this.group.visible) return;
+        this.material.uniforms.uTime.value = performance.now() / 1000;
         const extent = Math.min(3e6, Math.max(4096, dist * 8));
         let S = 4096;
         while (S < extent) S *= 2;
@@ -129,7 +185,8 @@ export class FogOverlay {
         geo.rotateX(Math.PI / 2); // shape XY -> ground XZ
         this.mesh = new THREE.Mesh(geo, this.material);
         this.mesh.renderOrder = 8; // over terrain/water, under hex overlay lines
-        this.mesh.position.set(cx, FOG_ALTITUDE, cz);
+        this.mesh.position.set(cx, this.altitude, cz);
+        this.material.uniforms.uCenter.value.set(cx, cz);   // geometry is local to (cx, cz)
         this.group.add(this.mesh);
     }
     dispose() {
