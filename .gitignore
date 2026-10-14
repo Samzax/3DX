@@ -4,3 +4,10 @@ node_modules/
 
 # Runtime save state written by server.js (characters, map state, homebrew)
 data/saves/
+
+# Optional monster model packs (large GLBs, distributed separately)
+data/packs/
+
+# Owner-private Meshy body-form sculpts (see docs/race-generation-handoff.md)
+public/assets/characters/mh/assets/dragonborn-*/
+public/assets/characters/mh/assets/tabaxi-*/

@@ -11,6 +11,9 @@ const KNOBS = [
     { key: 'landSize', label: 'Landmass size', step: 10, fmt: v => `${v}%` },
     { key: 'rugged', label: 'Ruggedness', step: 10,
       fmt: v => (v === 0 ? 'rolling' : v > 0 ? `alpine ${signed(v)}` : `gentle ${signed(v)}`) },
+    { key: 'relief', label: 'Relief', step: 5,
+      hint: 'How tall the mountains rise — 0 is the old rolling world, 100 is deep ranges',
+      fmt: v => (v === 0 ? 'classic' : `${v}%`) },
     { key: 'wetness', label: 'Rainfall', step: 10,
       fmt: v => (v === 0 ? 'balanced' : v > 0 ? `lush ${signed(v)}` : `arid ${signed(v)}`) },
     { key: 'temperature', label: 'Temperature', step: 10,
@@ -30,9 +33,9 @@ export function createWorldSettings(container, { onChange } = {}) {
         <details class="ws-advanced">
             <summary>Fine-tune</summary>
             ${KNOBS.map(k => `
-            <label class="ws-row">
+            <label class="ws-row"${k.hint ? ` title="${k.hint}"` : ''}>
                 <span class="ws-row-head"><span>${k.label}</span><span class="ws-val" data-val="${k.key}"></span></span>
-                <input type="range" data-knob="${k.key}" min="${WORLD_LIMITS[k.key][0]}" max="${WORLD_LIMITS[k.key][1]}" step="${k.step}">
+                <input type="range" data-knob="${k.key}" min="${WORLD_LIMITS[k.key][0]}" max="${WORLD_LIMITS[k.key][1]}" step="${k.step}"${k.hint ? ` title="${k.hint}"` : ''}>
             </label>`).join('')}
         </details>`;
     const input = (key) => container.querySelector(`[data-knob="${key}"]`);

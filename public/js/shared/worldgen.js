@@ -41,28 +41,29 @@ export const WORLD_DEFAULTS = {
   latitude: 0,      // 0 uniform climate .. 100 strong cold-north/hot-south bands
   rugged: 0,        // -100 gentle .. +100 alpine
   zones: 0,         // 0 fine patchwork of biomes .. 100 broad climate regions
+  relief: 0,        // 0 = the original generator; 100 = deep mountain ranges
   home: null        // { x, z }: guaranteed landmass around this point
 };
 export const WORLD_LIMITS = {
   ocean: [10, 90], landSize: [50, 300], wetness: [-100, 100], temperature: [-100, 100],
-  latitude: [0, 100], rugged: [-100, 100], zones: [0, 100]
+  latitude: [0, 100], rugged: [-100, 100], zones: [0, 100], relief: [0, 100]
 };
 // Named starting points for the knobs above (the wizard's preset chips).
 export const WORLD_PRESETS = [
   { key: 'continents', label: 'Continents', hint: 'Balanced landmasses and seas, cold north, warm south.',
-    world: { ocean: 60, landSize: 100, wetness: 0, temperature: 0, latitude: 50, rugged: 0, zones: 60 } },
+    world: { ocean: 60, landSize: 100, wetness: 0, temperature: 0, latitude: 50, rugged: 0, zones: 60, relief: 50 } },
   { key: 'archipelago', label: 'Archipelago', hint: 'Scattered islands in a warm, wet sea.',
-    world: { ocean: 78, landSize: 50, wetness: 20, temperature: 15, latitude: 30, rugged: -20, zones: 50 } },
+    world: { ocean: 78, landSize: 50, wetness: 20, temperature: 15, latitude: 30, rugged: -20, zones: 50, relief: 0 } },
   { key: 'heartland', label: 'Heartland', hint: 'One vast landmass; the sea is far away.',
-    world: { ocean: 25, landSize: 220, wetness: 0, temperature: 0, latitude: 50, rugged: 10, zones: 70 } },
+    world: { ocean: 25, landSize: 220, wetness: 0, temperature: 0, latitude: 50, rugged: 10, zones: 70, relief: 0 } },
   { key: 'highlands', label: 'Highlands', hint: 'Cool, rugged country of ranges and snow-capped peaks.',
-    world: { ocean: 40, landSize: 130, wetness: 10, temperature: -20, latitude: 40, rugged: 80, zones: 60 } },
+    world: { ocean: 40, landSize: 130, wetness: 10, temperature: -20, latitude: 40, rugged: 80, zones: 60, relief: 60 } },
   { key: 'frozen', label: 'Frozen North', hint: 'Tundra, taiga and ice; winter never fully leaves.',
-    world: { ocean: 55, landSize: 110, wetness: -10, temperature: -70, latitude: 30, rugged: 30, zones: 60 } },
+    world: { ocean: 55, landSize: 110, wetness: -10, temperature: -70, latitude: 30, rugged: 30, zones: 60, relief: 0 } },
   { key: 'sunscorched', label: 'Sunscorched', hint: 'Hot, dry lands of dunes and rare oases.',
-    world: { ocean: 35, landSize: 180, wetness: -70, temperature: 60, latitude: 20, rugged: 0, zones: 70 } },
+    world: { ocean: 35, landSize: 180, wetness: -70, temperature: 60, latitude: 20, rugged: 0, zones: 70, relief: 0 } },
   { key: 'classic', label: 'Classic', hint: 'The original generator: mostly ocean, patchwork biomes.',
-    world: { ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0 } }
+    world: { ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0, relief: 0 } }
 ];
 
 // Seasons are table state, not world state: they only slide the snowline.
@@ -71,7 +72,6 @@ export const SEASON_KEYS = Object.keys(SEASONS);
 
 export const SNOW_T = 0.25;          // snow lies below this temperature
 const COLD_T = 0.36;                 // tundra/taiga below this
-const LAPSE = 0.016;                 // temperature lost per unit of altitude
 const LAT_SPAN = 200000;             // units from the origin to full polar/tropic
 
 // Deciles of the continental-mask fbm (measured over random seeds/positions):
@@ -133,9 +133,20 @@ export class WorldGen {
     this._latK = w.latitude / 100 * 0.40;
     this._mtn0 = 0.62 - r * 0.08;        // mountain mask starts rising here
     this._mtnT = 0.7 - r * 0.08;         // mountain biome threshold
-    this._ridgeAmp = 22 * (1 + 0.4 * r);
+    const rel = (w.relief || 0) / 100;
+    this._rel = rel;
+    this._relScale = 1 + 30 * rel;
+    this._ridgeAmp = 22 * (1 + (r > 0 ? 1.1 : 0.4) * r) * this._relScale;
+    this._ridgeFreq = 0.013 / (1 + 22 * rel);
+    this._cragAmp = 15 * Math.max(0, r) + 60 * rel;
+    this._cragFreq = 0.041 / (1 + 10 * rel);
+    this._lapse = 0.016 / (1 + 7 * rel);
     this._hillK = 1 + 0.3 * r;
     this._zoneK = w.zones / 100;
+  }
+
+  get fogAltitude() {
+    return Math.max(80, Math.ceil(this._ridgeAmp * 1.05 + 30));
   }
 
   // Continuous elevation field 0..1, seam-free by construction. Two scales:
@@ -214,8 +225,22 @@ export class WorldGen {
     const hills = fbm(seed + 50, wx * 0.02, wz * 0.02, Math.max(1, 4 - lod)) - 0.5;
     let h = base + hills * (0.8 + wet * 2.6) * (1 - m * 0.6) * this._hillK;
     // Mountains: tall ridged peaks where the elevation field runs high.
-    const ridge = Math.pow(1 - Math.abs(2 * fbm(seed + 500, wx * 0.013, wz * 0.013, Math.max(1, 5 - lod)) - 1), 2);
+    const ridgeOct = Math.max(1, 5 - lod);
+    let f = fbm(seed + 500, wx * this._ridgeFreq, wz * this._ridgeFreq, ridgeOct);
+    if (this._rel > 0 && ridgeOct < 5) {
+      f *= (1 - Math.pow(0.5, 5)) / (1 - Math.pow(0.5, ridgeOct));   // 5-oct mean / oct-oct mean
+    }
+    const ridge = Math.pow(1 - Math.abs(2 * f - 1), 2);
     h += ridge * m * this._ridgeAmp;
+    // Crags: a finer ridged octave, strongest high on the main ridges, breaks
+    // the smooth domes into knife edges, spurs and gullies. The far rings
+    // (lod >= 2) can't resolve it and take its mean instead.
+    if (this._cragAmp > 0 && m > 0) {
+      const crag = (lod < 2 || (this._rel > 0 && lod < 3))
+        ? Math.pow(1 - Math.abs(2 * fbm(seed + 510, wx * this._cragFreq, wz * this._cragFreq, 3 - lod) - 1), 1.6)
+        : 0.3;
+      h += (crag - 0.3) * m * (0.35 + 0.65 * ridge) * this._cragAmp;
+    }
     // Coastal shelf: damp high-frequency relief near the waterline so shores
     // are clean beaches with one surf line — otherwise dune/detail troughs dip
     // under SEA_LEVEL and the coast becomes a picket fence of water slivers.
@@ -243,7 +268,7 @@ export class WorldGen {
     let t = this._tBase + (fbm(this.seed + 700, wx * 0.0015, wz * 0.0015, 2) - 0.375) * 0.10;
     if (this._latK > 0) t += this._latK * Math.max(-1, Math.min(1, wz / LAT_SPAN));
     if (tw > 0) t += (tt - t) * tw;
-    return t - Math.max(0, h) * LAPSE;
+    return t - Math.max(0, h) * this._lapse;
   }
   // Sea-level temperature without the local noise: what the water shader
   // evaluates per fragment for sea ice (it can't run this module's noise).
@@ -251,7 +276,7 @@ export class WorldGen {
 
   // Typical ground height for an elevation value (no local noise): the
   // altitude a biome's climate is judged at.
-  estHeight(e) { return Math.max(0, (e - 0.5) * 16) + this.mtnMask(e) * 8; }
+  estHeight(e) { return Math.max(0, (e - 0.5) * 16) + this.mtnMask(e) * 8 * this._relScale; }
 
   // Biome from elevation x moisture x temperature.
   biome(e, mo, t) {
@@ -272,7 +297,7 @@ export class WorldGen {
   material(biome, h, wx, wz) {
     if (h < SEA_LEVEL + 1.0) return 3;               // beaches ring every shore
     const n = fbm(this.seed + 300, wx * 0.05, wz * 0.05, 2);
-    if (biome === 'mountains') return h > 9 || n > 0.55 ? 2 : (n > 0.35 ? 1 : 0);
+    if (biome === 'mountains') return h > 9 * this._relScale || n > 0.55 ? 2 : (n > 0.35 ? 1 : 0);
     if (biome === 'desert') return 3;
     if (biome === 'coast') return h < 0.3 ? 3 : 0;
     if (biome === 'forest') return n > 0.6 ? 1 : 0;

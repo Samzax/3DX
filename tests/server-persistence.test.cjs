@@ -28,7 +28,9 @@ async function startServer(dataDirectory) {
       ...process.env,
       NODE_PATH: path.join(repoRoot, 'node_modules'),
       PORT: String(port),
-      THREEDX_DATA_DIR: dataDirectory
+      THREEDX_DATA_DIR: dataDirectory,
+      // Protocol tests log in by bare username; accounts are covered in auth.test.cjs.
+      THREEDX_OPEN_LOGIN: '1'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -1521,7 +1523,6 @@ test('staged combat HP commits and rolls back every active combat mirror', { tim
   await emitEvent(socketB, 'join-map', { key: 'pocket/b' });
   await waitForSocketEvent(socketB, 'map-state');
   await pollPackets(unrelated);
-  await pollPackets(anonymous);
 
   await emitEvent(socketA, 'combat-update-combatant', {
     combatantId: 'token-a', patch: { hpCurrent: 6 }
@@ -1532,8 +1533,13 @@ test('staged combat HP commits and rolls back every active combat mirror', { tim
   assert.equal(committedB.combatants['token-b'].hp.current, 6);
   await emitEvent(socketA, 'join-map', { key: 'pocket/a' });
   await waitForSocketEvent(socketA, 'map-state');
+  // A logged-out socket is sent nothing at all (not even the lobby list), so
+  // silence within a settle window is its proof of privacy.
   for (const privacySession of [unrelated, anonymous]) {
-    const privacyEvents = socketEvents(await pollPackets(privacySession));
+    const privacyEvents = socketEvents(await Promise.race([
+      pollPackets(privacySession).catch(() => []),
+      new Promise((resolve) => setTimeout(() => resolve([]), 1500))
+    ]));
     assert.equal(privacyEvents.some(([name]) => name === 'hp-updated'), false);
   }
   let persisted = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
@@ -2201,7 +2207,7 @@ test('Ape model variants canonicalize, project publicly, and survive restart', {
   assert.equal(Object.hasOwn(publicHighland.monsterData, 'actions'), false);
 });
 
-// Silence probe: nothing may arrive for a socket, or only unrelated chatter —
+// Silence probe: nothing may arrive for a socket, or only unrelated chatter ï¿½
 // never the named events. Used for cross-campaign leak checks.
 async function assertNoEvents(session, forbidden, ms = 1200) {
   const packets = await Promise.race([
@@ -2260,9 +2266,13 @@ test('campaigns isolate rooms, rosters, and settings authority', { timeout: 3000
   assert.match(settings.regionKey, /^world\/-?\d+,-?\d+\/-?\d+,-?\d+$/);
   // World shape defaults to the original generator when not specified.
   assert.deepEqual(settings.world, {
-    ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0, home: null
+    ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0, relief: 0, home: null
   });
   assert.equal(settings.season, 'summer');
+  // A new table starts on a clear-headed morning with natural weather.
+  assert.deepEqual(settings.sky, {
+    clock: 'fixed', hour: 10, dayMinutes: 24, at: 0, weather: 'auto', rainbow: 'auto'
+  });
   assert.equal(gmJoin['campaign-joined'].startKey, settings.regionKey);
   assert.equal(gmJoin['map-state'].campaign.id, created.id);
   assert.equal(gmJoin['map-state'].key, settings.regionKey);
@@ -2296,7 +2306,8 @@ test('campaigns isolate rooms, rosters, and settings authority', { timeout: 3000
     id: created.id, settings: {
       seed: 43, spawn: { x: 126720, z: 0 },
       world: { ocean: 999, landSize: 150, wetness: -30, temperature: -70, zones: 60, home: { x: 5, z: 6 } },
-      season: 'winter'
+      season: 'winter',
+      sky: { clock: 'cycle', hour: 30.5, dayMinutes: 99999, weather: 'storm', rainbow: 'sideways', at: 5 }
     }
   });
   const updated = await waitForSocketEvent(gm, 'campaign-updated');
@@ -2304,9 +2315,39 @@ test('campaigns isolate rooms, rosters, and settings authority', { timeout: 3000
   // World shape is clamped server-side; the region lens is the kingdom hex
   // around the spawn (two continent hexes east of the origin).
   assert.deepEqual(updated.settings.world, {
-    ocean: 90, landSize: 150, wetness: -30, temperature: -70, latitude: 0, rugged: 0, zones: 60, home: { x: 5, z: 6 }
+    ocean: 90, landSize: 150, wetness: -30, temperature: -70, latitude: 0, rugged: 0, zones: 60, relief: 0, home: { x: 5, z: 6 }
   });
   assert.equal(updated.settings.season, 'winter');
+  // The sky is clamped, and the clock is stamped by the server, never the client.
+  const stampedAt = updated.settings.sky.at;
+  assert.ok(Math.abs(stampedAt - Date.now()) < 60000);
+  assert.deepEqual(updated.settings.sky, {
+    clock: 'cycle', hour: 6.5, dayMinutes: 1440, at: stampedAt, weather: 'storm', rainbow: 'auto'
+  });
+  // A weather-only patch keeps the running clock (and its stamp) untouched.
+  await emitEvent(gm, 'update-campaign-settings', { id: created.id, settings: { sky: { weather: 'fog' } } });
+  assert.deepEqual((await waitForSocketEvent(gm, 'campaign-updated')).settings.sky, {
+    clock: 'cycle', hour: 6.5, dayMinutes: 1440, at: stampedAt, weather: 'fog', rainbow: 'auto'
+  });
+  // Campaign hall: identity, the recap and the table state ride at the top
+  // level; a patch that names none of them leaves all of them alone.
+  assert.equal(updated.recap, '');
+  assert.equal(updated.session, 'open');
+  await emitEvent(gm, 'update-campaign-settings', {
+    id: created.id, name: 'Hall Test', description: 'A premise.',
+    recap: 'The party fled.\nThe bridge burned.', session: 'closed'
+  });
+  const briefed = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.equal(briefed.name, 'Hall Test');
+  assert.equal(briefed.description, 'A premise.');
+  assert.equal(briefed.recap, 'The party fled.\nThe bridge burned.');
+  assert.equal(briefed.session, 'closed');
+  await emitEvent(gm, 'update-campaign-settings', { id: created.id, session: 'ajar' });
+  const reopened = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.equal(reopened.session, 'closed');
+  assert.equal(reopened.recap, 'The party fled.\nThe bridge burned.');
+  await emitEvent(gm, 'update-campaign-settings', { id: created.id, session: 'open' });
+  assert.equal((await waitForSocketEvent(gm, 'campaign-updated')).session, 'open');
   assert.equal(updated.settings.regionKey, 'world/2,0/0,0');
   assert.notEqual(updated.settings.regionKey, previousRegionKey);
   assert.match(updated.settings.regionKey, /^world\/-?\d+,-?\d+\/-?\d+,-?\d+\/?$/);
@@ -2421,6 +2462,31 @@ test('copy-character moves sheets across campaigns from the lobby', { timeout: 3
   await waitForSocketEvents(bob, ['login-success', 'campaign-list']);
   await emitEvent(bob, 'copy-character', {
     fromCampaignId: 'default', charId: rogue.id, toCampaignId: created.id
+  });
+  assert.equal(await waitForSocketEvent(bob, 'error'), 'Permission denied');
+
+  // A player brings their own character into a campaign they may enter.
+  const bobHome = await connectPolling(instance.port);
+  await emitEvent(bobHome, 'login', 'bob');
+  await waitForSocketEvents(bobHome, ['campaign-joined', 'map-state']);
+  await emitEvent(bobHome, 'save-character', { charData: {
+    name: 'Bob Bard', race: 'human', background: 'acolyte',
+    classes: [{ class: 'bard', level: 2 }],
+    abilities: { str: 10, dex: 12, con: 12, int: 10, wis: 10, cha: 16 }
+  } });
+  const bard = await waitForSocketEvent(bobHome, 'character-saved-success');
+  await emitEvent(bob, 'copy-character', {
+    fromCampaignId: 'default', charId: bard.id, toCampaignId: created.id
+  });
+  const brought = await waitForSocketEvent(bob, 'character-saved-success');
+  assert.notEqual(brought.id, bard.id);
+  assert.equal(brought.owner, 'bob');
+
+  // ...but not into a private one they were not invited to.
+  await emitEvent(gmLobby, 'set-campaign-access', { id: created.id, visibility: 'private', members: [] });
+  await waitForSocketEvent(gmLobby, 'campaign-access-saved');
+  await emitEvent(bob, 'copy-character', {
+    fromCampaignId: 'default', charId: bard.id, toCampaignId: created.id
   });
   assert.equal(await waitForSocketEvent(bob, 'error'), 'Permission denied');
 

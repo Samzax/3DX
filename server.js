@@ -11,6 +11,32 @@ const {
   axisAlignedBoxIntersectsPointyHex,
   sampleCentripetalCatmullRom
 } = require('./lib/terrain-region.cjs');
+const { createAuth, validUsersSaveData, USERS_FILE } = require('./lib/auth.cjs');
+const { HOMEBREW_COLLECTIONS, sanitizeRulesHomebrew } = require('./lib/homebrew.cjs');
+const {
+  CONDITION_LABELS, normalizeAttacks, normalizeAbilities, normalizeRiders,
+  normalizeResources, SPELL_FORMS, normalizeSummon, normalizeSpells, normalizeZones, normalizeSaveMods, normalizePending, normalizeConcentration,
+  normalizeTurnState, riderApplies
+} = require('./lib/combat-kit.cjs');
+const { loadMonsterPacks } = require('./lib/monster-packs.cjs');
+const { loadCharacterPacks, LOOK_KEY_RE } = require('./lib/character-packs.cjs');
+
+// Pure ES modules shared with the browser: the line-of-sight/light/senses
+// model, the sky clock, the ground (heights + what crossing them costs),
+// passage (which walls, doors and bars stop a walker) and aoe (which creatures
+// a spell's area catches).
+// Loaded before the server listens, so every handler can use them synchronously.
+let vision = null, weatherModel = null, groundModel = null, passage = null, aoe = null;
+const sharedModulesReady = Promise.all([
+  import('./public/js/shared/vision.js'),
+  import('./public/js/shared/weather.js'),
+  import('./public/js/shared/ground.js'),
+  import('./public/js/shared/passage.js'),
+  import('./public/js/shared/aoe.js')
+]).then(([visionModule, weatherModule, groundModule, passageModule, aoeModule]) => {
+  vision = visionModule; weatherModel = weatherModule; groundModel = groundModule; passage = passageModule;
+  aoe = aoeModule;
+});
 
 const app = express();
 const server = http.createServer(app);
@@ -41,15 +67,24 @@ const MAX_TERRAIN_CHUNKS_PER_UPDATE = 64;
 const MAX_TERRAIN_LAYER_BYTES = 128 * 1024;
 const MAX_TERRAIN_UPDATE_BYTES = 2 * 1024 * 1024;
 const WORLD_COORD_LIMIT = 100 * 1000 * 1000;
+// Combat moves are priced against the terrain up to this length; anything
+// longer is a relocation (GM), charged as the plain distance.
+const MAX_PRICED_MOVE_FEET = 600;
+// How far below a creature's stored position its soles sit (models.js
+// halfHeight: 0.38 characters, 0.1 tokens).
+const CHARACTER_SOLE_DEPTH = 0.38;
+const TOKEN_SOLE_DEPTH = 0.1;
 const MAP_KEY_LIMIT = 160;
 const BUILD_LEVEL_MIN = -5;
 const BUILD_LEVEL_MAX = 8;
 const MAX_STRUCTURE_BATCH = 256;
 const STRUCTURE_ID_LIMIT = 96;
 const OBJECT_TYPES = new Set([
-  'token', 'cube', 'sphere', 'character', 'cave', 'arch', 'portal',
+  'token', 'cube', 'sphere', 'character', 'cave', 'arch', 'portal', 'prop',
   'wall', 'floor', 'stair', 'roof'
 ]);
+// Dungeon dressing (mirrors public/js/shared/props.js; tests/props.test.cjs).
+const PROP_KINDS = ['torch', 'brazier', 'candles', 'shackles', 'bars', 'cot', 'table', 'bench', 'throne', 'lectern', 'bookshelf', 'crate', 'barrel', 'chest', 'egg', 'bones', 'rubble', 'stalagmite', 'pillar'];
 const WALL_CELL_LIMIT = 48;
 const WALL_SEGMENT_KINDS = new Set(['door', 'window', 'gap', 'solid']);
 const STRUCTURE_TILE_LIMIT = 48;
@@ -64,21 +99,37 @@ const CHARACTER_COLOR_RE = /^#[0-9a-f]{6}$/i;
 const CHARACTER_APPEARANCE_DEFAULTS = {
   height: 1, build: 1, headSize: 1, armLength: 1, legLength: 1
 };
+// Optional look fields (mirrors public/js/shared/charmesh.js); absent on old
+// sheets, which render with the race's defaults.
+const CHARACTER_APPEARANCE_ENUMS = {
+  body: new Set(['male', 'female']),
+  outfit: new Set(['auto', 'tunic', 'robe', 'leather', 'mail', 'plate', 'bare']),
+  hair: new Set(['short', 'long', 'tied', 'mohawk', 'bald']),
+  beard: new Set(['none', 'short', 'long'])
+};
+const CHARACTER_TRAITS = ['pointed-ears', 'horns', 'tusks', 'snout', 'tail'];
+// The parametric body: shape sliders, detail sliders and one worn asset per
+// slot. Ids are only shape-checked here; the client ignores any its character
+// kit (public/assets/characters/mh/kit.json) doesn't have.
+const CHARACTER_FORM_KEYS = ['age', 'muscle', 'weight', 'stature'];
+const CHARACTER_WEAR_SLOTS = ['bodyform', 'headform', 'hair', 'beard', 'eyebrows', 'horns', 'outfit', 'top', 'bottom', 'feet', 'hands', 'head'];
+const CHARACTER_KIT_ID_RE = /^[a-z0-9][a-z0-9-]{0,47}$/;
+const MAX_CHARACTER_DETAILS = 96;
 const CHARACTER_COLOR_DEFAULTS = {
   skin: '#c68642', hair: '#3b2716', torso: '#2f6e56',
   legs: '#3a3f4a', eyes: '#1a1a1a'
 };
 const CHARACTER_ABILITY_METHODS = new Set(['point-buy', 'standard-array', 'manual']);
-const HOMEBREW_CASTER_TYPES = new Set(['none', 'full', 'half']);
-const HOMEBREW_SPELL_LISTS = new Set([
-  'bard', 'cleric', 'druid', 'paladin', 'ranger', 'sorcerer', 'warlock', 'wizard'
-]);
 const MONSTER_SIZES = new Set(['Tiny', 'Small', 'Medium', 'Large', 'Huge', 'Gargantuan']);
 const MONSTER_ATTACK_TYPES = new Set(['melee', 'ranged']);
 // Visual variants come from the committed monster model manifest (the same
 // file the clients render from), so the server's accept-list can never drift
 // from the assets. The ape pilot seeds itself if the manifest is missing.
 const MONSTER_MANIFEST_PATH = path.join(__dirname, 'public', 'assets', 'monsters', 'manifest.json');
+// Optional uncommitted model packs (lib/monster-packs.cjs) override entries of
+// that manifest; clients fetch the merged result from the same URL.
+const MONSTER_PACKS_DIR = path.resolve(process.env.THREEDX_PACKS_DIR || path.join(__dirname, 'data', 'packs'));
+let mergedMonsterManifest = null; // JSON string, only when a pack contributes entries
 const MONSTER_VARIANT_IDS = Object.create(null);   // index -> Set<variantId>
 const MONSTER_VARIANT_DEFAULT = Object.create(null); // index -> first variant id
 function registerMonsterVariants(index, rawVariants) {
@@ -97,8 +148,23 @@ try {
   for (const [index, entry] of Object.entries(monsters)) {
     if (entry && typeof entry === 'object') registerMonsterVariants(index, entry.variants);
   }
+  const packs = loadMonsterPacks(MONSTER_PACKS_DIR, monsters);
+  packs.warnings.forEach(warning => console.warn(`[Monsters] Pack ${warning}`));
+  packs.packs.forEach(pack => console.log(`[Monsters] Pack "${pack.name}": ${pack.count} model(s)`));
+  if (Object.keys(packs.entries).length) {
+    mergedMonsterManifest = JSON.stringify({ ...manifest, monsters: { ...monsters, ...packs.entries } });
+  }
 } catch (error) {
   console.error(`[Monsters] Could not load model manifest: ${error.message}`);
+}
+// Character "looks" from the same packs (lib/character-packs.cjs): whole
+// models a player can pick in the creator. Always answered, empty without packs.
+let characterLooksManifest = JSON.stringify({ version: 1, looks: {} });
+{
+  const packs = loadCharacterPacks(MONSTER_PACKS_DIR);
+  packs.warnings.forEach(warning => console.warn(`[Characters] Pack ${warning}`));
+  packs.packs.forEach(pack => console.log(`[Characters] Pack "${pack.name}": ${pack.count} look(s)`));
+  characterLooksManifest = JSON.stringify({ version: 1, looks: packs.looks, props: packs.props });
 }
 if (!MONSTER_VARIANT_IDS.ape) registerMonsterVariants('ape', [
   { id: 'silverback' }, { id: 'highland' }, { id: 'albino' }
@@ -264,6 +330,12 @@ function ownValue(record, key) {
 
 function boundedText(value, maxLength) {
   return String(value == null ? '' : value).replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, maxLength);
+}
+
+// Free text that keeps its line breaks (notes, backstory).
+function boundedMultilineText(value, maxLength) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim().slice(0, maxLength);
 }
 
 function boundedNumber(value, min, max, fallback = null) {
@@ -439,10 +511,8 @@ function validMapSaveData(value) {
 }
 
 function validHomebrewSaveData(value) {
-  return isRecord(value) &&
-    (!hasOwn(value, 'races') || isRecord(value.races)) &&
-    (!hasOwn(value, 'classes') || isRecord(value.classes)) &&
-    (!hasOwn(value, 'monsters') || isRecord(value.monsters));
+  return isRecord(value) && Object.values(HOMEBREW_COLLECTIONS).every(collection =>
+    !hasOwn(value, collection) || isRecord(value[collection]));
 }
 
 function validatorForSave(filename) {
@@ -450,6 +520,7 @@ function validatorForSave(filename) {
   if (filename === 'characters.json') return isRecord;
   if (filename === 'homebrew.json') return validHomebrewSaveData;
   if (filename === 'campaigns.json') return validCampaignsSaveData;
+  if (filename === USERS_FILE) return validUsersSaveData;
   return () => true;
 }
 
@@ -478,6 +549,13 @@ function saveJSON(filename, data, dir = activeStore ? activeStore.dir : DATA_DIR
     return false;
   }
 }
+
+// Accounts + login sessions (data/saves/users.json, root-global like the
+// campaign registry). THREEDX_OPEN_LOGIN=1 keeps the legacy password-less mode.
+const auth = createAuth({
+  dataDir: DATA_DIR, loadJSON, saveJSON,
+  open: process.env.THREEDX_OPEN_LOGIN === '1'
+});
 
 // Compensation runs after a related file failed to commit. The current
 // primary may contain the rejected half of that transaction, so rotating it
@@ -667,14 +745,22 @@ const DEFAULT_CAMPAIGN_ID = 'default';
 const MAX_CAMPAIGNS = 100;
 const MAX_CAMPAIGN_NAME = 80;
 const MAX_CAMPAIGN_DESCRIPTION = 400;
+const MAX_CAMPAIGN_RECAP = 1200;
+const MAX_CAMPAIGN_MEMBERS = 64;
+const MAX_PENDING_CAMPAIGNS_PER_USER = 3;
 const BIOME_KEYS = ['plains', 'forest', 'mountains', 'desert', 'swamp', 'coast', 'tundra', 'taiga', 'snow'];
 // Seasons are table state: they slide the snowline on every screen (worldgen.js SEASONS).
 const SEASON_KEYS = ['summer', 'autumn', 'winter', 'spring'];
 // Generator knob bounds; mirrors worldgen.js WORLD_LIMITS.
 const WORLD_LIMITS = {
   ocean: [10, 90], landSize: [50, 300], wetness: [-100, 100], temperature: [-100, 100],
-  latitude: [0, 100], rugged: [-100, 100], zones: [0, 100]
+  latitude: [0, 100], rugged: [-100, 100], zones: [0, 100], relief: [0, 100]
 };
+// Sky clock + weather (table state, rendered client-side); mirrors shared/weather.js.
+const WEATHER_KEYS = ['auto', 'clear', 'cloudy', 'overcast', 'rain', 'storm', 'snow', 'fog'];
+const RAINBOW_KEYS = ['auto', 'on', 'off'];
+const SKY_CLOCKS = ['fixed', 'cycle'];
+const SKY_DAY_MINUTES = [2, 1440];
 const CAMPAIGN_STYLES = new Set(['ladder', 'region']);
 
 function validCampaignsSaveData(value) {
@@ -683,17 +769,62 @@ function validCampaignsSaveData(value) {
 }
 
 function defaultCampaignSettings() {
-  return {
+  const settings = {
     mapStyle: 'ladder',
     seed: 1337,
     biomes: [...BIOME_KEYS],
     spawn: { x: 0, z: 0 },
     // World shape (client generator knobs; mirrors worldgen.js WORLD_DEFAULTS —
     // these defaults reproduce the original world exactly).
-    world: { ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0, home: null },
+    world: { ocean: 80, landSize: 100, wetness: 0, temperature: 0, latitude: 0, rugged: 0, zones: 0, relief: 0, home: null },
     season: 'summer',
+    // hour = the game hour at `at` (epoch ms, stamped by the server whenever
+    // the GM sets the clock); a cycling clock runs one day per dayMinutes.
+    sky: { clock: 'fixed', hour: 10, dayMinutes: 24, at: 0, weather: 'auto', rainbow: 'auto' },
+    // Token vision (shared/vision.js): off keeps the table as it always was.
+    vision: { enabled: false, night: 'dim', indoors: 'auto', pockets: 'dim', memory: true },
+    // Automatic movement costs in combat (shared/ground.js): slopes, water
+    // and (optionally) snow are priced from the terrain itself.
+    movement: { terrain: true, snow: true, walls: true },
     regionKey: null
   };
+  return settings;
+}
+
+const VISION_NIGHT = ['dim', 'dark'];
+const VISION_INDOORS = ['auto', 'bright', 'dim', 'dark'];
+const VISION_POCKETS = ['bright', 'dim', 'dark'];
+function sanitizeVisionSettings(raw, fallback) {
+  const source = isRecord(raw) ? raw : {};
+  const out = { ...fallback };
+  if (typeof source.enabled === 'boolean') out.enabled = source.enabled;
+  if (VISION_NIGHT.includes(source.night)) out.night = source.night;
+  if (VISION_INDOORS.includes(source.indoors)) out.indoors = source.indoors;
+  if (VISION_POCKETS.includes(source.pockets)) out.pockets = source.pockets;
+  if (typeof source.memory === 'boolean') out.memory = source.memory;
+  return out;
+}
+
+function sanitizeMovementSettings(raw, fallback) {
+  const source = isRecord(raw) ? raw : {};
+  const out = { ...fallback };
+  if (typeof source.terrain === 'boolean') out.terrain = source.terrain;
+  if (typeof source.snow === 'boolean') out.snow = source.snow;
+  if (typeof source.walls === 'boolean') out.walls = source.walls;
+  return out;
+}
+
+function sanitizeSky(raw, fallback) {
+  const source = isRecord(raw) ? raw : {};
+  const sky = { ...fallback };
+  if (SKY_CLOCKS.includes(source.clock)) sky.clock = source.clock;
+  const hour = Number(source.hour);
+  if (source.hour != null && Number.isFinite(hour)) sky.hour = Math.round((((hour % 24) + 24) % 24) * 100) / 100;
+  sky.dayMinutes = boundedInteger(source.dayMinutes, SKY_DAY_MINUTES[0], SKY_DAY_MINUTES[1], sky.dayMinutes);
+  sky.at = boundedInteger(source.at, 0, 0x7fffffffffff, sky.at);
+  if (WEATHER_KEYS.includes(source.weather)) sky.weather = source.weather;
+  if (RAINBOW_KEYS.includes(source.rainbow)) sky.rainbow = source.rainbow;
+  return sky;
 }
 
 // Axial hex (q,r) of the pointy-top hex containing (x,z) at a tier width.
@@ -742,6 +873,9 @@ function sanitizeCampaignSettings(raw) {
     settings.world = world;
   }
   if (SEASON_KEYS.includes(source.season)) settings.season = source.season;
+  settings.sky = sanitizeSky(source.sky, settings.sky);
+  settings.vision = sanitizeVisionSettings(source.vision, settings.vision);
+  settings.movement = sanitizeMovementSettings(source.movement, settings.movement);
   if (settings.mapStyle === 'region') {
     settings.regionKey = regionKeyForSpawn(settings.spawn.x, settings.spawn.z);
   }
@@ -757,8 +891,59 @@ function sanitizeCampaignRecord(raw, id) {
     description: boundedText(raw.description, MAX_CAMPAIGN_DESCRIPTION),
     owner,
     createdAt: boundedInteger(raw.createdAt, 0, 0x7fffffffffff, 0),
-    settings: sanitizeCampaignSettings(raw.settings)
+    settings: sanitizeCampaignSettings(raw.settings),
+    // Records from before accounts existed stay open to everyone.
+    visibility: raw.visibility === 'private' ? 'private' : 'public',
+    members: sanitizeCampaignMembers(raw.members),
+    status: raw.status === 'pending' ? 'pending' : 'active',
+    recap: boundedMultilineText(raw.recap, MAX_CAMPAIGN_RECAP),
+    session: raw.session === 'closed' ? 'closed' : 'open'
   };
+}
+
+// What the campaign hall shows on entry: the premise (description), the GM's
+// "last time" recap, and whether the table is open. Records created before
+// the hall existed have neither field: no recap, table open.
+function campaignBrief(campaign) {
+  return {
+    description: campaign.description || '',
+    recap: campaign.recap || '',
+    session: campaign.session === 'closed' ? 'closed' : 'open'
+  };
+}
+
+function sanitizeCampaignMembers(raw) {
+  if (!Array.isArray(raw)) return [];
+  const members = [];
+  const seen = new Set();
+  for (const candidate of raw.slice(0, MAX_CAMPAIGN_MEMBERS)) {
+    const name = boundedString(candidate, MAX_USERNAME_LENGTH);
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    members.push(name);
+  }
+  return members;
+}
+
+function sameUser(a, b) {
+  return !!a && !!b && String(a).toLowerCase() === String(b).toLowerCase();
+}
+
+// Who may see a campaign in the lobby: the host everything, the owner their
+// own (including one still awaiting approval), everyone else approved
+// campaigns that are public or that they were invited to.
+function canSeeCampaign(campaign, username) {
+  if (!campaign || !username) return false;
+  if (isGM(username) || sameUser(campaign.owner, username)) return true;
+  if (campaign.status !== 'active') return false;
+  return campaign.visibility === 'public' || campaign.members.some(member => sameUser(member, username));
+}
+
+// Entering needs an approved campaign; only the host may walk into a pending
+// one (to look at what was requested).
+function canEnterCampaign(campaign, username) {
+  if (!canSeeCampaign(campaign, username)) return false;
+  return campaign.status === 'active' || isGM(username);
 }
 
 let campaignsData = loadJSON('campaigns.json', { campaigns: {} }, validCampaignsSaveData);
@@ -788,7 +973,10 @@ function ensureDefaultCampaign() {
     description: '',
     owner: 'gm',
     createdAt: Date.now(),
-    settings: defaultCampaignSettings()
+    settings: defaultCampaignSettings(),
+    visibility: 'public',
+    members: [],
+    status: 'active'
   };
   saveCampaigns();
   return true;
@@ -929,14 +1117,147 @@ function isRevealedAt(x, z) {
 // A player always sees their own characters — losing your own token to fog
 // would strand the HUD/combat panel, and "where am I" is never a GM secret.
 function ownsObject(username, obj) {
+  if (username && obj && obj.type === 'summon') return obj.owner === username; // what your spell put there
   return !!(username && obj && obj.type === 'character' &&
     obj.characterData && obj.characterData.owner === username);
 }
-function objectVisibleTo(username, obj) {
+// ===== Token vision (shared/vision.js) =====
+// With `settings.vision.enabled`, a player only RECEIVES the creatures their
+// own character tokens can perceive: line of sight past walls, closed doors,
+// floors and roofs, light at the target, and the viewer's senses. Map geometry
+// is not withheld (the client darkens what is out of sight); creatures are.
+// The server sends by the union of a player's tokens; the screen narrows that
+// to the character being played.
+function visionEnabled() {
+  const settings = campaignSettings();
+  return !!(settings.vision && settings.vision.enabled);
+}
+function visionContextFor(key) {
+  const settings = campaignSettings();
+  const sky = weatherModel.normalizeSky(settings.sky);
+  return vision.visionContext(settings.vision, {
+    hour: weatherModel.hourAt(sky),
+    pocket: !isUnifiedKey(key),
+    // Only a pinned weather is known here: natural weather is computed on
+    // each screen from the local climate, which the server never loads.
+    weather: weatherModel.WEATHER_PRESETS[sky.weather] || null
+  });
+}
+// Occluders, lights and every owner's viewing tokens for one map. Memoized
+// per map only until the next change (touchVision) or the end of the tick.
+const visionMemo = new Map();
+function touchVision() { visionMemo.clear(); }
+function visionState(key) {
+  const memoKey = activeCampaignId() + '|' + key;
+  let state = visionMemo.get(memoKey);
+  if (state) return state;
+  const objects = Object.values((maps[key] && maps[key].objects) || {});
+  const viewers = new Map();
+  for (const obj of objects) {
+    if (obj.type !== 'character' || !obj.characterData || !obj.position) continue;
+    const owner = obj.characterData.owner;
+    if (!viewers.has(owner)) viewers.set(owner, []);
+    viewers.get(owner).push(vision.viewerOf(obj));
+  }
+  state = { occ: vision.buildOccluders(objects), ctx: visionContextFor(key), viewers };
+  if (!visionMemo.size) setImmediate(touchVision);
+  visionMemo.set(memoKey, state);
+  return state;
+}
+
+// `key` is the state key the object lives on (the unified world by default).
+function objectVisibleTo(username, obj, key = WORLD_KEY) {
   if (isCampaignGM(username)) return true;
   if (ownsObject(username, obj)) return true;
+  if (obj.hidden === true) return false;        // GM-only until revealed
   const p = obj.position || {};
-  return isRevealedAt(p.x, p.z);
+  if (isUnifiedKey(key) && !isRevealedAt(p.x, p.z)) return false;
+  if (!vision.isCreature(obj) || !visionEnabled()) return true;
+  const state = visionState(key);
+  const viewers = state.viewers.get(username);
+  return !!(viewers && vision.canAnySee(state.occ, state.ctx, viewers, vision.targetOf(obj)));
+}
+
+// Per-socket record of the creatures a player currently has, so a change in
+// who-sees-whom becomes object-added / object-deleted for exactly that player.
+function shownSet(sock) { return sock.visionShown || (sock.visionShown = new Set()); }
+function forEachMapSocket(key, exceptSocket, fn) {
+  if (isUnifiedKey(key)) emitToUnified(exceptSocket, fn);
+  else emitToRoom(key, exceptSocket, fn);
+}
+// What stops a walker on one map (shared/passage.js), memoized with the sight
+// state: both are rebuilt after any change to the map's objects.
+function barriersFor(key) {
+  const state = visionState(key);
+  return state.barriers || (state.barriers = passage.buildBarriers(Object.values((maps[key] && maps[key].objects) || {})));
+}
+function wallsStopMoves() {
+  return campaignSettings().movement?.walls !== false;
+}
+function walkerAt(obj, position = obj.position) {
+  const soles = obj.type === 'character' ? CHARACTER_SOLE_DEPTH : TOKEN_SOLE_DEPTH;
+  return { x: Number(position.x) || 0, z: Number(position.z) || 0, feet: (Number(position.y) || 0) - soles };
+}
+
+// Send one object to everyone on its map who may see it.
+function announceObject(key, obj) {
+  forEachMapSocket(key, null, (sock) => {
+    if (!objectVisibleTo(sock.username, obj, key)) return;
+    if (vision.isCreature(obj)) shownSet(sock).add(obj.id);
+    sock.emit('object-added', projectObjectFor(sock.username, obj));
+  });
+}
+// After anything that can change sight (a move, a door, a light, a wall, the
+// hour, the rules): bring every player's creature set in line.
+function reconcileVision(rawKey) {
+  const key = stateKey(rawKey);
+  const map = maps[key];
+  if (!map) return;
+  touchVision();
+  const creatures = Object.values(map.objects).filter(vision.isCreature);
+  forEachMapSocket(key, null, (sock) => {
+    if (isCampaignGM(sock.username)) return;
+    const shown = shownSet(sock);
+    for (const obj of creatures) {
+      if (ownsObject(sock.username, obj)) continue;
+      const want = objectVisibleTo(sock.username, obj, key);
+      const have = shown.has(obj.id);
+      if (want && !have) {
+        shown.add(obj.id);
+        sock.emit('object-added', projectObjectFor(sock.username, obj));
+      } else if (!want && have) {
+        shown.delete(obj.id);
+        sock.emit('object-deleted', { id: obj.id });
+      }
+    }
+  });
+}
+function reconcileCampaignVision() {
+  const campaignId = activeCampaignId();
+  const keys = new Set();
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.campaignId === campaignId && sock.currentMapKey) keys.add(stateKey(sock.currentMapKey));
+  }
+  for (const key of keys) reconcileVision(key);
+}
+// Attack rolls against what you cannot see are at disadvantage; attacks from
+// an attacker the target cannot see are at advantage (5e unseen attackers).
+function sightModifiers(key, attacker, target) {
+  const none = { advantage: false, disadvantage: false, note: '' };
+  if (!visionEnabled()) return none;
+  const objects = (maps[key] && maps[key].objects) || {};
+  const a = ownValue(objects, attacker.id), b = ownValue(objects, target.id);
+  if (!a || !b || !a.position || !b.position) return none;
+  const state = visionState(key);
+  const sees = (from, to) => {
+    const how = vision.canSee(state.occ, state.ctx, vision.viewerOf(from), vision.targetOf(to));
+    return !!how && how !== 'tremor';
+  };
+  const disadvantage = !sees(a, b), advantage = !sees(b, a);
+  const notes = [];
+  if (disadvantage) notes.push(`${attacker.name} can't see ${target.name}`);
+  if (advantage) notes.push(`${target.name} can't see ${attacker.name}`);
+  return { advantage, disadvantage, note: notes.length ? ` (${notes.join('; ')})` : '' };
 }
 
 // Character tokens need enough sheet-derived appearance data to render for
@@ -1070,20 +1391,87 @@ function campaignsPayload(username) {
       online[sock.campaignId] = (online[sock.campaignId] || 0) + 1;
     }
   }
-  return Object.values(campaigns).map(c => ({
-    id: c.id,
-    name: c.name,
-    description: c.description,
-    owner: c.owner,
-    createdAt: c.createdAt,
-    settings: c.settings,
-    online: online[c.id] || 0,
-    myCharacters: username ? ownedCharacterSummaries(c.id, username) : undefined
-  }));
+  return Object.values(campaigns).filter(c => canSeeCampaign(c, username)).map(c => {
+    const manages = isCampaignGMFor(c.id, username);
+    return {
+      id: c.id,
+      name: c.name,
+      description: c.description,
+      owner: c.owner,
+      createdAt: c.createdAt,
+      settings: c.settings,
+      visibility: c.visibility,
+      status: c.status,
+      invited: c.members.some(member => sameUser(member, username)),
+      // The invite list is the GM's business, not the table's.
+      members: manages ? c.members : undefined,
+      online: online[c.id] || 0,
+      myCharacters: ownedCharacterSummaries(c.id, username)
+    };
+  });
 }
 
+// Campaign lists are per user (privacy + invites), so the lobby is pushed
+// socket by socket rather than as one room broadcast.
 function pushCampaignList() {
-  io.to('lobby').emit('campaign-list', { campaigns: campaignsPayload() });
+  for (const sock of io.sockets.sockets.values()) {
+    if (!sock.username || !sock.rooms.has('lobby')) continue;
+    sock.emit('campaign-list', { campaigns: campaignsPayload(sock.username) });
+  }
+}
+
+// Account directory. The host gets the admin view; everyone else only the
+// names they could invite.
+function usersPayload(username) {
+  const online = new Set();
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.username) online.add(sock.username.toLowerCase());
+  }
+  const host = isGM(username);
+  return auth.list().filter(user => host || !user.disabled).map(user => host
+    ? { ...user, online: online.has(user.username.toLowerCase()) }
+    : { username: user.username });
+}
+
+function pushUserList() {
+  for (const sock of io.sockets.sockets.values()) {
+    if (!sock.username || !sock.rooms.has('lobby')) continue;
+    sock.emit('user-list', { users: usersPayload(sock.username) });
+  }
+}
+
+// Remove a campaign, its files and everyone seated in it. -> false when the
+// registry could not be saved (nothing changed).
+function destroyCampaign(id) {
+  const campaign = campaignById(id);
+  if (!campaign) return false;
+  const previousRecord = snapshotField(campaigns, id);
+  delete campaigns[id];
+  if (!saveCampaigns()) {
+    restoreField(campaigns, id, previousRecord);
+    return false;
+  }
+  stores.delete(id);
+  const dir = campaignDir(id);
+  if (dir !== DATA_DIR) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); }
+    catch (e) { console.error(`Error removing campaign files for ${id}:`, e); }
+  }
+  evictFromCampaign(id, () => true);
+  return true;
+}
+
+// Send seated sockets back to the lobby (campaign deleted, or access lost).
+function evictFromCampaign(id, shouldEvict) {
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.campaignId !== id || !shouldEvict(sock)) continue;
+    leaveCampaignRoomsFor(sock, id);
+    sock.campaignId = null;
+    sock.currentMapKey = null;
+    sock.contextMapKey = null;
+    sock.join('lobby');
+    sock.emit('campaign-deleted', { id });
+  }
 }
 
 // Presence roster: every logged-in socket inside each campaign and where it is.
@@ -1143,6 +1531,48 @@ function pushCharacterInstances() {
     if (sock.username && sock.campaignId === campaignId) {
       sock.emit('character-instances', { instances: characterInstancesFor(sock.username) });
     }
+  }
+}
+
+// Dungeon index (GM right-menu "Dungeons" list): every pocket map of the active
+// campaign with the portals that lead into it, wherever they sit. A pocket whose
+// entry portal was deleted still lists, so it is never orphaned. GM only — the
+// list would tell players which dungeons exist.
+function dungeonIndex() {
+  const dungeons = new Map();
+  for (const key of Object.keys(maps)) {
+    const meta = maps[key].meta || {};
+    if (meta.kind !== 'pocket') continue;
+    dungeons.set(key, {
+      key,
+      name: meta.name || 'Pocket',
+      width: meta.width || 0,
+      height: meta.height || 0,
+      parentKey: meta.parentKey || null,
+      portals: []
+    });
+  }
+  for (const key of Object.keys(maps)) {
+    const meta = maps[key].meta || {};
+    for (const obj of Object.values(maps[key].objects || {})) {
+      if (obj.type !== 'portal' || !dungeons.has(obj.target)) continue;
+      dungeons.get(obj.target).portals.push({
+        id: obj.id,
+        mapKey: key,
+        mapName: meta.kind === 'pocket' ? (meta.name || 'Pocket') : 'World',
+        name: obj.name || 'Portal',
+        position: obj.position || { x: 0, y: 0, z: 0 }
+      });
+    }
+  }
+  return [...dungeons.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+function pushDungeons() {
+  const campaignId = activeCampaignId();
+  let dungeons = null;
+  for (const sock of io.sockets.sockets.values()) {
+    if (!sock.username || sock.campaignId !== campaignId || !isCampaignGM(sock.username)) continue;
+    sock.emit('dungeon-list', { dungeons: dungeons || (dungeons = dungeonIndex()) });
   }
 }
 
@@ -1252,12 +1682,12 @@ function migrateUnifiedLensObjects() {
 
 // Custom races/classes are table-shared. Monster definitions are scoped below
 // so players do not receive every GM-authored stat block over the socket.
-const loadedHomebrewDB = loadJSON(
-  'homebrew.json', { races: {}, classes: {}, monsters: {} }, validHomebrewSaveData
+const emptyHomebrewDB = () => Object.fromEntries(
+  Object.values(HOMEBREW_COLLECTIONS).map(collection => [collection, {}])
 );
-let homebrewDB = { races: {}, classes: {}, monsters: {} };
-for (const type of ['race', 'class', 'monster']) {
-  const collection = type === 'race' ? 'races' : (type === 'class' ? 'classes' : 'monsters');
+const loadedHomebrewDB = loadJSON('homebrew.json', emptyHomebrewDB(), validHomebrewSaveData);
+let homebrewDB = emptyHomebrewDB();
+for (const [type, collection] of Object.entries(HOMEBREW_COLLECTIONS)) {
   const source = loadedHomebrewDB[collection];
   const destination = homebrewDB[collection];
   for (const [storedIndex, rawHomebrew] of Object.entries(source || {})) {
@@ -1275,32 +1705,58 @@ for (const type of ['race', 'class', 'monster']) {
 
 // Serve the client (HTML shells, CSS, JS modules) and the read-only SRD data.
 const PUBLIC_DIR = path.join(__dirname, 'public');
+// With model packs installed the manifest URL answers with the merged view
+// (pack entries over the committed ones); without packs the static file serves.
+app.get('/assets/monsters/manifest.json', (req, res, next) => {
+  if (!mergedMonsterManifest) return next();
+  res.set('Cache-Control', 'no-cache').type('application/json').send(mergedMonsterManifest);
+});
+app.get('/assets/characters/manifest.json', (req, res) => {
+  res.set('Cache-Control', 'no-cache').type('application/json').send(characterLooksManifest);
+});
+app.use('/packs', express.static(MONSTER_PACKS_DIR, { dotfiles: 'ignore', index: false }));
 app.use(express.static(PUBLIC_DIR));
 app.use('/data/srd', express.static(path.join(__dirname, 'data', 'srd')));
 
 // Routes. root+relative (not one absolute path) so sendFile's dotfile check
 // doesn't reject the whole app when the repo lives under a dot-directory
 // (e.g. a git worktree inside a hidden folder).
-app.get('/', (req, res) => res.sendFile('creator.html', { root: PUBLIC_DIR }));
+// The home hub (lobby) is the front door; /lobby stays as an alias.
+app.get('/', (req, res) => res.sendFile('lobby.html', { root: PUBLIC_DIR }));
+app.get('/creator', (req, res) => res.sendFile('creator.html', { root: PUBLIC_DIR }));
 app.get('/lobby', (req, res) => res.sendFile('lobby.html', { root: PUBLIC_DIR }));
 app.get('/gm', (req, res) => res.sendFile('gm.html', { root: PUBLIC_DIR }));
 app.get('/player', (req, res) => res.sendFile('player.html', { root: PUBLIC_DIR }));
 app.get('/homebrew', (req, res) => res.sendFile('homebrew.html', { root: PUBLIC_DIR }));
 
-// Helper: Check if user is GM. Mutations below enforce this role and ownership,
-// but login itself is unauthenticated (the client supplies its username), so
-// deployment still assumes a trusted table rather than hostile internet users.
+function isLoopbackAddress(address) {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1';
+}
+
+// What the login modal should ask for. `setup` (create the host account) is
+// only offered to the host computer itself.
+app.get('/auth/status', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    open: auth.open,
+    setup: auth.needsSetup() ? (isLoopbackAddress(req.socket.remoteAddress) ? 'here' : 'elsewhere') : null
+  });
+});
+
+// Helper: Check if user is the global GM — the host account (lib/auth.cjs).
+// Mutations below enforce this role and ownership.
 function isGM(username) {
-  return username && username.toLowerCase() === 'gm';
+  return auth.isHost(username);
 }
 
 function homebrewPayloadFor(username) {
   const monsters = Object.values(homebrewDB.monsters);
-  return {
-    races: Object.values(homebrewDB.races),
-    classes: Object.values(homebrewDB.classes),
-    monsters: isGM(username) ? monsters : monsters.filter(monster => monster.owner === username)
-  };
+  const payload = {};
+  for (const collection of Object.values(HOMEBREW_COLLECTIONS)) {
+    payload[collection] = Object.values(homebrewDB[collection]);
+  }
+  payload.monsters = isGM(username) ? monsters : monsters.filter(monster => monster.owner === username);
+  return payload;
 }
 
 // Helper: Check if user can access character
@@ -1360,7 +1816,61 @@ function sanitizeCharacterAppearance(raw, fallbackColor) {
   for (const [key, fallback] of Object.entries(CHARACTER_APPEARANCE_DEFAULTS)) {
     appearance[key] = boundedScalarNumber(source[key], 0.5, 2, fallback);
   }
+  for (const [key, allowed] of Object.entries(CHARACTER_APPEARANCE_ENUMS)) {
+    if (allowed.has(source[key])) appearance[key] = source[key];
+  }
+  if (Array.isArray(source.traits)) {
+    appearance.traits = CHARACTER_TRAITS.filter(trait => source.traits.includes(trait));
+  }
+  if (typeof source.look === 'string' && LOOK_KEY_RE.test(source.look)) appearance.look = source.look;
+  if (isRecord(source.form)) {
+    appearance.form = {};
+    for (const key of CHARACTER_FORM_KEYS) {
+      appearance.form[key] = boundedScalarNumber(source.form[key], 0, 1, key === 'age' ? 0 : 0.5);
+    }
+  }
+  if (isRecord(source.details)) {
+    appearance.details = {};
+    for (const [key, raw] of Object.entries(source.details).slice(0, MAX_CHARACTER_DETAILS)) {
+      const value = boundedScalarNumber(raw, -1, 1, 0);
+      if (CHARACTER_KIT_ID_RE.test(key) && value) appearance.details[key] = value;
+    }
+  }
+  if (isRecord(source.wear)) {
+    appearance.wear = {};
+    for (const slot of CHARACTER_WEAR_SLOTS) {
+      const id = source.wear[slot];
+      // '' is a choice too: "nothing in this slot", not "use the default".
+      if (id === '' || (typeof id === 'string' && CHARACTER_KIT_ID_RE.test(id))) appearance.wear[slot] = id;
+    }
+  }
+  if (source.showArmor === false) appearance.showArmor = false;
+  for (const key of ['skin', 'eyeColor']) {
+    if (typeof source[key] === 'string' && CHARACTER_KIT_ID_RE.test(source[key])) appearance[key] = source[key];
+  }
   return appearance;
+}
+
+function sanitizeCharacterTextArray(raw, maxItems, maxLength) {
+  if (!Array.isArray(raw)) return [];
+  const values = [];
+  for (const candidate of raw.slice(0, maxItems)) {
+    const value = boundedString(candidate, maxLength);
+    if (value && !values.includes(value)) values.push(value);
+  }
+  return values;
+}
+
+// Pick-N feature choices: { "<source>|<feature name>": ["option name", ...] }.
+function sanitizeCharacterChoices(raw) {
+  const choices = {};
+  if (!isRecord(raw)) return choices;
+  for (const [rawKey, picked] of Object.entries(raw).slice(0, 64)) {
+    const key = boundedString(rawKey, 240);
+    const options = sanitizeCharacterTextArray(picked, 8, 120);
+    if (key && key !== '__proto__' && options.length) choices[key] = options;
+  }
+  return choices;
 }
 
 // Character sheets are copied into map tokens and consumed by both the creator
@@ -1403,10 +1913,32 @@ function sanitizeCharacterPayload(raw) {
         ? sanitizeReferenceArray(raw.equipment.items, 128, 96) : []
     },
     spells: sanitizeReferenceArray(raw.spells, 256, 96),
+    feats: sanitizeReferenceArray(raw.feats, 24, 96),
+    expertise: sanitizeReferenceArray(raw.expertise, 18, 96),
+    languages: sanitizeCharacterTextArray(raw.languages, 24, 40),
+    choices: sanitizeCharacterChoices(raw.choices),
+    notes: boundedMultilineText(raw.notes, 8000),
     color: appearance.colors.torso,
     // stats is the schema-v1/token-renderer alias retained by creator v2.
     stats: { ...abilities }
   };
+  // Optional sheet extras: only stored when the player filled them in.
+  if (isRecord(raw.asi)) {
+    const asi = {};
+    for (const ability of CHARACTER_ABILITIES) {
+      const points = boundedScalarInteger(raw.asi[ability], 0, 12, 0);
+      if (points > 0) asi[ability] = points;
+    }
+    if (Object.keys(asi).length) character.asi = asi;
+  }
+  if (isRecord(raw.personality)) {
+    const personality = {};
+    for (const key of ['traits', 'ideals', 'bonds', 'flaws', 'specialty']) {
+      const text = boundedMultilineText(raw.personality[key], 600);
+      if (text) personality[key] = text;
+    }
+    if (Object.keys(personality).length) character.personality = personality;
+  }
   if (requestedId) character.id = requestedId;
   if (isRecord(raw.hp)) {
     const current = boundedScalarInteger(raw.hp.current, 0, 999, null);
@@ -1476,6 +2008,11 @@ function sanitizeMonsterAction(raw) {
         success_type: raw.dc.success_type === 'half' ? 'half' : 'none'
       };
     }
+  }
+  // "Recharge 5-6": combat gates the action's reuse on a d6 each turn.
+  if (isRecord(raw.usage) && raw.usage.type === 'recharge on roll') {
+    const minimum = boundedScalarInteger(raw.usage.min_value, 2, 6, null);
+    if (minimum != null) action.usage = { type: 'recharge on roll', dice: '1d6', min_value: minimum };
   }
   return action;
 }
@@ -1596,106 +2133,7 @@ function sanitizeMonsterPayload(raw) {
 
 function sanitizeHomebrewPayload(type, raw) {
   if (type === 'monster') return sanitizeMonsterPayload(raw);
-  if (!isRecord(raw) || serializedBytes(raw) > 20_000) return null;
-  const name = boundedString(raw.name, 60);
-  if (!name) return null;
-  const data = { name };
-  const requestedIndex = sanitizeReference(raw.index, 96);
-  if (requestedIndex) data.index = requestedIndex;
-
-  if (type === 'race') {
-    const size = boundedString(raw.size, 20);
-    data.size = ['Tiny', 'Small', 'Medium', 'Large'].includes(size) ? size : 'Medium';
-    data.speed = boundedScalarInteger(raw.speed, 0, 120, 30);
-    data.ability_bonuses = [];
-    if (Array.isArray(raw.ability_bonuses)) {
-      for (const entry of raw.ability_bonuses.slice(0, CHARACTER_ABILITIES.length)) {
-        if (!isRecord(entry)) continue;
-        const ability = sanitizeHomebrewReferenceRecord(
-          entry.ability_score, new Set(CHARACTER_ABILITIES)
-        );
-        const bonus = boundedScalarInteger(entry.bonus, -5, 10, null);
-        if (ability && bonus != null) {
-          ability.name = ability.index.toUpperCase();
-          data.ability_bonuses.push({ ability_score: ability, bonus });
-        }
-      }
-    }
-    data.starting_proficiencies = Array.isArray(raw.starting_proficiencies)
-      ? raw.starting_proficiencies.slice(0, 32)
-        .map(entry => sanitizeHomebrewReferenceRecord(entry)).filter(Boolean)
-      : [];
-    data.traits = Array.isArray(raw.traits)
-      ? raw.traits.slice(0, 64).map((entry) => {
-        const traitName = isRecord(entry) ? boundedString(entry.name, 160) : '';
-        return traitName ? { name: traitName } : null;
-      }).filter(Boolean)
-      : [];
-    // The current homebrew form emits these arrays empty. Keep their public
-    // schema for backward compatibility without persisting arbitrary objects.
-    data.subraces = [];
-    data.languages = [];
-    return data;
-  }
-
-  if (type !== 'class') return null;
-  data.hit_die = boundedScalarInteger(raw.hit_die, 4, 20, 8);
-  data.saving_throws = Array.isArray(raw.saving_throws)
-    ? raw.saving_throws.slice(0, 6)
-      .map(entry => sanitizeHomebrewReferenceRecord(entry, new Set(CHARACTER_ABILITIES)))
-      .filter(Boolean)
-      .map(entry => ({ ...entry, name: entry.index.toUpperCase() }))
-    : [];
-  data.proficiencies = Array.isArray(raw.proficiencies)
-    ? raw.proficiencies.slice(0, 64)
-      .map(entry => sanitizeHomebrewReferenceRecord(entry)).filter(Boolean)
-    : [];
-  data.proficiency_choices = [];
-  if (Array.isArray(raw.proficiency_choices)) {
-    for (const group of raw.proficiency_choices.slice(0, 8)) {
-      if (!isRecord(group) || !isRecord(group.from) || !Array.isArray(group.from.options)) continue;
-      const options = group.from.options.slice(0, 64).map((option) => {
-        if (!isRecord(option)) return null;
-        const item = sanitizeHomebrewReferenceRecord(option.item);
-        return item ? { option_type: 'reference', item } : null;
-      }).filter(Boolean);
-      const choose = boundedScalarInteger(group.choose, 0, options.length, 0);
-      if (choose > 0 && options.length) {
-        data.proficiency_choices.push({
-          choose,
-          type: 'proficiencies',
-          from: { option_set_type: 'options_array', options }
-        });
-      }
-    }
-  }
-  data.subclasses = [];
-  const caster = boundedString(raw.caster, 12);
-  data.caster = HOMEBREW_CASTER_TYPES.has(caster) ? caster : 'none';
-  const spellAbility = isRecord(raw.spellcasting) &&
-    isRecord(raw.spellcasting.spellcasting_ability)
-    ? sanitizeHomebrewReferenceRecord(
-      raw.spellcasting.spellcasting_ability, new Set(CHARACTER_ABILITIES)
-    ) : null;
-  data.spellcasting = data.caster !== 'none' && spellAbility
-    ? { spellcasting_ability: { ...spellAbility, name: spellAbility.index.toUpperCase() } }
-    : null;
-  const spellList = sanitizeReference(raw.spellList, 32);
-  data.spellList = data.caster !== 'none' && HOMEBREW_SPELL_LISTS.has(spellList)
-    ? spellList : null;
-  data.customFeatures = Array.isArray(raw.customFeatures)
-    ? raw.customFeatures.slice(0, 100).map((entry) => {
-      if (!isRecord(entry)) return null;
-      const featureName = boundedString(entry.name, 120);
-      if (!featureName) return null;
-      return {
-        level: boundedScalarInteger(entry.level, 1, 20, 1),
-        name: featureName,
-        desc: boundedString(entry.desc, 2000)
-      };
-    }).filter(Boolean)
-    : [];
-  return data;
+  return sanitizeRulesHomebrew(type, raw);
 }
 
 function emitCharacterChange(event, payload, owner) {
@@ -1789,6 +2227,23 @@ function sanitizeNewObject(raw, username) {
       delete object.color;
     }
   }
+  // Vision fields (shared/vision.js). A light may sit on anything; senses and
+  // the GM's hidden/invisible flags only mean something on creatures.
+  const light = vision.normalizeLight(object.light);
+  if (light) object.light = light; else delete object.light;
+  const creature = type === 'token' || type === 'character';
+  if (creature && isRecord(object.senses)) object.senses = vision.normalizeSenses(object.senses);
+  else delete object.senses;
+  for (const flag of ['hidden', 'invisible']) {
+    if (object[flag] === true && isCampaignGM(username) && (creature || flag === 'hidden')) object[flag] = true;
+    else delete object[flag];
+  }
+  if (type !== 'wall') delete object.doors;
+  delete object.pose;   // only `use-prop` puts a character on furniture
+  if (type === 'prop') {
+    if (!PROP_KINDS.includes(object.kind)) return { error: 'Unknown prop' };
+    object.rot = Math.round(boundedNumber(object.rot, 0, 3, 0));
+  }
   if (type === 'portal') {
     const target = knownMapKey(object.target);
     if (!target) return { error: 'Unknown portal target' };
@@ -1811,7 +2266,7 @@ function sanitizeNewObject(raw, username) {
       delete object.buildingId;
       delete object.buildingDatumY;
     }
-    object.style = ['stone', 'wood', 'plaster'].includes(object.style) ? object.style : 'stone';
+    object.style = ['stone', 'wood', 'plaster', 'dungeon', 'sight'].includes(object.style) ? object.style : 'stone';
     object.scruffy = !!object.scruffy;
     object.seed = Math.round(boundedNumber(object.seed, -0x7fffffff, 0x7fffffff, 1));
     object.level = Math.round(boundedNumber(object.level, -20, 50, 0));
@@ -1848,6 +2303,15 @@ function sanitizeNewObject(raw, username) {
   return { object };
 }
 
+// Door states ride beside `segments`: only cells that ARE doors keep one
+// ('open' or 'locked'; a closed, unlocked door stores nothing).
+function sanitizeWallDoors(wall, raw) {
+  if (!Array.isArray(raw) || !Array.isArray(wall.segments)) return null;
+  const doors = wall.segments.map((kind, i) =>
+    (kind === 'door' && vision.DOOR_STATES.includes(raw[i])) ? raw[i] : null);
+  return doors.some(Boolean) ? doors : null;
+}
+
 function finalizeStructureObject(object) {
   if (!object || !STRUCTURE_TYPES.has(object.type)) return object;
   if (object.type === 'wall' && Array.isArray(object.path)) {
@@ -1864,6 +2328,10 @@ function finalizeStructureObject(object) {
       object.segments = Array.from({ length: count }, (_, i) =>
         WALL_SEGMENT_KINDS.has(object.segments[i]) ? object.segments[i] : null);
     }
+  }
+  if (object.type === 'wall') {
+    const doors = sanitizeWallDoors(object, object.doors);
+    if (doors) object.doors = doors; else delete object.doors;
   }
   if ((object.type === 'floor' || object.type === 'roof') && Array.isArray(object.tiles)) {
     object.tiles = sanitizeStructureTiles(object, object.tiles);
@@ -1948,6 +2416,266 @@ function validBase64Layer(value) {
     value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value);
 }
 
+// ===== Table log (rolls.json, one per campaign store) =====
+// Every roll made at the table — ability checks, saves, skills, spells cast
+// outside the tracker, free dice — plus a mirror of the combat log, kept so
+// the table can scroll back after the fight or the session is over. The
+// server rolls; clients only say what is being rolled and with what bonus
+// (the same advisory trust as combat-set-stats: the server loads no SRD).
+const TABLE_LOG_LIMIT = 400;
+// Spent spell slots and feature pools per character (pools.json in the
+// campaign store). Only what is USED is kept — the sheet says how many there
+// are, so a level-up needs no migration:
+//   { [charId]: { slots: { level: used }, pact: used, res: { key: { used, recharge } },
+//                 hd: { die: used }, hdOpen, vit: { maxHP, con, hd: { die: max } } } }
+// A rest clears them: a long rest everything (and half the hit dice come
+// back), a short rest the pact slots and the pools that recharge on a short
+// rest — and it opens the hit dice (`hdOpen`) until the character acts again.
+// `vit` is what the owner's screen last derived from the sheet (set-vitals):
+// the server has no SRD, and needs these to heal a character on its own.
+// Pending rest requests ride in the same file.
+const POOLS_FILE = 'pools.json';
+const REST_KINDS = ['short', 'long'];
+const HIT_DICE = [6, 8, 10, 12];
+function poolInt(value, min, max, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+}
+function poolsDB() {
+  if (!activeStore) return {};
+  if (!activeStore.pools) {
+    const saved = loadJSON(POOLS_FILE, { chars: {} },
+      (value) => isRecord(value) && isRecord(value.chars), activeStore.dir);
+    const chars = {};
+    for (const [id, raw] of Object.entries(saved.chars)) {
+      if (!isRecord(raw)) continue;
+      const pool = { slots: {}, pact: poolInt(raw.pact, 0, 20, 0), res: {}, hd: {} };
+      for (let level = 1; level <= 9; level++) {
+        const used = poolInt(raw.slots && raw.slots[level], 0, 20, 0);
+        if (used) pool.slots[level] = used;
+      }
+      for (const die of HIT_DICE) {
+        const used = poolInt(raw.hd && raw.hd[die], 0, 20, 0);
+        if (used) pool.hd[die] = used;
+      }
+      if (raw.hdOpen === true) pool.hdOpen = true;
+      // The spell held outside a fight; `dc` is a concentration check owed.
+      if (isRecord(raw.conc) && typeof raw.conc.name === 'string' && raw.conc.name.trim()) {
+        pool.conc = { name: raw.conc.name.trim().slice(0, 40) };
+        const dc = poolInt(raw.conc.dc, 10, 60, 0);
+        if (dc) pool.conc.dc = dc;
+      }
+      const vit = sanitizeVitals(raw.vit);
+      if (vit) pool.vit = vit;
+      for (const [key, value] of Object.entries(isRecord(raw.res) ? raw.res : {}).slice(0, 40)) {
+        if (!isRecord(value)) continue;
+        const used = poolInt(value.used, 0, 999, 0);
+        if (used) pool.res[String(key).slice(0, 40)] = { used, recharge: value.recharge === 'long' ? 'long' : 'short' };
+      }
+      chars[String(id).slice(0, 80)] = pool;
+    }
+    activeStore.pools = chars;
+    activeStore.restRequests = (Array.isArray(saved.requests) ? saved.requests : []).filter(request =>
+      isRecord(request) && typeof request.id === 'string' && typeof request.charId === 'string' &&
+      REST_KINDS.includes(request.kind)).slice(-40).map(request => ({
+        id: request.id.slice(0, 20), charId: request.charId.slice(0, 80), name: String(request.name || 'Adventurer').slice(0, 80),
+        owner: String(request.owner || '').slice(0, 40), kind: request.kind, ts: Number(request.ts) || 0
+      }));
+  }
+  return activeStore.pools;
+}
+function sanitizeVitals(raw) {
+  if (!isRecord(raw)) return null;
+  const vit = { maxHP: poolInt(raw.maxHP, 1, 999, 1), con: poolInt(raw.con, -5, 10, 0), hd: {} };
+  for (const die of HIT_DICE) {
+    const max = poolInt(raw.hd && raw.hd[die], 0, 20, 0);
+    if (max) vit.hd[die] = max;
+  }
+  return vit;
+}
+function poolOf(charId) {
+  const db = poolsDB();
+  if (!hasOwn(db, charId)) db[charId] = { slots: {}, pact: 0, res: {}, hd: {} };
+  return db[charId];
+}
+function poolIsEmpty(pool) {
+  return !pool.pact && !pool.vit && !pool.hdOpen && !pool.conc && !Object.keys(pool.slots).length &&
+    !Object.keys(pool.res).length && !Object.keys(pool.hd || {}).length;
+}
+function saveRestState() {
+  return saveJSON(POOLS_FILE, { chars: poolsDB(), requests: restList() });
+}
+function savePools(changedIds) {
+  const db = poolsDB();
+  for (const id of Object.keys(db)) if (poolIsEmpty(db[id])) delete db[id];
+  saveRestState();
+  const room = io.to(campRoom(activeCampaignId()));
+  for (const charId of changedIds) room.emit('pools-updated', { charId, pool: db[charId] || null });
+}
+// Combat spends from the combatant; this copies what is left back to the
+// character so it carries past the fight (called on every combat broadcast).
+function syncCombatPools(combat) {
+  if (!combat || !isRecord(combat.combatants)) return;
+  const changed = [];
+  for (const c of Object.values(combat.combatants)) {
+    if (c.kind !== 'character' || !c.charId || c.statsPending || !isRecord(c.slotMax)) continue;
+    const pool = poolOf(c.charId);
+    const before = JSON.stringify(pool);
+    for (let level = 1; level <= 9; level++) {
+      const used = Math.max(0, (c.slotMax[level] || 0) - ((c.slots && c.slots[level]) || 0));
+      if (used) pool.slots[level] = used; else delete pool.slots[level];
+    }
+    for (const [key, resource] of Object.entries(c.resources || {})) {
+      if (resource.recharge !== 'short' && resource.recharge !== 'long') continue;
+      const used = Math.max(0, resource.max - resource.current);
+      if (used) pool.res[key] = { used, recharge: resource.recharge }; else delete pool.res[key];
+    }
+    if (isRecord(c.pact)) pool.pact = Math.max(0, c.pact.max - c.pact.left);
+    // The spell it holds leaves the fight with it (checks are the tracker's).
+    if (isRecord(c.concentration)) pool.conc = { name: c.concentration.name }; else delete pool.conc;
+    delete pool.hdOpen; // a fight ends the rest
+    if (JSON.stringify(pool) !== before) changed.push(c.charId);
+  }
+  if (changed.length) savePools(changed);
+}
+// Every combatant (any map of this campaign) that is this character.
+function combatantsOfCharacter(charId) {
+  const found = [];
+  for (const [key, map] of Object.entries(maps)) {
+    if (!map || !map.combat || !isRecord(map.combat.combatants)) continue;
+    for (const c of Object.values(map.combat.combatants)) if (c.charId === charId) found.push({ key, c });
+  }
+  return found;
+}
+function restList() {
+  poolsDB();
+  return (activeStore && activeStore.restRequests) || [];
+}
+function setRestList(list) {
+  poolsDB();
+  if (activeStore) activeStore.restRequests = list;
+  saveRestState();
+}
+// The slot a combatant burns to cast a spell of `level`: an ordinary slot of
+// the level asked for (`wanted`, upcasting) or of the spell's own level, else
+// the warlock's pact slot. → the level it is cast at, or 0 when none is left.
+function takeCombatSlot(c, level, wanted) {
+  const tryLevel = (at) => {
+    if (c.slots && (c.slots[at] || 0) > 0) { c.slots[at] -= 1; return at; }
+    if (isRecord(c.pact) && c.pact.level === at && c.pact.left > 0) { c.pact.left -= 1; return at; }
+    return 0;
+  };
+  const want = poolInt(wanted, 1, 9, 0);
+  if (want > level) return tryLevel(want);
+  const exact = tryLevel(level);
+  if (exact) return exact;
+  if (isRecord(c.pact) && c.pact.level > level && c.pact.left > 0) { c.pact.left -= 1; return c.pact.level; }
+  return 0;
+}
+function sanitizePact(raw, used = 0) {
+  if (!isRecord(raw)) return null;
+  const level = poolInt(raw.level, 1, 9, 0);
+  const max = poolInt(raw.max != null ? raw.max : raw.count, 0, 20, 0);
+  if (!level || !max) return null;
+  return { level, max, left: raw.left != null ? poolInt(raw.left, 0, max, max) : Math.max(0, max - used) };
+}
+function emitRestRequests() {
+  io.to(campRoom(activeCampaignId())).emit('rest-requests', { requests: restList() });
+}
+// → an error string, or null once the rest is taken.
+function applyRest(charId, kind, grantedBy) {
+  const character = ownValue(charactersDB, charId);
+  if (!character) return 'Character not found';
+  if (combatantsOfCharacter(charId).length) return `${character.name || 'That character'} is in a fight: end it first`;
+  const pool = poolOf(charId);
+  let regained = 0;
+  if (kind === 'long') {
+    pool.slots = {}; pool.pact = 0; pool.res = {};
+    delete pool.hdOpen;
+    delete pool.conc;
+    if (banishWhere(summon => summon.charId === charId)) { saveMaps(); flushSummonChanges(); }
+    // Half the hit dice come back (at least one), biggest dice first.
+    const total = pool.vit ? Object.values(pool.vit.hd).reduce((sum, n) => sum + n, 0) : 0;
+    let back = total ? Math.max(1, Math.floor(total / 2)) : 99;
+    for (const die of [...HIT_DICE].reverse()) {
+      const used = pool.hd[die] || 0;
+      const returned = Math.min(used, back);
+      if (returned) { pool.hd[die] = used - returned; back -= returned; regained += returned; }
+      if (!pool.hd[die]) delete pool.hd[die];
+    }
+    if (pool.vit) applyCharacterHP(charId, pool.vit.maxHP);
+  } else {
+    pool.pact = 0;
+    for (const [key, value] of Object.entries(pool.res)) if (value.recharge !== 'long') delete pool.res[key];
+    pool.hdOpen = true;
+  }
+  savePools([charId]);
+  io.to(campRoom(activeCampaignId())).emit('rest-taken', { charId, kind, owner: character.owner || null });
+  const name = character.name || 'A character';
+  appendTableLog([{
+    id: crypto.randomUUID().slice(0, 8), ts: Date.now(), kind: 'roll', user: grantedBy, gm: true,
+    actor: name, label: kind === 'long' ? 'takes a long rest' : 'takes a short rest',
+    note: kind === 'long'
+      ? `Hit points, spell slots and every feature are restored${regained ? `; ${regained} hit ${regained === 1 ? 'die' : 'dice'} regained` : ''}.`
+      : 'Pact slots and short-rest features are restored. Hit dice can be spent to heal.',
+    text: `${name} takes a ${kind} rest`
+  }]);
+  return null;
+}
+
+const TABLE_LOG_FILE = 'rolls.json';
+function tableLog() {
+  if (!activeStore) return [];
+  if (!activeStore.rolls) {
+    const saved = loadJSON(TABLE_LOG_FILE, { entries: [] },
+      (value) => isRecord(value) && Array.isArray(value.entries), activeStore.dir);
+    activeStore.rolls = saved.entries.filter(isRecord).slice(-TABLE_LOG_LIMIT);
+  }
+  return activeStore.rolls;
+}
+function saveTableLog() {
+  return saveJSON(TABLE_LOG_FILE, { entries: tableLog() });
+}
+// A GM-only roll reaches the GM and whoever made it.
+function tableEntryVisibleTo(username, entry) {
+  return entry.gmOnly !== true || entry.user === username || isCampaignGM(username);
+}
+function appendTableLog(entries) {
+  if (!activeStore || !entries.length) return;
+  const log = tableLog();
+  log.push(...entries);
+  if (log.length > TABLE_LOG_LIMIT) log.splice(0, log.length - TABLE_LOG_LIMIT);
+  saveTableLog();
+  const campaignId = activeCampaignId();
+  for (const sock of io.sockets.sockets.values()) {
+    if (!sock.username || sock.campaignId !== campaignId) continue;
+    for (const entry of entries) {
+      if (tableEntryVisibleTo(sock.username, entry)) sock.emit('roll-logged', entry);
+    }
+  }
+}
+
+// "2d6+1d4+3" → { expr, rolls, total }, or null when it is not a dice expression.
+function rollExpression(raw) {
+  const text = String(raw == null ? '' : raw).replace(/\s+/g, '').toLowerCase();
+  if (!text || text.length > 40 || !/^[+-]?(\d*d\d+|\d+)([+-](\d*d\d+|\d+))*$/.test(text)) return null;
+  const rolls = [];
+  let total = 0;
+  for (const term of text.match(/[+-]?(\d*d\d+|\d+)/g).slice(0, 8)) {
+    const sign = term[0] === '-' ? -1 : 1;
+    const body = term.replace(/^[+-]/, '');
+    if (body.includes('d')) {
+      const [count, sides] = body.split('d');
+      const n = Math.max(1, Math.min(40, Number(count) || 1));
+      const faces = Math.max(2, Math.min(1000, Number(sides) || 2));
+      for (let i = 0; i < n; i++) { const roll = rollDie(faces); rolls.push(roll); total += sign * roll; }
+    } else {
+      total += sign * Math.min(10000, Number(body) || 0);
+    }
+  }
+  return { expr: text, rolls, total };
+}
+
 // ===== Combat (turn-based encounters) =====
 // Combat state lives at maps[roomKey].combat and persists with the map. The
 // server is the single source of truth: it rolls every die and enforces turn
@@ -1971,18 +2699,440 @@ function rollDamage(expr, crit) {
   return { expr: String(expr), rolls, total: Math.max(0, rolls.reduce((a, b) => a + b, 0) + mod) };
 }
 
-// Roll a saving throw for a target combatant vs a DC. Reusable primitive.
-function rollSave(target, ability, dc) {
-  const die = rollDie(20);
-  const mod = (target.saves && typeof target.saves[ability] === 'number') ? target.saves[ability] : 0;
-  const total = die + mod;
-  return { d20: [die], used: die, mod, total, vs: dc, success: total >= dc };
+// d20 with advantage/disadvantage (they cancel). → { d20, used, mode, text }
+function rollD20(advantage, disadvantage) {
+  const d20 = [rollDie(20)];
+  const mode = advantage === disadvantage ? 0 : (advantage ? 1 : -1);
+  if (mode) d20.push(rollDie(20));
+  const used = mode > 0 ? Math.max(...d20) : Math.min(...d20);
+  return { d20, used, mode, text: mode ? `[${d20.join(', ')}] → ${used}` : `${used}` };
 }
 
-// Apply damage to a combatant, mirroring the attack branch's HP write-back exactly.
-function applyDamageToTarget(target, amount, stagedCharacterHP = null) {
-  const cur = (target.hp && typeof target.hp.current === 'number') ? target.hp.current : target.maxHP;
-  const next = Math.max(0, cur - amount);
+// Roll a saving throw for a target combatant vs a DC, with everything that
+// bears on it: the sheet's own modifiers (`saveMods`: advantage on some
+// abilities, a flat bonus) and the conditions the tracker knows — a dodging
+// creature has advantage on DEX, a restrained one disadvantage, a stunned or
+// downed one fails STR and DEX outright, a blessed one adds 1d4.
+function rollSave(target, ability, dc, concentration = false) {
+  const mods = isRecord(target.saveMods) ? target.saveMods : {};
+  const notes = [];
+  const physical = ability === 'str' || ability === 'dex';
+  const autoFail = physical && (hasEffect(target, 'stunned') || hasEffect(target, 'paralyzed') || hasEffect(target, 'down'));
+  const advantage = (Array.isArray(mods.advantage) && mods.advantage.includes(ability)) ||
+    (ability === 'dex' && hasEffect(target, 'dodging')) || (concentration && mods.concentration === true);
+  const disadvantage = ability === 'dex' && hasEffect(target, 'restrained');
+  const roll = rollD20(advantage, disadvantage);
+  if (roll.mode > 0) notes.push('advantage');
+  if (roll.mode < 0) notes.push('disadvantage');
+  let mod = (target.saves && typeof target.saves[ability] === 'number') ? target.saves[ability] : 0;
+  if (mods.bonus) mod += mods.bonus;
+  let bless = 0;
+  if (hasEffect(target, 'blessed')) { bless = rollDie(4); notes.push(`Bless +${bless}`); }
+  const total = roll.used + mod + bless;
+  if (autoFail) notes.push('fails automatically');
+  return {
+    d20: roll.d20, used: roll.used, mode: roll.mode, text: roll.text, mod, bless, total, vs: dc,
+    success: !autoFail && total >= dc, autoFail, notes
+  };
+}
+
+// What a save for damage leaves: all of it on a failure, half or none on a
+// success — and with Evasion a DEX save for half becomes none / half.
+function damageAfterSave(target, total, ability, saveSuccess, success) {
+  const evasion = ability === 'dex' && saveSuccess === 'half' && isRecord(target.saveMods) && target.saveMods.evasion === true;
+  if (success) {
+    return {
+      dealt: evasion || saveSuccess !== 'half' ? 0 : Math.floor(total / 2),
+      note: evasion ? ' (Evasion)' : (saveSuccess === 'half' ? ' (half)' : '')
+    };
+  }
+  return { dealt: evasion ? Math.floor(total / 2) : total, note: evasion ? ' (Evasion: half)' : '' };
+}
+
+// --- Areas and pending saving throws ----------------------------------------
+// An area effect is aimed by its user and ruled on here: shared/aoe.js says
+// which combatants stand in it (walls give total cover), the damage is rolled
+// once, and every creature caught owes a saving throw. A save belongs to
+// whoever plays the creature: it waits in `combat.pending` until its owner (or
+// the GM) rolls it with `combat-save`. Saves the acting user controls anyway
+// are rolled on the spot.
+
+// The combatants an area catches. → { aim, targets } or an error string.
+function areaTargets(key, combat, caster, shape, point) {
+  const objects = (maps[key] && maps[key].objects) || {};
+  const from = ownValue(objects, caster.id);
+  if (!from || !from.position) return `${caster.name} is not on the map`;
+  const aim = aoe.resolveAim(shape, from.position, isRecord(point) ? point : from.position);
+  const creatures = [];
+  for (const c of Object.values(combat.combatants)) {
+    const object = ownValue(objects, c.id);
+    if (object && object.position) creatures.push({ id: c.id, x: object.position.x, y: object.position.y, z: object.position.z });
+  }
+  const occ = visionState(key).occ;
+  const selfOrigin = aim.kind === 'cone' || aim.kind === 'line' || aim.kind === 'self';
+  const ids = aoe.caughtIn(aim, creatures, {
+    exclude: selfOrigin ? caster.id : null,
+    blocked: (source, creature) => vision.sightBlocked(occ, source.x, creature.y + 0.5, source.z, creature.x, creature.y + 0.5, creature.z)
+  });
+  return { aim, targets: ids.map(id => combat.combatants[id]) };
+}
+
+// Presentation hint for an aimed area: both screens draw the burst from it.
+function areaFx(aim) {
+  const round = (value) => Math.round(value * 100) / 100;
+  return {
+    kind: aim.kind, size: round(aim.size), width: round(aim.width),
+    origin: [round(aim.origin.x), round(aim.origin.z)],
+    center: [round(aim.center.x), round(aim.center.z)],
+    dir: [round(aim.dir.x), round(aim.dir.z)]
+  };
+}
+
+// Roll one creature's save against a pending effect and apply what follows.
+function resolvePendingSave(key, combat, pending, target, stagedCharacterHP) {
+  const state = pending.targets[target.id];
+  if (!state || state.done) return;
+  if (pending.conc) { // a concentration check: nothing but the spell is at stake
+    pending.targets[target.id] = { done: true, success: true, total: 0 };
+    if (!isRecord(target.concentration)) return;
+    const check = rollSave(target, 'con', pending.dc, true);
+    pushLog(key, combat, {
+      kind: 'cast', actorName: target.name, spellName: target.concentration.name,
+      save: { d20: check.d20, used: check.used, mod: check.mod, total: check.total, vs: check.vs, ability: 'con', success: check.success },
+      text: `${target.name} concentrates on ${target.concentration.name} (DC ${pending.dc} CON): d20 ${check.text} ${fmtSigned(check.mod)}${check.bless ? ` + ${check.bless}` : ''} = ${check.total}${check.notes.length ? ` [${check.notes.join(', ')}]` : ''} — ${check.success ? 'HELD' : 'LOST'}`
+    });
+    pending.targets[target.id] = { done: true, success: check.success, total: check.total };
+    if (!check.success) endConcentration(key, combat, target, 'loses concentration');
+    return;
+  }
+  const save = rollSave(target, pending.saveAbility, pending.dc);
+  let text = `${target.name} saves against ${pending.sourceName}'s ${pending.name} (DC ${pending.dc} ${pending.saveAbility.toUpperCase()}): d20 ${save.text} ${fmtSigned(save.mod)}${save.bless ? ` + ${save.bless}` : ''} = ${save.total}${save.notes.length ? ` [${save.notes.join(', ')}]` : ''} — ${save.success ? 'SAVE' : 'FAIL'}`;
+  const entry = {
+    kind: 'cast', actorName: pending.sourceName, targetName: target.name, spellName: pending.name,
+    save: { d20: save.d20, used: save.used, mod: save.mod, total: save.total, vs: save.vs, ability: pending.saveAbility, success: save.success }
+  };
+  let dealt = 0;
+  if (pending.damage) {
+    const outcome = damageAfterSave(target, pending.damage.total, pending.saveAbility, pending.saveSuccess, save.success);
+    dealt = outcome.dealt;
+    entry.dmg = { expr: pending.damage.expr, rolls: pending.damage.rolls, total: dealt };
+    text += ` · ${pending.damage.expr} → ${dealt}${pending.damageType ? ' ' + pending.damageType : ''}${outcome.note}`;
+    const next = applyDamageToTarget(target, dealt, stagedCharacterHP);
+    if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
+  }
+  // An effect held by concentration needs its caster still holding the spell.
+  const holder = pending.linked ? ownValue(combat.combatants, pending.sourceId) : null;
+  const lapsed = pending.linked && !(holder && isRecord(holder.concentration) && holder.concentration.name === pending.name);
+  if (!save.success && pending.effect && lapsed) {
+    text += ' — the spell has already ended';
+  } else if (!save.success && pending.effect && !hasEffect(target, pending.effect)) {
+    addEffect(target, pending.effect, false);
+    if (holder) holdEffect(holder, target, pending.effect);
+    text += ` — ${target.name} is ${CONDITION_LABELS[pending.effect].toLowerCase()}`;
+  }
+  entry.text = text;
+  entry.fx = { react: true, target: target.id, ...(dealt > 0 || (!save.success && pending.effect && !lapsed) ? { landed: true } : {}) };
+  pushLog(key, combat, entry);
+  pending.targets[target.id] = { done: true, success: save.success, total: save.total };
+}
+
+function prunePending(combat) {
+  if (!Array.isArray(combat.pending)) return;
+  combat.pending = combat.pending.filter(pending =>
+    Object.entries(pending.targets).some(([id, state]) => !state.done && hasOwn(combat.combatants, id)));
+  if (!combat.pending.length) delete combat.pending;
+}
+
+// Roll every save still owed (the GM moves the fight on, or ends it).
+function settlePending(key, combat, stagedCharacterHP) {
+  for (const pending of (Array.isArray(combat.pending) ? combat.pending : [])) {
+    for (const id of Object.keys(pending.targets)) {
+      const target = ownValue(combat.combatants, id);
+      if (target) resolvePendingSave(key, combat, pending, target, stagedCharacterHP);
+    }
+  }
+  delete combat.pending;
+}
+
+// Announce a save-for-effect and collect the saves. spec: { name, verb,
+// saveAbility, dc, saveSuccess, damage (dice), damageType, effect, note, aim };
+// `rollsNow(target)` says whose save the acting user may roll at once.
+function openSave(key, combat, source, spec, targets, stagedCharacterHP, rollsNow) {
+  const damage = spec.damage ? rollDamage(spec.damage, false) : null;
+  const pending = {
+    id: crypto.randomUUID().slice(0, 8), sourceId: source.id, sourceName: source.name,
+    name: spec.name, verb: spec.verb === 'casts' ? 'casts' : 'uses',
+    saveAbility: spec.saveAbility, dc: spec.dc, saveSuccess: spec.saveSuccess === 'none' ? 'none' : 'half',
+    damageType: spec.damageType || '', targets: {},
+    ...(damage ? { damage: { expr: damage.expr, rolls: damage.rolls, total: damage.total } } : {}),
+    ...(spec.effect ? { effect: spec.effect } : {}),
+    ...(spec.effect && spec.linked ? { linked: true } : {})
+  };
+  for (const target of targets) pending.targets[target.id] = { done: false };
+  const names = targets.map(target => target.name);
+  const caught = !targets.length ? 'no one is caught'
+    : spec.aim ? `${targets.length} caught — ${names.join(', ')}` : `on ${names.join(', ')}`;
+  pushLog(key, combat, {
+    kind: 'cast', actorName: source.name, spellName: spec.name,
+    ...(damage ? { dmg: { expr: damage.expr, rolls: damage.rolls, total: damage.total } } : {}),
+    ...(spec.quiet ? {} : { fx: {
+      ...combatFx(source, targets.length === 1 && !spec.aim ? targets[0] : null, spec.name, spec.damageType),
+      ...(spec.aim ? { area: areaFx(spec.aim) } : {}),
+      ...(spec.form && !spec.aim ? { form: spec.form } : {})
+    } }),
+    text: `${source.name} ${pending.verb} ${spec.name}${spec.note || ''} (DC ${spec.dc} ${spec.saveAbility.toUpperCase()}${damage ? `, ${damage.expr} → ${damage.total}${spec.damageType ? ' ' + spec.damageType : ''}` : ''}): ${caught}`
+  });
+  for (const target of targets) {
+    if (rollsNow(target)) resolvePendingSave(key, combat, pending, target, stagedCharacterHP);
+  }
+  if (Object.values(pending.targets).some(state => !state.done)) {
+    combat.pending = [...(Array.isArray(combat.pending) ? combat.pending : []), pending].slice(-12);
+  }
+}
+
+// --- Lingering areas ----------------------------------------------------------
+// `combat.zones` (public): an area that stays where it was cast — or follows
+// its caster — and catches a creature that starts its turn in it or walks
+// into it, once per turn. Catching only notes a due save (`zoneDue`, transient);
+// `sweepZones` opens it at the top of the next combat save, where the HP
+// transaction and the acting user are known.
+function zoneAim(key, zone) {
+  if (!zone.follow) return zone.aim;
+  const object = ownValue((maps[key] && maps[key].objects) || {}, zone.sourceId);
+  if (!object || !object.position) return zone.aim;
+  const at = { x: object.position.x, z: object.position.z };
+  return { ...zone.aim, origin: at, center: at };
+}
+function zoneCatch(combat, zone, target) {
+  if (zone.touched.includes(target.id) || (zone.follow && target.id === zone.sourceId) || hasEffect(target, 'down')) return;
+  zone.touched.push(target.id);
+  combat.zoneDue = [...(Array.isArray(combat.zoneDue) ? combat.zoneDue : []), { zone: zone.id, target: target.id }].slice(-40);
+}
+// A creature's turn begins: every zone forgets who it caught, the caster's
+// own zones may run out, and the ones it stands in catch it.
+function zonesAtTurnStart(key, combat, c) {
+  if (!Array.isArray(combat.zones)) return;
+  combat.zones = combat.zones.filter(zone => !(zone.until && zone.sourceId === c.id && combat.round >= zone.until));
+  const object = ownValue((maps[key] && maps[key].objects) || {}, c.id);
+  for (const zone of combat.zones) {
+    zone.touched = [];
+    if (zone.on === 'enter' || !object || !object.position) continue;
+    if (aoe.inArea(zoneAim(key, zone), object.position.x, object.position.z)) zoneCatch(combat, zone, c);
+  }
+  if (!combat.zones.length) delete combat.zones;
+}
+// A creature walked from `from` to `to`: zones it was outside of and crossed.
+function zonesOnMove(key, combat, c, from, to) {
+  if (!Array.isArray(combat.zones)) return false;
+  const before = Array.isArray(combat.zoneDue) ? combat.zoneDue.length : 0;
+  const steps = Math.max(1, Math.ceil(Math.hypot(to.x - from.x, to.z - from.z) / 0.5));
+  for (const zone of combat.zones) {
+    if (zone.on === 'start') continue;
+    const aim = zoneAim(key, zone);
+    if (aoe.inArea(aim, from.x, from.z)) continue;
+    for (let step = 1; step <= steps; step++) {
+      const t = step / steps;
+      if (aoe.inArea(aim, from.x + (to.x - from.x) * t, from.z + (to.z - from.z) * t)) { zoneCatch(combat, zone, c); break; }
+    }
+  }
+  return (Array.isArray(combat.zoneDue) ? combat.zoneDue.length : 0) > before;
+}
+function sweepZones(key, combat, stagedCharacterHP, rollsNow) {
+  if (!combat || !Array.isArray(combat.zoneDue)) return;
+  const due = combat.zoneDue;
+  delete combat.zoneDue;
+  for (const item of due) {
+    const zone = (combat.zones || []).find(other => other.id === item.zone);
+    const target = ownValue(combat.combatants, item.target);
+    if (!zone || !target || hasEffect(target, 'down')) continue;
+    openSave(key, combat, { id: zone.sourceId, name: zone.sourceName }, {
+      name: zone.name, verb: 'uses', quiet: true, note: ' (lingering)',
+      saveAbility: zone.saveAbility, dc: zone.dc, saveSuccess: zone.saveSuccess,
+      damage: zone.damage || null, damageType: zone.damageType,
+      effect: zone.effect, linked: zone.held === true && !!zone.effect
+    }, [target], stagedCharacterHP, (creature) => !creature.owner || rollsNow(creature));
+  }
+}
+function dropZones(combat, keep) {
+  if (!Array.isArray(combat.zones)) return;
+  combat.zones = combat.zones.filter(keep);
+  if (!combat.zones.length) delete combat.zones;
+}
+
+// A spell's light or darkness on a token: written here, told to the screens
+// once the combat save went through (`flushLightChanges`, connection scope).
+const lightChanges = [];
+function setSpellLight(key, id, light) {
+  const object = ownValue((maps[key] && maps[key].objects) || {}, id);
+  if (!object) return false;
+  if (light) object.light = light; else delete object.light;
+  lightChanges.push({ key, id });
+  touchVision();
+  return true;
+}
+
+// --- Summoned things -----------------------------------------------------------
+// Mage Hand, Spiritual Weapon, Dancing Lights...: a `type: 'summon'` object the
+// server alone creates (never `add-object`). It belongs to the caster's player
+// (`owner`, who may move and dismiss it), stays within `leashFt` of the
+// caster's token (`casterId`) and goes with the spell: cast again, concentration
+// lost (`held`), its rounds run out (`until`), or its caster leaves the map.
+// Changes are told to the screens by `flushSummonChanges` once saved.
+const summonChanges = [];
+function conjure(key, spec) {
+  const map = getMap(key);
+  for (const other of Object.values(map.objects)) { // one of each spell per caster
+    if (other.type === 'summon' && other.casterId === spec.casterId && other.spell === spec.spell) banish(key, other.id);
+  }
+  if (Object.keys(map.objects).length >= MAX_MAP_OBJECTS) return null;
+  const object = {
+    id: crypto.randomUUID(), type: 'summon', kind: spec.kind,
+    name: boundedText(spec.spell, 40) || 'Summon', spell: boundedText(spec.spell, 40) || 'Summon',
+    position: { x: spec.position.x, y: spec.position.y, z: spec.position.z },
+    owner: spec.owner || '', casterId: spec.casterId, casterName: boundedText(spec.casterName, 80) || '',
+    leashFt: spec.leashFt || 0, moveFt: spec.moveFt || 0, addedBy: spec.owner || ''
+  };
+  if (spec.charId) object.charId = spec.charId;
+  if (spec.held) object.held = true;
+  if (spec.until) object.until = spec.until;
+  if (spec.color != null) object.color = spec.color;
+  if (spec.castTurn) object.castTurn = spec.castTurn;
+  if (isRecord(spec.strike)) object.strike = spec.strike;
+  const light = vision.normalizeLight(spec.light);
+  if (light) object.light = light;
+  map.objects[object.id] = object;
+  summonChanges.push({ key, op: 'add', object });
+  touchVision();
+  return object;
+}
+function banish(key, id) {
+  const map = ownValue(maps, key);
+  const object = map && ownValue(map.objects, id);
+  if (!object || object.type !== 'summon') return false;
+  delete map.objects[id];
+  summonChanges.push({ key, op: 'del', object });
+  touchVision();
+  return true;
+}
+// Every summon in the campaign that `test` picks. → how many went.
+function banishWhere(test, onlyKey = null) {
+  let gone = 0;
+  for (const key of (onlyKey ? [onlyKey] : Object.keys(maps))) {
+    const map = ownValue(maps, key);
+    if (!map || !isRecord(map.objects)) continue;
+    for (const object of Object.values(map.objects)) {
+      if (object && object.type === 'summon' && test(object) && banish(key, object.id)) gone++;
+    }
+  }
+  return gone;
+}
+function flushSummonChanges() {
+  const keys = new Set();
+  for (const change of summonChanges.splice(0)) {
+    const map = ownValue(maps, change.key);
+    if (change.op === 'add') {
+      if (map && ownValue(map.objects, change.object.id)) announceObject(change.key, change.object);
+    } else {
+      forEachMapSocket(change.key, null, (sock) => sock.emit('object-deleted', { id: change.object.id }));
+    }
+    keys.add(change.key);
+  }
+  for (const key of keys) reconcileVision(key);
+}
+// Why a player may not put their summon there (null = fine). In a started
+// fight it moves on its caster's turn, `moveFt` a turn (`moved` keeps count).
+function summonMoveProblem(key, object, position, commit) {
+  const map = getMap(key);
+  const caster = ownValue(map.objects, object.casterId);
+  const feet = (a, b) => Math.hypot(a.x - b.x, a.z - b.z) * 5;
+  if (caster && caster.position && object.leashFt && feet(caster.position, position) > object.leashFt + 2.5) {
+    return `${object.name} cannot go more than ${object.leashFt} ft from ${object.casterName || 'its caster'}`;
+  }
+  const combat = map.combat;
+  if (combat && combat.started && hasOwn(combat.combatants, object.casterId)) {
+    if (combat.activeId !== object.casterId) return `${object.name} moves on ${object.casterName || 'its caster'}'s turn`;
+    const turn = `${combat.round}:${object.casterId}`;
+    const used = isRecord(object.moved) && object.moved.turn === turn ? Number(object.moved.feet) || 0 : 0;
+    const step = feet(object.position || position, position);
+    if (object.moveFt && used + step > object.moveFt + 0.5) {
+      return `Too far: ${object.name} moves ${object.moveFt} ft a turn (${Math.max(0, Math.round(object.moveFt - used))} ft left)`;
+    }
+    if (commit) object.moved = { turn, feet: used + step };
+  }
+  return null;
+}
+
+// --- Concentration -----------------------------------------------------------
+// One spell at a time: `c.concentration { name, effects: [{ id, key }], until? }`
+// names it and the conditions it holds on others, which end with it. Damage
+// asks for a CON save (DC 10, or half the damage if that is higher) that waits
+// in `combat.pending` like any other save; dropping to 0 HP, being stunned or
+// paralyzed, or turning to another concentration spell ends it outright.
+function endConcentration(key, combat, c, why) {
+  const held = c.concentration;
+  if (!isRecord(held)) return;
+  delete c.concentration;
+  const freed = new Set();
+  for (const link of (Array.isArray(held.effects) ? held.effects : [])) {
+    const target = ownValue(combat.combatants, link.id);
+    if (!target || !hasEffect(target, link.key)) continue;
+    removeEffect(target, link.key);
+    freed.add(target.name);
+  }
+  dropZones(combat, zone => !(zone.held && zone.sourceId === c.id && zone.name === held.name));
+  for (const id of (Array.isArray(held.lights) ? held.lights : [])) setSpellLight(key, id, null);
+  banishWhere(summon => summon.held === true && summon.casterId === c.id && summon.spell === held.name, key);
+  pushLog(key, combat, {
+    kind: 'info', actorName: c.name,
+    text: `${c.name} ${why} — ${held.name} ends${freed.size ? ` (${[...freed].join(', ')})` : ''}`
+  });
+}
+
+function beginConcentration(key, combat, c, name, rounds) {
+  endConcentration(key, combat, c, 'turns to another spell');
+  c.concentration = { name, effects: [] };
+  if (rounds > 0 && combat.started) c.concentration.until = combat.round + rounds;
+}
+
+function holdEffect(c, target, effectKey) {
+  if (isRecord(c.concentration) && c.concentration.effects.length < 24) c.concentration.effects.push({ id: target.id, key: effectKey });
+}
+
+// Runs before every combat save: what the damage of this step (`concHits`,
+// noted by applyDamageToTarget) and the conditions now in place mean for the
+// spells being held. `rollsNow(c)` says whose check the acting user rolls;
+// creatures no player owns always roll at once.
+function sweepConcentration(key, combat, rollsNow) {
+  if (!combat || !isRecord(combat.combatants)) return;
+  for (const c of Object.values(combat.combatants)) {
+    const hits = Array.isArray(c.concHits) ? c.concHits : [];
+    delete c.concHits;
+    if (!isRecord(c.concentration)) continue;
+    if (hasEffect(c, 'down')) { endConcentration(key, combat, c, 'drops'); continue; }
+    if (hasEffect(c, 'stunned') || hasEffect(c, 'paralyzed')) { endConcentration(key, combat, c, 'cannot act'); continue; }
+    for (const amount of hits) {
+      if (!isRecord(c.concentration)) break;
+      const pending = {
+        id: crypto.randomUUID().slice(0, 8), sourceId: c.id, sourceName: c.name,
+        name: c.concentration.name, verb: 'uses', saveAbility: 'con',
+        dc: Math.max(10, Math.floor(amount / 2)), saveSuccess: 'none', damageType: '',
+        conc: true, targets: { [c.id]: { done: false } }
+      };
+      if (!c.owner || rollsNow(c)) resolvePendingSave(key, combat, pending, c, null);
+      else combat.pending = [...(Array.isArray(combat.pending) ? combat.pending : []), pending].slice(-12);
+    }
+  }
+  // A check for a spell that has ended meanwhile is owed by no one.
+  if (Array.isArray(combat.pending)) {
+    combat.pending = combat.pending.filter(pending => !pending.conc ||
+      Object.keys(pending.targets).some(id => isRecord((ownValue(combat.combatants, id) || {}).concentration)));
+    if (!combat.pending.length) delete combat.pending;
+  }
+}
+
+// Write a combatant's HP. Characters stage the change so the sheet and every
+// tracker mirror stay in one transaction; tokens only live in the tracker.
+function setTargetHP(target, next, stagedCharacterHP = null) {
   if (target.kind === 'character' && target.charId && hasOwn(charactersDB, target.charId)) {
     if (Array.isArray(stagedCharacterHP)) {
       const stage = stageCharacterHP(target.charId, next);
@@ -1998,15 +3148,19 @@ function applyDamageToTarget(target, amount, stagedCharacterHP = null) {
   return next;
 }
 
-function fmtSigned(n) { return (n < 0 ? '- ' : '+ ') + Math.abs(n); }
+// Apply damage to a combatant, mirroring the attack branch's HP write-back exactly.
+function applyDamageToTarget(target, amount, stagedCharacterHP = null) {
+  const cur = (target.hp && typeof target.hp.current === 'number') ? target.hp.current : target.maxHP;
+  if (amount > 0 && isRecord(target.concentration)) target.concHits = [...(target.concHits || []), amount].slice(-8);
+  return setTargetHP(target, Math.max(0, cur - amount), stagedCharacterHP);
+}
 
-// Conditions a combatant can carry. auto:true effects (from Dash/Dodge/
-// Disengage) are stripped at the start of that combatant's next turn.
-const CONDITION_LABELS = {
-  dodging: 'Dodge', disengaged: 'Disengage', dashed: 'Dash', down: 'Down',
-  prone: 'Prone', poisoned: 'Poisoned', restrained: 'Restrained', stunned: 'Stunned',
-  blinded: 'Blinded', frightened: 'Frightened', grappled: 'Grappled', invisible: 'Invisible'
-};
+function applyHealToTarget(target, amount, stagedCharacterHP = null) {
+  const cur = (target.hp && typeof target.hp.current === 'number') ? target.hp.current : target.maxHP;
+  return setTargetHP(target, Math.min(target.maxHP, cur + Math.max(0, amount)), stagedCharacterHP);
+}
+
+function fmtSigned(n) { return (n < 0 ? '- ' : '+ ') + Math.abs(n); }
 
 // Early versions persisted combat state before the socket boundary had a
 // complete nested schema. Repair those parseable legacy records on load so a
@@ -2029,6 +3183,11 @@ function normalizePersistedCombat(raw) {
     for (const ability of abilities) saves[ability] = clamp(value.saves && value.saves[ability], -20, 30, 0);
     const slots = {};
     for (let level = 1; level <= 9; level++) slots[level] = clamp(value.slots && value.slots[level], 0, 20, 0);
+    let slotMax = null;
+    if (isRecord(value.slotMax)) {
+      slotMax = {};
+      for (let level = 1; level <= 9; level++) slotMax[level] = clamp(value.slotMax[level], 0, 20, 0);
+    }
     const effects = [];
     const seenEffects = new Set();
     for (const effect of (Array.isArray(value.effects) ? value.effects : []).slice(0, 32)) {
@@ -2037,39 +3196,8 @@ function normalizePersistedCombat(raw) {
       seenEffects.add(key);
       effects.push({ key, label: CONDITION_LABELS[key], auto: effect.auto === true });
     }
-    const attacks = (Array.isArray(value.attacks) ? value.attacks : []).slice(0, 8).map(attack => {
-      const normalized = {
-        name: boundedString(attack && attack.name, 30) || 'Attack',
-        attack: clamp(attack && attack.attack, -10, 30, 0),
-        damage: boundedString(attack && attack.damage, 20) || '1',
-        damageType: boundedString(attack && attack.damageType, 20),
-        ranged: !!(attack && attack.ranged),
-        rangeFt: clamp(attack && attack.rangeFt, 5, 600, 5)
-      };
-      const parts = (Array.isArray(attack && attack.damageParts) ? attack.damageParts : [])
-        .slice(0, 4).map(part => ({
-          damage: boundedString(part && part.damage, 20) || '1',
-          damageType: boundedString(part && part.damageType, 20)
-        }));
-      if (parts.length > 1) normalized.damageParts = parts;
-      return normalized;
-    });
-    const spells = (Array.isArray(value.spells) ? value.spells : []).slice(0, 20).map((spell, index) => {
-      const normalized = {
-        name: boundedString(spell && spell.name, 40) || 'Spell',
-        level: clamp(spell && spell.level, 0, 9, 0),
-        damage: boundedString(spell && spell.damage, 20) || '1d4',
-        damageType: boundedString(spell && spell.damageType, 20),
-        spellIndex: index
-      };
-      if (spell && spell.saveAbility) {
-        normalized.saveAbility = abilities.includes(spell.saveAbility) ? spell.saveAbility : 'dex';
-        normalized.saveSuccess = spell.saveSuccess === 'none' ? 'none' : 'half';
-      } else {
-        normalized.attackType = spell && spell.attackType === 'melee' ? 'melee' : 'ranged';
-      }
-      return normalized;
-    });
+    const attacks = normalizeAttacks(value.attacks);
+    const spells = normalizeSpells(value.spells);
     const maxHP = clamp(value.maxHP, 1, 999, 10);
     const hp = isRecord(value.hp)
       ? { current: clamp(value.hp.current, 0, 999, maxHP) }
@@ -2090,6 +3218,7 @@ function normalizePersistedCombat(raw) {
       statsPending: value.statsPending === true,
       ac: clamp(value.ac, 1, 30, 10),
       speedFeet: clamp(value.speedFeet, 0, 120, 30),
+      moveModes: normalizeMoveModes(value.moveModes),
       initMod: clamp(value.initMod, -10, 20, 0),
       initiative: value.initiative == null ? null : clamp(value.initiative, -100, 100, null),
       maxHP,
@@ -2103,7 +3232,15 @@ function normalizePersistedCombat(raw) {
       spellAtk: clamp(value.spellAtk, -10, 30, 0),
       spellDC: clamp(value.spellDC, 1, 40, 8),
       slots,
-      spells
+      ...(slotMax ? { slotMax } : {}),
+      ...(sanitizePact(value.pact) ? { pact: sanitizePact(value.pact) } : {}),
+      spells,
+      abilities: normalizeAbilities(value.abilities),
+      riders: normalizeRiders(value.riders),
+      resources: normalizeResources(value.resources),
+      saveMods: normalizeSaveMods(value.saveMods),
+      ...(normalizeConcentration(value.concentration) ? { concentration: normalizeConcentration(value.concentration) } : {}),
+      ...normalizeTurnState(value)
     };
   }
   const order = [];
@@ -2133,6 +3270,8 @@ function normalizePersistedCombat(raw) {
   const activeId = hasOwn(combatants, requestedActiveId)
     ? requestedActiveId
     : (raw.started === true ? (order[0] || null) : null);
+  const pending = normalizePending(raw.pending, Object.keys(combatants));
+  const zones = normalizeZones(raw.zones, Object.keys(combatants));
   return {
     active: true,
     started: raw.started === true,
@@ -2140,7 +3279,9 @@ function normalizePersistedCombat(raw) {
     activeId,
     order,
     combatants,
-    log
+    log,
+    ...(pending.length ? { pending } : {}),
+    ...(zones.length ? { zones } : {})
   };
 }
 
@@ -2304,6 +3445,19 @@ function pushLog(key, combat, entry) {
   return entry;
 }
 
+// Presentation hint riding on a log entry: who did what to whom, so clients
+// can play the matching model animation / breath effect. Ids are the public
+// combatant ids (= object ids); nothing here is authoritative.
+function combatFx(actor, target, action, damageType, landed) {
+  return {
+    actor: actor.id,
+    ...(target ? { target: target.id } : {}),
+    action: boundedString(action, 60),
+    ...(damageType ? { type: boundedString(damageType, 20) } : {}),
+    ...(landed ? { landed: true } : {})
+  };
+}
+
 function discardPendingCombatLogs(combat) {
   if (combat) pendingCombatLogs.delete(combat);
 }
@@ -2316,7 +3470,7 @@ function restoreCombatField(map, snapshot) {
 const PUBLIC_COMBATANT_FIELDS = [
   'id', 'kind', 'name', 'color', 'owner', 'statsPending', 'initiative',
   'ac', 'speedFeet', 'maxHP', 'hp', 'movementUsedFeet', 'dashFeet',
-  'actionUsed', 'effects'
+  'actionUsed', 'effects', 'concentration'
 ];
 
 // Encounter-facing status is shared at the table, but a character's sheet
@@ -2340,7 +3494,7 @@ function projectCombatFor(username, combat) {
     const projected = {};
     for (const field of [
       'id', 'ts', 'round', 'kind', 'actorName', 'targetName', 'spellName',
-      'text', 'roll', 'dmg', 'save'
+      'text', 'roll', 'dmg', 'save', 'fx'
     ]) {
       if (hasOwn(entry, field)) projected[field] = entry[field];
     }
@@ -2353,18 +3507,26 @@ function projectCombatFor(username, combat) {
     activeId: combat.activeId,
     order: Array.isArray(combat.order) ? combat.order : [],
     combatants,
-    log
+    log,
+    ...(Array.isArray(combat.pending) && combat.pending.length ? { pending: combat.pending } : {}),
+    ...(Array.isArray(combat.zones) && combat.zones.length ? { zones: combat.zones } : {})
   };
 }
 
 function emitCombatState(key) {
   const state = (maps[key] && maps[key].combat) || null;
+  syncCombatPools(state);
   const pending = state ? (pendingCombatLogs.get(state) || []) : [];
   discardPendingCombatLogs(state);
   for (const queued of pending) {
     if (isUnifiedKey(queued.key)) emitToUnified(null, (sock) => sock.emit('combat-log', queued.entry));
     else io.to(mapRoom(activeCampaignId(), queued.key)).emit('combat-log', queued.entry);
   }
+  // The table log keeps what the tracker forgets when the fight ends.
+  appendTableLog(pending.filter(queued => queued.entry && queued.entry.text).map(queued => ({
+    id: queued.entry.id, ts: queued.entry.ts, kind: 'combat', round: queued.entry.round,
+    actor: boundedString(queued.entry.actorName, 80), text: boundedString(queued.entry.text, 600)
+  })));
   if (isUnifiedKey(key)) {
     emitToUnified(null, (sock) => sock.emit('combat-updated', projectCombatFor(sock.username, state)));
   } else {
@@ -2377,6 +3539,18 @@ function emitCombatState(key) {
 function monsterAbilityMod(monster, field) {
   const score = boundedScalarInteger(monster && monster[field], 1, 30, 10);
   return Math.floor((score - 10) / 2);
+}
+
+// Speeds beyond walking that change what terrain costs (shared/ground.js
+// MOVE_MODES): a climb speed takes slopes in stride, a swim speed water.
+const MOVE_MODES = ['climb', 'swim', 'fly'];
+function normalizeMoveModes(value) {
+  return Array.isArray(value) ? MOVE_MODES.filter(mode => value.includes(mode)) : [];
+}
+
+function monsterMoveModes(monster) {
+  const speed = isRecord(monster && monster.speed) ? monster.speed : {};
+  return MOVE_MODES.filter(mode => hasOwn(speed, mode) && /[1-9]\d*\s*ft/i.test(String(speed[mode] || '')));
 }
 
 function monsterSpeedFeet(monster) {
@@ -2452,27 +3626,64 @@ function monsterCombatSeed(monster) {
     attacks.push(attack);
     if (attacks.length >= 8) break;
   }
+  // Save-or-suffer actions (breath weapons, gazes): no attack roll, a DC and
+  // usually damage. A "recharge on roll" usage gates reuse on a d6; the cone
+  // or line size is read from the prose.
+  const abilities = [];
+  for (const action of canonical.actions) {
+    if (action.attack_bonus != null || !action.dc) continue;
+    const damage = (Array.isArray(action.damage) ? action.damage : []).find(entry => entry && entry.damage_dice);
+    const recharge = action.usage ? [null, action.usage.min_value]
+      : /\(Recharge (\d)(?:\s*[-–]\s*\d)?\)/i.exec(String(action.name || ''));
+    const shape = /(\d+)-foot[- ](cone|line|cube|radius|sphere)/i.exec(String(action.desc || ''));
+    // "…centered on a point within 120 feet" is thrown; a bare radius is
+    // around the monster itself.
+    const far = /point[^.]*within (\d+) feet/i.exec(String(action.desc || ''));
+    abilities.push({
+      name: String(action.name || 'Ability').replace(/\s*\(Recharge[^)]*\)/i, ''),
+      type: 'save', cost: 'action',
+      damage: damage ? String(damage.damage_dice).replace(/\s+/g, '') : '',
+      damageType: damage ? String(damage.damage_type && (damage.damage_type.index || damage.damage_type.name) || '') : '',
+      saveAbility: action.dc.dc_type.index, saveSuccess: action.dc.success_type === 'half' ? 'half' : 'none',
+      dc: action.dc.dc_value, maxTargets: 8,
+      area: shape ? monsterAreaKind(shape[2], far) : 'cone',
+      areaFt: shape ? Number(shape[1]) : 0,
+      rangeFt: shape ? (far ? Number(far[1]) : Number(shape[1])) : monsterAttackRange(action, true),
+      ...(recharge ? { rechargeOn: Number(recharge[1]) } : {})
+    });
+  }
   const armor = canonical.armor_class.find(entry => entry && Number.isFinite(Number(entry.value)));
   return {
     canonical,
     ac: boundedScalarInteger(armor && armor.value, 1, 30, 10),
     speedFeet: monsterSpeedFeet(canonical),
+    moveModes: monsterMoveModes(canonical),
     initMod: monsterAbilityMod(canonical, 'dexterity'),
     maxHP: boundedScalarInteger(canonical.hit_points, 1, 999, 1),
     saves,
-    attacks
+    attacks,
+    abilities: normalizeAbilities(abilities)
   };
+}
+
+function monsterAreaKind(word, far) {
+  const kind = String(word).toLowerCase();
+  if (kind === 'radius' || kind === 'sphere') return far ? 'sphere' : 'self';
+  return kind;
 }
 
 function seedCombatant(obj) {
   const base = {
     id: obj.id, initiative: null,
     movementUsedFeet: 0, dashFeet: 0, actionUsed: false, effects: [],
+    moveModes: [],
     saves: { str: 0, dex: 0, con: 0, int: 0, wis: 0, cha: 0 },
     spellAtk: 0,
     spellDC: 8,
     slots: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0, 8: 0, 9: 0 },
-    spells: []
+    spells: [],
+    abilities: [], riders: [], resources: {}, saveMods: {},
+    ...normalizeTurnState(null)
   };
   if (obj.type === 'character' && obj.characterData) {
     const cd = obj.characterData;
@@ -2496,8 +3707,9 @@ function seedCombatant(obj) {
         color: obj.color || monster.canonical.color || 0xb45309,
         charId: null, owner: null, statsPending: false,
         ac: monster.ac, speedFeet: monster.speedFeet, initMod: monster.initMod,
+        moveModes: monster.moveModes,
         maxHP: monster.maxHP, hp: { current: monster.maxHP },
-        saves: monster.saves, attacks: monster.attacks
+        saves: monster.saves, attacks: monster.attacks, abilities: monster.abilities
       };
     }
     return {
@@ -2527,8 +3739,32 @@ function startTurn(key, combat, id) {
   c.movementUsedFeet = 0;
   c.dashFeet = 0;
   c.actionUsed = false;
+  c.bonusUsed = false;
+  c.attacksLeft = 0;
+  c.bonusAttacks = null;
+  c.ridersUsed = [];
   c.effects = (c.effects || []).filter(e => !e.auto);
+  for (const resource of Object.values(c.resources || {})) {
+    if (resource.recharge === 'turn') resource.current = resource.max;
+  }
   pushLog(key, combat, { kind: 'turn', actorName: c.name, text: `Round ${combat.round} — ${c.name}'s turn` });
+  if (isRecord(c.concentration) && c.concentration.until && combat.round >= c.concentration.until) {
+    endConcentration(key, combat, c, 'runs out of time');
+  }
+  zonesAtTurnStart(key, combat, c);
+  if (banishWhere(summon => summon.casterId === c.id && summon.until && combat.round >= summon.until, key)) {
+    pushLog(key, combat, { kind: 'info', actorName: c.name, text: `${c.name}'s summoned spell runs out of time` });
+  }
+  // Recharge N: a spent ability comes back when its d6 comes up high enough.
+  for (const ability of c.abilities || []) {
+    if (!ability.rechargeOn || !ability.spent) continue;
+    const die = rollDie(6);
+    if (die >= ability.rechargeOn) ability.spent = false;
+    pushLog(key, combat, {
+      kind: 'info', actorName: c.name,
+      text: `${c.name}'s ${ability.name}: recharge d6 ${die} — ${ability.spent ? 'not yet' : 'recharged!'}`
+    });
+  }
 }
 
 function advanceTurn(key, combat) {
@@ -2562,12 +3798,15 @@ function beginCombat(key, combat) {
 // their turn, the turn passes first so activeId stays valid.
 function removeCombatant(key, combat, id) {
   if (!hasOwn(combat.combatants, id)) return;
+  endConcentration(key, combat, combat.combatants[id], 'leaves the fight');
+  dropZones(combat, zone => zone.sourceId !== id);
   if (combat.activeId === id) {
     if (combat.order.length > 1) advanceTurn(key, combat);
     else combat.activeId = null;
   }
   delete combat.combatants[id];
   combat.order = combat.order.filter(x => x !== id);
+  prunePending(combat); // the saves it owed go with it
 }
 
 // Load the default campaign (and run its boot migrations) before any client
@@ -2610,8 +3849,13 @@ io.on('connection', (socket) => {
   // attaches without a map room — the creator only needs the roster.
   function enterCampaign(campaignId, screen, opts = {}) {
     const campaign = campaignById(campaignId);
-    if (!campaign) {
+    // A campaign the user may not enter answers exactly like a missing one.
+    if (!campaign || !canEnterCampaign(campaign, socket.username)) {
       socket.emit('campaign-joined', { ok: false, id: campaignId || null, error: 'Unknown campaign' });
+      return false;
+    }
+    if (opts.gmOnly && !isCampaignGMFor(campaignId, socket.username)) {
+      socket.emit('campaign-joined', { ok: false, id: campaignId, error: 'GM only' });
       return false;
     }
     const previous = socket.campaignId;
@@ -2631,7 +3875,8 @@ io.on('connection', (socket) => {
       name: campaign.name,
       owner: campaign.owner,
       settings,
-      startKey
+      startKey,
+      ...campaignBrief(campaign)
     });
     const store = storeFor(campaignId);
     if (store) {
@@ -2654,29 +3899,29 @@ io.on('connection', (socket) => {
     return true;
   }
 
-  // Login event. Accepts a legacy plain username (implicitly enters the
-  // default campaign) or { username, campaignId?, screen? } where screen is
+  // Login event: { token } (a session from an earlier login) or
+  // { username, password } (+ setup: true to create the host account on a
+  // fresh install), plus campaignId?/screen? where screen is
   // 'gm'|'player'|'tabletop', 'studio' (creator: roster only) or 'lobby'.
+  // Open-login mode also accepts a legacy plain username string, which
+  // implicitly enters the default campaign.
   socket.on('login', (payload) => {
-    const username = typeof payload === 'string'
-      ? payload : (isRecord(payload) ? payload.username : null);
-    if (typeof username !== 'string') {
-      socket.emit('error', 'Invalid username');
-      return;
-    }
-    const normalizedUsername = boundedText(username, MAX_USERNAME_LENGTH);
-    if (!normalizedUsername) {
-      socket.emit('error', 'Invalid username');
+    const credentials = typeof payload === 'string' ? { username: payload } : payload;
+    const address = socket.handshake.address;
+    const result = auth.login(credentials, { ip: address, loopback: isLoopbackAddress(address) });
+    if (!result.ok) {
+      socket.emit('login-failed', { error: result.error, expired: !!result.expired });
       return;
     }
 
-    socket.username = normalizedUsername;
+    socket.username = result.username;
     console.log(`[LOGIN] ${socket.username} (${socket.id})`);
 
-    // Send login success with role
+    // Send login success with role (isGM = the host account).
     socket.emit('login-success', {
       username: socket.username,
-      isGM: isGM(socket.username)
+      isGM: isGM(socket.username),
+      token: result.token
     });
 
     // Races/classes are shared content; monster rules are GM/author scoped.
@@ -2688,18 +3933,22 @@ io.on('connection', (socket) => {
       socket.join('lobby');
       sendHomebrew();
       pushCampaignList();
+      pushUserList();
       return;
     }
+    // An explicit campaign must be enterable; only a bare login (homebrew,
+    // legacy clients) falls back to the default campaign.
     const requested = boundedString(options.campaignId, 40);
-    const targetId = campaignById(requested) ? requested
-      : (campaignById(DEFAULT_CAMPAIGN_ID) ? DEFAULT_CAMPAIGN_ID : null);
+    const fallback = campaignById(DEFAULT_CAMPAIGN_ID);
+    const targetId = requested ||
+      (fallback && canEnterCampaign(fallback, socket.username) ? DEFAULT_CAMPAIGN_ID : null);
     if (!targetId) {
       sendHomebrew();
       socket.emit('campaign-joined', { ok: false, error: 'No campaign available' });
       return;
     }
-    enterCampaign(targetId, options.screen === 'studio' ? 'studio' : 'tabletop',
-      { beforeMapState: sendHomebrew });
+    if (!enterCampaign(targetId, options.screen === 'studio' ? 'studio' : 'tabletop',
+      { beforeMapState: sendHomebrew, gmOnly: options.screen === 'gm' })) sendHomebrew();
   });
 
   // --- Campaign registry (lobby) ---
@@ -2716,6 +3965,17 @@ io.on('connection', (socket) => {
       socket.emit('error', `Campaign limit reached (${MAX_CAMPAIGNS})`);
       return;
     }
+    // Untrusted users file a request: the campaign is saved but stays locked
+    // ('pending') until the host approves it.
+    const pending = !auth.isTrusted(socket.username);
+    if (pending) {
+      const waiting = Object.values(campaigns).filter(c =>
+        c.status === 'pending' && sameUser(c.owner, socket.username)).length;
+      if (waiting >= MAX_PENDING_CAMPAIGNS_PER_USER) {
+        socket.emit('error', 'You already have campaign requests waiting for the host');
+        return;
+      }
+    }
     const id = crypto.randomUUID().slice(0, 8);
     const campaign = {
       id,
@@ -2723,7 +3983,10 @@ io.on('connection', (socket) => {
       description: boundedText(payload.description, MAX_CAMPAIGN_DESCRIPTION),
       owner: socket.username,
       createdAt: Date.now(),
-      settings: sanitizeCampaignSettings(payload.settings)
+      settings: sanitizeCampaignSettings(payload.settings),
+      visibility: payload.visibility === 'private' ? 'private' : 'public',
+      members: [],
+      status: pending ? 'pending' : 'active'
     };
     campaigns[id] = campaign;
     if (!saveCampaigns()) {
@@ -2731,8 +3994,92 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Could not save the campaign');
       return;
     }
-    console.log(`[CAMPAIGN] "${campaign.name}" (${id}) created by ${socket.username}`);
-    socket.emit('campaign-created', { id });
+    console.log(`[CAMPAIGN] "${campaign.name}" (${id}) ${pending ? 'requested' : 'created'} by ${socket.username}`);
+    socket.emit('campaign-created', { id, pending });
+    pushCampaignList();
+  });
+
+  // Host verdict on a pending campaign request.
+  socket.on('review-campaign', (payload) => {
+    if (!isGM(socket.username)) { socket.emit('error', 'Host only'); return; }
+    const id = boundedString(payload && payload.id, 40);
+    const campaign = campaignById(id);
+    if (!campaign || campaign.status !== 'pending') { socket.emit('error', 'No such request'); return; }
+    if (payload.approve === true) {
+      campaign.status = 'active';
+      if (!saveCampaigns()) {
+        campaign.status = 'pending';
+        socket.emit('error', 'Could not save the campaign');
+        return;
+      }
+      console.log(`[CAMPAIGN] "${campaign.name}" (${id}) approved by ${socket.username}`);
+    } else {
+      if (!destroyCampaign(id)) { socket.emit('error', 'Could not delete the campaign'); return; }
+      console.log(`[CAMPAIGN] "${campaign.name}" (${id}) rejected by ${socket.username}`);
+    }
+    pushCampaignList();
+  });
+
+  // Privacy + invites, set by the campaign GM: { id, visibility?, members? }
+  // (members replaces the whole invite list; unknown accounts are dropped).
+  socket.on('set-campaign-access', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const id = boundedString(payload && payload.id, 40);
+    const campaign = campaignById(id);
+    if (!campaign) { socket.emit('error', 'Unknown campaign'); return; }
+    if (!isCampaignGMFor(id, socket.username)) { socket.emit('error', 'GM only'); return; }
+    const previous = { visibility: campaign.visibility, members: campaign.members };
+    if (payload.visibility === 'public' || payload.visibility === 'private') {
+      campaign.visibility = payload.visibility;
+    }
+    if (Array.isArray(payload.members)) {
+      campaign.members = sanitizeCampaignMembers(
+        payload.members.map(name => auth.canonical(name)).filter(Boolean)
+      ).filter(name => !sameUser(name, campaign.owner));
+    }
+    if (!saveCampaigns()) {
+      Object.assign(campaign, previous);
+      socket.emit('error', 'Could not save the campaign access');
+      return;
+    }
+    // Anyone seated who just lost access goes back to the lobby.
+    evictFromCampaign(id, sock => !canEnterCampaign(campaign, sock.username));
+    socket.emit('campaign-access-saved', { id });
+    pushCampaignList();
+  });
+
+  // --- Accounts (host tab) ---
+  socket.on('get-users', () => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    socket.emit('user-list', { users: usersPayload(socket.username) });
+  });
+
+  socket.on('admin-create-user', (payload) => {
+    if (!isGM(socket.username)) { socket.emit('error', 'Host only'); return; }
+    const result = auth.createUser(isRecord(payload) ? payload : {});
+    if (!result.ok) { socket.emit('error', result.error); return; }
+    console.log(`[AUTH] ${result.username} created by ${socket.username}`);
+    socket.emit('admin-done', { action: 'create', username: result.username });
+    pushUserList();
+  });
+
+  // { username, trusted?, disabled?, password? } — users never change their
+  // own password; a new one only ever comes from the host.
+  socket.on('admin-update-user', (payload) => {
+    if (!isGM(socket.username)) { socket.emit('error', 'Host only'); return; }
+    const source = isRecord(payload) ? payload : {};
+    const result = auth.updateUser(source.username, source);
+    if (!result.ok) { socket.emit('error', result.error); return; }
+    console.log(`[AUTH] ${result.username} updated by ${socket.username}`);
+    if (result.revoked) {
+      for (const sock of io.sockets.sockets.values()) {
+        if (sock === socket || !sameUser(sock.username, result.username)) continue;
+        sock.emit('login-failed', { error: 'Your session was ended by the host', expired: true });
+        sock.disconnect(true);
+      }
+    }
+    socket.emit('admin-done', { action: 'update', username: result.username });
+    pushUserList();
     pushCampaignList();
   });
 
@@ -2772,21 +4119,46 @@ io.on('connection', (socket) => {
       spawn: requested.spawn !== undefined ? requested.spawn : campaign.settings.spawn,
       world: requested.world !== undefined ? requested.world : campaign.settings.world,
       season: requested.season !== undefined ? requested.season : campaign.settings.season,
+      sky: campaign.settings.sky,
+      // A vision patch, like the sky: untouched keys keep their value.
+      vision: isRecord(requested.vision)
+        ? { ...campaign.settings.vision, ...requested.vision }
+        : campaign.settings.vision,
+      movement: isRecord(requested.movement)
+        ? { ...campaign.settings.movement, ...requested.movement }
+        : campaign.settings.movement,
       regionKey: campaign.settings.regionKey
     };
+    if (isRecord(requested.sky)) {
+      // A sky patch: untouched keys keep their value, and setting the clock
+      // restamps it so every screen counts the hours from the same instant.
+      const { at, ...patch } = requested.sky;
+      merged.sky = { ...campaign.settings.sky, ...patch };
+      if (['clock', 'hour', 'dayMinutes'].some(key => patch[key] !== undefined)) merged.sky.at = Date.now();
+    }
     const previous = snapshotField(campaign, 'settings');
     campaign.settings = sanitizeCampaignSettings(merged);
-    if (requested.name != null) campaign.name = boundedText(requested.name, MAX_CAMPAIGN_NAME) || campaign.name;
-    if (requested.description != null) campaign.description = boundedText(requested.description, MAX_CAMPAIGN_DESCRIPTION);
+    // Identity + hall fields ride at the top level of the payload (the GM
+    // panel sends them there); `settings.name` is the older spelling.
+    const identity = { name: campaign.name, description: campaign.description, recap: campaign.recap, session: campaign.session };
+    const field = key => (payload[key] != null ? payload[key] : requested[key]);
+    if (field('name') != null) campaign.name = boundedText(field('name'), MAX_CAMPAIGN_NAME) || campaign.name;
+    if (field('description') != null) campaign.description = boundedText(field('description'), MAX_CAMPAIGN_DESCRIPTION);
+    if (payload.recap != null) campaign.recap = boundedMultilineText(payload.recap, MAX_CAMPAIGN_RECAP);
+    if (payload.session === 'open' || payload.session === 'closed') campaign.session = payload.session;
     if (!saveCampaigns()) {
       restoreField(campaign, 'settings', previous);
+      Object.assign(campaign, identity);
       socket.emit('error', 'Could not save the campaign settings');
       return;
     }
     const settings = campaign.settings;
     io.to(campRoom(id)).emit('campaign-updated', {
-      id, name: campaign.name, description: campaign.description, settings
+      id, name: campaign.name, settings, ...campaignBrief(campaign)
     });
+    // Vision rules or the hour of day may have changed who sees whom.
+    const store = storeFor(id);
+    if (store) withStore(store, () => reconcileCampaignVision());
     pushCampaignList();
   });
 
@@ -2797,34 +4169,15 @@ io.on('connection', (socket) => {
     const campaign = campaignById(id);
     if (!campaign) { socket.emit('error', 'Unknown campaign'); return; }
     if (!isCampaignGMFor(id, socket.username)) { socket.emit('error', 'GM only'); return; }
-    const previousRecord = snapshotField(campaigns, id);
-    delete campaigns[id];
-    if (!saveCampaigns()) {
-      restoreField(campaigns, id, previousRecord);
+    // Everyone inside is kicked back to the lobby; a requester sitting in the
+    // lobby (or another campaign) still needs the ack.
+    const requesterInside = socket.campaignId === id;
+    if (!destroyCampaign(id)) {
       socket.emit('error', 'Could not delete the campaign');
       return;
     }
-    stores.delete(id);
-    const dir = campaignDir(id);
-    if (dir !== DATA_DIR) {
-      try { fs.rmSync(dir, { recursive: true, force: true }); }
-      catch (e) { console.error(`Error removing campaign files for ${id}:`, e); }
-    }
     console.log(`[CAMPAIGN] "${campaign.name}" (${id}) deleted by ${socket.username}`);
-    // Kick everyone inside back to the lobby.
-    let requesterKicked = false;
-    for (const sock of io.sockets.sockets.values()) {
-      if (sock.campaignId !== id) continue;
-      leaveCampaignRoomsFor(sock, id);
-      sock.campaignId = null;
-      sock.currentMapKey = null;
-      sock.contextMapKey = null;
-      sock.join('lobby');
-      sock.emit('campaign-deleted', { id });
-      if (sock === socket) requesterKicked = true;
-    }
-    // The requester may sit in the lobby (or another campaign) — ack them too.
-    if (!requesterKicked) socket.emit('campaign-deleted', { id });
+    if (!requesterInside) socket.emit('campaign-deleted', { id });
     pushCampaignList();
   });
 
@@ -2848,10 +4201,13 @@ io.on('connection', (socket) => {
       isCampaignGMFor(fromCampaignId, socket.username) ||
       isGM(socket.username);
     // Writing into another campaign needs authority over the target too
-    // (same-campaign copies are already the source check).
+    // (same-campaign copies are already the source check): its GM, or a
+    // player bringing their own character to a table they may enter.
     const allowedTarget = toCampaignId === fromCampaignId ||
       isCampaignGMFor(toCampaignId, socket.username) ||
-      isGM(socket.username);
+      isGM(socket.username) ||
+      (sourceChar.owner === socket.username &&
+        canEnterCampaign(campaignById(toCampaignId), socket.username));
     if (!allowedSource || !allowedTarget) { socket.emit('error', 'Permission denied'); return; }
     const targetStore = storeFor(toCampaignId);
     if (!targetStore) { socket.emit('error', 'Unknown campaign'); return; }
@@ -3005,9 +4361,47 @@ io.on('connection', (socket) => {
     if (!canAccessCharacter(socket.username, char)) { socket.emit('error', 'Permission denied'); return; }
     const nextHP = boundedScalarInteger(payload.current, 0, 999, null);
     if (nextHP == null) { socket.emit('error', 'Invalid HP'); return; }
+    const pool = hasOwn(poolsDB(), id) ? poolsDB()[id] : null;
+    const had = char.hp && Number.isFinite(char.hp.current) ? char.hp.current : (pool && pool.vit ? pool.vit.maxHP : null);
     if (applyCharacterHP(id, nextHP) == null) {
       socket.emit('error', 'Could not update character HP');
+      return;
     }
+    // Hurt while holding a spell outside a fight: the sheet owes a CON save
+    // (the tracker asks for it itself inside one).
+    if (pool && pool.conc && had != null && nextHP < had && !combatantsOfCharacter(id).length) {
+      const name = char.name || 'A character';
+      if (nextHP === 0) {
+        appendTableLog([{
+          id: crypto.randomUUID().slice(0, 8), ts: Date.now(), kind: 'roll', user: socket.username, gm: isCampaignGM(socket.username),
+          actor: name, label: `drops — ${pool.conc.name} ends`, text: `${name} drops — ${pool.conc.name} ends`
+        }]);
+        delete pool.conc;
+        if (banishWhere(summon => summon.held === true && summon.charId === id)) { saveMaps(); flushSummonChanges(); }
+      } else {
+        pool.conc.dc = Math.max(pool.conc.dc || 0, 10, Math.floor((had - nextHP) / 2));
+      }
+      savePools([id]);
+    }
+  });
+
+  // Let go of a spell held outside a fight (in one: combat-concentration).
+  onCampaign('drop-concentration', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const charId = boundedText(payload.charId, 80);
+    const character = charId && ownValue(charactersDB, charId);
+    if (!character || !canAccessCharacter(socket.username, character)) return combatDeny('Not your character');
+    if (combatantsOfCharacter(charId).length) return combatDeny('In a fight, drop it from the combat tracker');
+    const pool = hasOwn(poolsDB(), charId) ? poolsDB()[charId] : null;
+    if (!pool || !pool.conc) return;
+    const name = character.name || 'A character';
+    appendTableLog([{
+      id: crypto.randomUUID().slice(0, 8), ts: Date.now(), kind: 'roll', user: socket.username, gm: isCampaignGM(socket.username),
+      actor: name, label: `stops concentrating — ${pool.conc.name} ends`, text: `${name} stops concentrating — ${pool.conc.name} ends`
+    }]);
+    delete pool.conc;
+    if (banishWhere(summon => summon.held === true && summon.charId === charId)) { saveMaps(); flushSummonChanges(); }
+    savePools([charId]);
   });
 
   // --- Homebrew (custom races/classes) — shared content ---
@@ -3029,8 +4423,7 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Invalid homebrew');
       return;
     }
-    const store = type === 'race' ? homebrewDB.races
-      : (type === 'class' ? homebrewDB.classes : (type === 'monster' ? homebrewDB.monsters : null));
+    const store = hasOwn(HOMEBREW_COLLECTIONS, type) ? homebrewDB[HOMEBREW_COLLECTIONS[type]] : null;
     if (!store) {
       socket.emit('error', 'Invalid homebrew type');
       return;
@@ -3068,8 +4461,7 @@ io.on('connection', (socket) => {
     if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
     const type = payload && payload.type;
     const index = payload && sanitizeReference(payload.index, 96);
-    const store = type === 'race' ? homebrewDB.races
-      : (type === 'class' ? homebrewDB.classes : (type === 'monster' ? homebrewDB.monsters : null));
+    const store = hasOwn(HOMEBREW_COLLECTIONS, type) ? homebrewDB[HOMEBREW_COLLECTIONS[type]] : null;
     if (!store || !hasOwn(store, index)) { socket.emit('error', 'Homebrew not found'); return; }
     if (!isGM(socket.username) && store[index].owner !== socket.username) {
       socket.emit('error', 'Permission denied');
@@ -3100,6 +4492,30 @@ io.on('connection', (socket) => {
       if (tag && tag.biome) biome = tag.biome;
     }
     return biome;
+  }
+
+  // The ground a move in this room crosses, as shared/ground.js reads it —
+  // the stored chunk edits over the campaign's generator (pockets: edits over
+  // flat ground). Null when the campaign prices no terrain.
+  function movementGround(key) {
+    const campaign = activeCampaign();
+    const settings = campaign && campaign.settings;
+    if (!settings || !groundModel) return null;
+    const rules = groundModel.normalizeMovement(settings.movement);
+    if (!rules.terrain) return null;
+    const unified = key === WORLD_KEY;
+    const map = ownValue(maps, key);
+    const terrain = map && isRecord(map.terrain) && map.terrain.format === 2 ? map.terrain : null;
+    return {
+      rules,
+      ground: groundModel.createGround({
+        seed: settings.seed, world: settings.world, season: settings.season,
+        hexTree: unified ? collectHexTree() : null,
+        chunks: terrain && isRecord(terrain.chunks) ? terrain.chunks : null,
+        water: terrain && isRecord(terrain.water) ? terrain.water : null,
+        generator: unified
+      })
+    };
   }
 
   // Ensure the unified world store has a terrain scaffold.
@@ -3148,10 +4564,12 @@ io.on('connection', (socket) => {
     // revealed regions of the unified world (pockets are never fogged).
     let objectsOut = Object.values(unified ? getMap(WORLD_KEY).objects : m.objects);
     let terrainOut = m.terrain || null;
-    if (unified && !gm) {
-      objectsOut = objectsOut.filter(o => objectVisibleTo(socket.username, o));
-      terrainOut = filterTerrainForPlayer(terrainOut);
+    if (!gm) {
+      const objectKey = stateKey(roomKey);
+      objectsOut = objectsOut.filter(o => objectVisibleTo(socket.username, o, objectKey));
+      if (unified) terrainOut = filterTerrainForPlayer(terrainOut);
     }
+    socket.visionShown = new Set(objectsOut.filter(vision.isCreature).map(o => o.id));
     objectsOut = objectsOut.map(object => projectObjectFor(socket.username, object));
     socket.emit('map-state', {
       key: ctx,
@@ -3270,6 +4688,12 @@ io.on('connection', (socket) => {
     }
     console.log(`[POCKET] "${name}" (${width}x${height}) -> ${key} by ${socket.username}`);
     socket.emit('pocket-created', { key, name });
+    pushDungeons();
+  });
+
+  onCampaign('get-dungeons', () => {
+    if (!isCampaignGM(socket.username)) return;
+    socket.emit('dungeon-list', { dungeons: dungeonIndex() });
   });
 
   onCampaign('add-object', (data) => {
@@ -3344,19 +4768,14 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Could not establish combat recovery data');
       return;
     }
-    if (!isUnifiedKey(key)) {
-      emitToRoom(key, null, recipient => {
-        recipient.emit('object-added', projectObjectFor(recipient.username, newObject));
-      });
-    } else {
-      // Fog of war: only players who can see the spot learn the object exists.
-      emitToUnified(null, recipient => {
-        if (objectVisibleTo(recipient.username, newObject)) {
-          recipient.emit('object-added', projectObjectFor(recipient.username, newObject));
-        }
-      });
-    }
+    // Fog of war and token vision: only players who can see it learn the
+    // object exists. A new token, wall or light can also change what the
+    // others see.
+    touchVision();
+    announceObject(key, newObject);
+    reconcileVision(key);
     if (newObject.type === 'character') pushCharacterInstances();
+    if (newObject.type === 'portal') pushDungeons();
     if (combatChanged) emitCombatState(key);
   });
 
@@ -3420,6 +4839,7 @@ io.on('connection', (socket) => {
       };
       if (key === WORLD_KEY) emitToUnified(null, send);
       else emitToRoom(key, null, send);
+      reconcileVision(key);
     };
 
     if (action === 'adopt') {
@@ -3671,6 +5091,7 @@ io.on('connection', (socket) => {
     const event = { id };
     if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', event));
     else io.to(mapRoom(activeCampaignId(), key)).emit('object-deleted', event);
+    reconcileVision(key);
     pushCharacterInstances();
     if (combatChanged) emitCombatState(key);
   });
@@ -3704,6 +5125,8 @@ io.on('connection', (socket) => {
       if (count) {
         patch.segments = Array.from({ length: count }, (_, i) =>
           WALL_SEGMENT_KINDS.has(requested.segments[i]) ? requested.segments[i] : null);
+        // A cell that stops being a door drops its open/locked state.
+        if (Array.isArray(obj.doors)) patch.doors = sanitizeWallDoors({ segments: patch.segments }, obj.doors);
       }
     }
     if ((obj.type === 'floor' || obj.type === 'roof') && Array.isArray(requested.tiles)) {
@@ -3733,15 +5156,121 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Could not establish combat recovery data');
       return;
     }
-    const event = { id: obj.id, patch };
-    if (isUnifiedKey(key)) {
-      emitToUnified(null, (sock) => {
-        if (objectVisibleTo(sock.username, obj)) sock.emit('object-updated', event);
-      });
-    } else {
-      io.to(mapRoom(activeCampaignId(), key)).emit('object-updated', event);
-    }
+    if (patch.doors === null) delete obj.doors;
+    emitObjectUpdated(key, obj, patch);
+    reconcileVision(key);
     if (combatant) emitCombatState(key);
+  });
+
+  // An object patch goes to whoever currently has the object.
+  function emitObjectUpdated(key, obj, patch) {
+    const event = { id: obj.id, patch };
+    forEachMapSocket(key, null, (sock) => {
+      const has = vision.isCreature(obj) && !isCampaignGM(sock.username) && !ownsObject(sock.username, obj)
+        ? shownSet(sock).has(obj.id)
+        : objectVisibleTo(sock.username, obj, key);
+      if (has) sock.emit('object-updated', event);
+    });
+  }
+
+  // Vision data on a map object: `senses` (a creature's darkvision,
+  // blindsight, truesight, tremorsense, Devil's Sight — the owner's screen
+  // sends what the sheet derives; null goes back to the stat block), `light`
+  // (bright/dim radii in feet, or a magical-darkness radius) and the GM's
+  // `hidden` (GM eyes only) / `invisible` (needs a sense that beats it).
+  onCampaign('set-vision', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const map = getMap(key);
+    const id = boundedText(payload.id, 80);
+    const obj = id && ownValue(map.objects, id);
+    if (!obj) return;
+    const gm = isCampaignGM(socket.username);
+    if (!gm && !ownsObject(socket.username, obj)) return;
+    const creature = vision.isCreature(obj);
+    const patch = {};
+    if (creature && hasOwn(payload, 'senses')) {
+      patch.senses = isRecord(payload.senses) ? vision.normalizeSenses(payload.senses) : null;
+    }
+    if (hasOwn(payload, 'light')) patch.light = vision.normalizeLight(payload.light);
+    if (gm && creature && typeof payload.invisible === 'boolean') patch.invisible = payload.invisible;
+    if (gm && typeof payload.hidden === 'boolean') patch.hidden = payload.hidden;
+    for (const field of Object.keys(patch)) {
+      if (JSON.stringify(patch[field] || null) === JSON.stringify(obj[field] || null)) delete patch[field];
+    }
+    if (!Object.keys(patch).length) return;
+    const previousObject = structuredClone(obj);
+    for (const [field, value] of Object.entries(patch)) {
+      if (value === null || value === false) delete obj[field];
+      else obj[field] = value;
+    }
+    if (!saveMaps()) {
+      map.objects[id] = previousObject;
+      socket.emit('error', 'Could not save the vision update');
+      return;
+    }
+    touchVision();
+    const hiddenChanged = hasOwn(patch, 'hidden');
+    forEachMapSocket(key, null, (sock) => {
+      if (isCampaignGM(sock.username) || ownsObject(sock.username, obj)) {
+        sock.emit('object-updated', { id, patch });
+      } else if (creature) {
+        // Appearing and vanishing is reconcileVision's job, just below.
+        if (shownSet(sock).has(id) && obj.hidden !== true) sock.emit('object-updated', { id, patch });
+      } else if (hiddenChanged) {
+        if (obj.hidden === true) sock.emit('object-deleted', { id });
+        else if (objectVisibleTo(sock.username, obj, key)) sock.emit('object-added', projectObjectFor(sock.username, obj));
+      } else if (objectVisibleTo(sock.username, obj, key)) {
+        sock.emit('object-updated', { id, patch });
+      }
+    });
+    reconcileVision(key);
+  });
+
+  // Open or close a door cell. The GM may also lock it (`state: 'locked'`) or
+  // set any state outright; a player needs one of their own characters
+  // standing at the door, and a locked door stays shut for them.
+  onCampaign('toggle-door', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const map = getMap(key);
+    const id = boundedText(payload.id, 80);
+    const wall = id && ownValue(map.objects, id);
+    if (!wall || wall.type !== 'wall' || !Array.isArray(wall.segments) || !wall.position) return;
+    const index = Math.round(Number(payload.index));
+    if (!Number.isInteger(index) || index < 0 || index >= WALL_CELL_LIMIT) return;
+    if (wall.segments[index] !== 'door') return;
+    const gm = isCampaignGM(socket.username);
+    const current = vision.doorStateOf(wall, index);
+    let next;
+    if (gm && hasOwn(payload, 'state')) {
+      next = vision.DOOR_STATES.includes(payload.state) ? payload.state : null;
+    } else {
+      if (!gm) {
+        const cell = vision.wallCellsOf(wall)[index];
+        if (!cell) return;
+        const cx = wall.position.x + cell.x + cell.ux * 0.5, cz = wall.position.z + cell.z + cell.uz * 0.5;
+        const reach = Object.values(map.objects).some(o => ownsObject(socket.username, o) && o.position &&
+          Math.hypot(o.position.x - cx, o.position.z - cz) <= 2.1 &&
+          Math.abs(o.position.y - wall.position.y) <= 3);
+        if (!reach) { socket.emit('combat-denied', { reason: 'Move a character next to the door first' }); return; }
+        if (current === 'locked') { socket.emit('combat-denied', { reason: 'The door is locked' }); return; }
+      }
+      next = current === 'open' ? null : 'open';
+    }
+    if (next === current) return;
+    const previousDoors = snapshotField(wall, 'doors');
+    const doors = Array.from({ length: wall.segments.length }, (_, i) => vision.doorStateOf(wall, i));
+    doors[index] = next;
+    const clean = sanitizeWallDoors(wall, doors);
+    if (clean) wall.doors = clean; else delete wall.doors;
+    if (!saveMaps()) {
+      restoreField(wall, 'doors', previousDoors);
+      socket.emit('error', 'Could not save the door');
+      return;
+    }
+    emitObjectUpdated(key, wall, { doors: clean });
+    reconcileVision(key);
   });
 
   onCampaign('move-object', (data) => {
@@ -3752,7 +5281,6 @@ io.on('connection', (socket) => {
     const position = sanitizePosition(data.position);
     const controlledObject = id && ownValue(map.objects, id);
     if (!id || !position || !controlledObject) return;
-    const event = { id, position };
     // Players manipulate only their own character instances. The GM remains
     // authoritative for generic tokens, creatures, props and structures.
     if (!isCampaignGM(socket.username) && !ownsObject(socket.username, controlledObject)) {
@@ -3774,8 +5302,28 @@ io.on('connection', (socket) => {
         return;
       }
     }
+    // Walls, shut doors and bars stop a player's character (shared/passage.js):
+    // the way has to be open, straight or round a corner. The GM puts tokens
+    // wherever the story needs them.
+    let walk = null;
+    if (!isCampaignGM(socket.username) && vision.isCreature(controlledObject) && controlledObject.position && wallsStopMoves()) {
+      walk = passage.walkable(barriersFor(key), walkerAt(controlledObject), walkerAt(controlledObject, position));
+      if (!walk.ok) {
+        socket.emit('object-moved', { id, position: controlledObject.position });
+        socket.emit('combat-denied', { reason: 'The way is blocked: walls, bars and shut doors stop you' });
+        return;
+      }
+    }
     const previousObject = structuredClone(controlledObject);
     const previousCombat = snapshotField(map, 'combat');
+    if (controlledObject.type === 'summon' && !isCampaignGM(socket.username)) {
+      const problem = summonMoveProblem(key, controlledObject, position, true);
+      if (problem) {
+        socket.emit('object-moved', { id, position: controlledObject.position });
+        socket.emit('combat-denied', { reason: problem });
+        return;
+      }
+    }
     // In a started combat, combatant tokens move only on their turn, only by
     // their owner (GM excepted), and only within the turn's movement budget.
     const combat = map.combat;
@@ -3790,12 +5338,27 @@ io.on('connection', (socket) => {
         return;
       }
       if (combat.activeId === id) {
-        // XZ euclidean, matching the ruler: 1 world unit = 1 cell = 5 ft.
-        const feet = Math.hypot(position.x - old.x, position.z - old.z) * 5;
+        // XZ euclidean, matching the ruler: 1 world unit = 1 cell = 5 ft —
+        // then whatever the ground under that line adds (slopes, water, snow).
+        const flat = Math.hypot(position.x - old.x, position.z - old.z) * 5;
+        let feet = flat, over = '';
+        const priced = flat <= MAX_PRICED_MOVE_FEET && movementGround(key);
+        if (priced) {
+          const soles = controlledObject.type === 'character' ? CHARACTER_SOLE_DEPTH : TOKEN_SOLE_DEPTH;
+          const result = groundModel.pathCost(
+            { x: old.x, y: old.y - soles, z: old.z },
+            { x: position.x, y: position.y - soles, z: position.z },
+            priced.ground, { modes: c.moveModes || [], snow: priced.rules.snow });
+          feet = result.cost;
+          over = groundModel.describeCost(result);
+        }
+        // Going round a wall costs the walk, not the straight line.
+        if (walk && walk.detour && walk.cells * 5 > feet) { feet = walk.cells * 5; over = over || 'the way round'; }
         const remaining = c.speedFeet + c.dashFeet - c.movementUsedFeet;
         if (!gm && feet > remaining + 0.5) {
+          const detail = over && feet > flat + 0.5 ? ` for ${Math.round(flat)} ft over ${over}` : '';
           socket.emit('object-moved', { id, position: old });
-          socket.emit('combat-denied', { reason: `Too far: ${Math.round(feet)} ft (${Math.max(0, Math.round(remaining))} ft left)` });
+          socket.emit('combat-denied', { reason: `Too far: ${Math.round(feet)} ft${detail} (${Math.max(0, Math.round(remaining))} ft left)` });
           return;
         }
         c.movementUsedFeet += feet;
@@ -3804,6 +5367,8 @@ io.on('connection', (socket) => {
     const obj = controlledObject;
     const oldPos = { ...(obj.position || {}) };
     obj.position = position;
+    const stoodUp = hasOwn(obj, 'pose');   // walking off a bed or a seat ends the pose
+    delete obj.pose;
     if (!saveMaps()) {
       map.objects[id] = previousObject;
       restoreCombatField(map, previousCombat);
@@ -3821,28 +5386,630 @@ io.on('connection', (socket) => {
       socket.emit('error', 'Could not establish combat recovery data');
       return;
     }
-    if (!isUnifiedKey(key)) {
-      socket.to(mapRoom(activeCampaignId(), key)).emit('object-moved', event);
-    } else {
-      // Fog of war: an object crossing the reveal boundary pops into (full
-      // object) or out of (delete) existence for players — hidden objects
-      // simply don't exist on their side.
-      emitToUnified(socket, (sock) => {
-        if (isCampaignGM(sock.username) || ownsObject(sock.username, obj)) {
-          sock.emit('object-moved', event);
-          return;
-        }
-        const was = isRevealedAt(oldPos.x, oldPos.z);
-        const now = isRevealedAt(obj.position && obj.position.x, obj.position && obj.position.z);
-        if (was && now) sock.emit('object-moved', event);
-        else if (!was && now) sock.emit('object-added', projectObjectFor(sock.username, obj));
-        else if (was && !now) sock.emit('object-deleted', { id: obj.id });
-      });
-    }
+    broadcastMove(key, obj, oldPos, socket);
+    if (stoodUp) emitObjectUpdated(key, obj, { pose: null });
+    // The mover may be a viewer, a light or a wall: everyone else's sight
+    // of every OTHER creature can have changed too.
+    reconcileVision(key);
     // Moves are click-to-drop (not per-frame drags), so a live location
     // refresh for the Instances tab is cheap.
     if (obj.type === 'character') pushCharacterInstances();
     if (c) emitCombatState(key);
+    // A caster who walks too far from what it summoned loses it.
+    if (banishWhere(summon => summon.casterId === id && summon.leashFt && obj.position &&
+        Math.hypot(summon.position.x - position.x, summon.position.z - position.z) * 5 > summon.leashFt + 2.5, key)) {
+      saveMaps();
+      flushSummonChanges();
+    }
+    // Walking into an area that lingers: its save is owed at once.
+    if (c && map.combat && oldPos.x != null && zonesOnMove(key, map.combat, c, oldPos, position)) {
+      persistCombat(key, snapshotField(map, 'combat'), []);
+    }
+  });
+
+  // Fog of war and token vision: an object crossing out of what a player
+  // may see pops out of existence for them (delete), and into it as a full
+  // object — hidden objects simply don't exist on their side.
+  function broadcastMove(key, obj, oldPos, exceptSocket) {
+    const event = { id: obj.id, position: obj.position };
+    touchVision();
+    const unifiedMove = isUnifiedKey(key);
+    const creatureMove = vision.isCreature(obj);
+    forEachMapSocket(key, exceptSocket, (sock) => {
+      if (isCampaignGM(sock.username) || ownsObject(sock.username, obj)) {
+        sock.emit('object-moved', event);
+        return;
+      }
+      const now = objectVisibleTo(sock.username, obj, key);
+      const was = creatureMove
+        ? shownSet(sock).has(obj.id)
+        : obj.hidden !== true && (!unifiedMove || isRevealedAt(oldPos.x, oldPos.z));
+      if (was && now) sock.emit('object-moved', event);
+      else if (!was && now) {
+        if (creatureMove) shownSet(sock).add(obj.id);
+        sock.emit('object-added', projectObjectFor(sock.username, obj));
+      } else if (was && !now) {
+        if (creatureMove) shownSet(sock).delete(obj.id);
+        sock.emit('object-deleted', { id: obj.id });
+      }
+    });
+  }
+
+  // Roll at the table. { actor, label, d20?: { bonus, mode: 'adv'|'dis', min?,
+  // floor? }, dice?: [{ expr, type }], dc?, note?, gmOnly? } — a d20 test (`min`:
+  // the die reads at least this, Reliable Talent; `floor`: the total is never
+  // below this, Indomitable Might — both from the sheet), plain dice, or
+  // both (a spell attack with its damage). Everyone in the campaign sees the
+  // result; `gmOnly` keeps it between the roller and the GM.
+  onCampaign('roll', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const now = Date.now();
+    if (now - (socket.lastRollAt || 0) < 120) return;
+    socket.lastRollAt = now;
+    performRoll(payload, socket.username, combatDeny);
+  });
+
+  // The table roll itself, for `actor` (a username): the sender of `roll`, or
+  // the player whose cast request the GM just allowed. → true once logged.
+  function performRoll(payload, actor, deny) {
+    const now = Date.now();
+    // A cast names the slot it burns: { charId, level, max, pact? } (the
+    // sheet's count — the server keeps only what is used). No slot, no roll.
+    let slotNote = '';
+    let healCharId = null; // a self-healing feature: its dice land on this character
+    if (isRecord(payload.slot)) {
+      const charId = boundedText(payload.slot.charId, 80);
+      const character = charId && ownValue(charactersDB, charId);
+      if (!character || !canAccessCharacter(actor, character)) return deny('Not your character');
+      const level = clampInt(payload.slot.level, 1, 9, 0);
+      const max = clampInt(payload.slot.max, 0, 20, 0);
+      if (!level) return deny('No such spell slot');
+      const pool = poolOf(charId);
+      const fighting = combatantsOfCharacter(charId).filter(found => !found.c.statsPending && isRecord(found.c.slotMax));
+      let left;
+      delete pool.hdOpen; // casting ends the rest
+      if (fighting.length) {
+        // In a fight the combatant holds the count; the pool follows it.
+        const { key: combatKey, c } = fighting[0];
+        if (!takeCombatSlot(c, level, level)) return deny(`No level ${level} spell slots left`);
+        slotNote = `level ${level} slot spent`;
+        saveMaps();
+        emitCombatState(combatKey);
+      } else if (payload.slot.pact === true) {
+        if (pool.pact >= max) return deny('No pact slots left: take a short rest');
+        pool.pact += 1;
+        left = max - pool.pact;
+        slotNote = `pact slot spent (${left} left)`;
+        savePools([charId]);
+      } else {
+        const used = pool.slots[level] || 0;
+        if (used >= max) return deny(`No level ${level} spell slots left: take a long rest`);
+        pool.slots[level] = used + 1;
+        left = max - pool.slots[level];
+        slotNote = `level ${level} slot spent (${left} left)`;
+        savePools([charId]);
+      }
+    }
+    // A concentration spell names its caster: { charId, name }. It replaces
+    // whatever that character was holding.
+    if (isRecord(payload.concentration)) {
+      const charId = boundedText(payload.concentration.charId, 80);
+      const character = charId && ownValue(charactersDB, charId);
+      const name = boundedString(payload.concentration.name, 40);
+      if (!character || !canAccessCharacter(actor, character)) return deny('Not your character');
+      if (name) {
+        const fighting = combatantsOfCharacter(charId)[0];
+        if (fighting) { // cast off-turn through the table: the tracker holds it
+          beginConcentration(fighting.key, maps[fighting.key].combat, fighting.c, name, 0);
+          saveMaps();
+          emitCombatState(fighting.key);
+        } else {
+          const pool = poolOf(charId);
+          if (pool.conc && pool.conc.name !== name) slotNote = [slotNote, `${pool.conc.name} ends`].filter(Boolean).join(' · ');
+          pool.conc = { name };
+          if (banishWhere(summon => summon.held === true && summon.charId === charId && summon.spell !== name)) { saveMaps(); flushSummonChanges(); }
+          savePools([charId]);
+        }
+        slotNote = [slotNote, 'concentrating'].filter(Boolean).join(' · ');
+      }
+    }
+    // The CON save a hurt caster owes for the spell it holds: { charId }. The
+    // server knows the DC; a failure ends the spell.
+    let concCheck = null;
+    if (isRecord(payload.concSave)) {
+      const charId = boundedText(payload.concSave.charId, 80);
+      const character = charId && ownValue(charactersDB, charId);
+      if (!character || !canAccessCharacter(actor, character)) return deny('Not your character');
+      const pool = hasOwn(poolsDB(), charId) ? poolsDB()[charId] : null;
+      if (!pool || !pool.conc || !pool.conc.dc || !isRecord(payload.d20)) return deny('No concentration check is waiting');
+      concCheck = { charId, pool };
+    }
+    // A feature used outside a fight names its pool: { charId, key, cost, max,
+    // recharge, name }. In a fight the tracker spends it instead.
+    if (isRecord(payload.resource)) {
+      const charId = boundedText(payload.resource.charId, 80);
+      const character = charId && ownValue(charactersDB, charId);
+      if (!character || !canAccessCharacter(actor, character)) return deny('Not your character');
+      if (combatantsOfCharacter(charId).length) return deny('In a fight, use it from the combat tracker');
+      const resourceKey = boundedText(payload.resource.key, 40);
+      const max = clampInt(payload.resource.max, 0, 999, 0);
+      const cost = clampInt(payload.resource.cost, 1, 20, 1);
+      if (!resourceKey) return deny('No such feature');
+      const pool = poolOf(charId);
+      const used = (pool.res[resourceKey] && pool.res[resourceKey].used) || 0;
+      const name = boundedString(payload.resource.name, 40) || resourceKey;
+      if (used + cost > max) return deny(`No ${name} uses left: take a rest`);
+      pool.res[resourceKey] = { used: used + cost, recharge: payload.resource.recharge === 'long' ? 'long' : 'short' };
+      delete pool.hdOpen;
+      slotNote = [slotNote, `${name} ${max - used - cost}/${max}`].filter(Boolean).join(' · ');
+      savePools([charId]);
+      if (payload.resource.heal === true && pool.vit) healCharId = charId;
+    }
+    const entry = {
+      id: crypto.randomUUID().slice(0, 8), ts: now, kind: 'roll',
+      user: actor, gm: isCampaignGM(actor),
+      actor: boundedString(payload.actor, 80) || actor,
+      label: boundedString(payload.label, 120) || 'Roll'
+    };
+    if (isRecord(payload.d20)) {
+      const bonus = clampInt(payload.d20.bonus, -50, 50, 0);
+      const roll = rollD20(payload.d20.mode === 'adv', payload.d20.mode === 'dis');
+      const minDie = clampInt(payload.d20.min, 1, 20, 1);
+      const floor = clampInt(payload.d20.floor, 0, 30, 0);
+      const used = Math.max(roll.used, minDie);
+      entry.d20 = { rolls: roll.d20, used, mode: roll.mode, bonus, total: Math.max(used + bonus, floor) };
+      if (used > roll.used) entry.d20.raised = roll.used;        // what the die showed before the minimum
+      if (floor > used + bonus) entry.d20.floored = used + bonus; // what it added up to before the floor
+      const dc = concCheck ? concCheck.pool.conc.dc : clampInt(payload.dc, 1, 60, 0);
+      if (dc) { entry.dc = dc; entry.success = entry.d20.total >= dc; }
+    }
+    if (concCheck) {
+      const held = concCheck.pool.conc.name;
+      entry.label = `concentrates on ${held}`;
+      if (entry.success) delete concCheck.pool.conc.dc;
+      else {
+        delete concCheck.pool.conc; slotNote = `${held} ends`;
+        if (banishWhere(summon => summon.held === true && summon.charId === concCheck.charId)) { saveMaps(); flushSummonChanges(); }
+      }
+      savePools([concCheck.charId]);
+    }
+    const dice = (Array.isArray(payload.dice) ? payload.dice : []).slice(0, 4).map(part => {
+      const rolled = isRecord(part) && rollExpression(part.expr);
+      return rolled ? { ...rolled, type: boundedString(part.type, 24) } : null;
+    }).filter(Boolean);
+    if (dice.length) entry.dice = dice;
+    if (healCharId && dice.length) {
+      const character = charactersDB[healCharId];
+      const vit = poolOf(healCharId).vit;
+      const before = Math.min(vit.maxHP, character.hp && Number.isFinite(character.hp.current) ? character.hp.current : vit.maxHP);
+      const after = Math.min(vit.maxHP, before + Math.max(0, dice[0].total));
+      applyCharacterHP(healCharId, after);
+      slotNote += ` · ${before} → ${after} HP`;
+    }
+    if (!entry.d20 && !entry.dice && !payload.note && !slotNote) return deny('Nothing to roll: use dice like 1d20+5 or 2d6');
+    const note = [boundedString(payload.note, 400), slotNote].filter(Boolean).join(' · ');
+    if (note) entry.note = note;
+    if (payload.gmOnly === true) entry.gmOnly = true;
+    const parts = [];
+    if (entry.d20) {
+      const rolled = entry.d20.raised != null ? entry.d20.raised : entry.d20.used;
+      const shown = (entry.d20.mode ? `[${entry.d20.rolls.join(', ')}] → ${rolled}` : `${rolled}`) +
+        (entry.d20.raised != null ? ` (counts as ${entry.d20.used})` : '');
+      parts.push(`d20 ${shown} ${fmtSigned(entry.d20.bonus)} = ${entry.d20.total}` +
+        (entry.d20.floored != null ? ` (raised from ${entry.d20.floored})` : '') +
+        (entry.dc ? ` vs DC ${entry.dc}: ${entry.success ? 'success' : 'failure'}` : ''));
+    }
+    for (const part of dice) parts.push(`${part.expr} → ${part.total}${part.type ? ' ' + part.type : ''}`);
+    entry.text = `${entry.actor}: ${entry.label}${parts.length ? ' — ' + parts.join(' · ') : ''}`;
+    appendTableLog([entry]);
+    return true;
+  }
+
+  // --- Cast requests ---------------------------------------------------------
+  // Outside a fight a spell is asked for: the player's screen sends what the
+  // cast would roll (and where its area was aimed), the GM allows or refuses.
+  // Allowed, it is rolled here exactly like a `roll` from that player, the
+  // map plays its effect (`cast-fx`) and the GM is told who stands in it.
+  // Requests are table state for the session only (never saved).
+  function castList() {
+    if (!activeStore) return [];
+    if (!Array.isArray(activeStore.castRequests)) activeStore.castRequests = [];
+    return activeStore.castRequests;
+  }
+  function emitCastRequests() {
+    io.to(campRoom(activeCampaignId())).emit('cast-requests', { requests: castList() });
+  }
+  function emitToMap(key, event, data, except = null) {
+    if (isUnifiedKey(key)) emitToUnified(except, (sock) => sock.emit(event, data));
+    else if (except) except.to(mapRoom(activeCampaignId(), key)).emit(event, data);
+    else io.to(mapRoom(activeCampaignId(), key)).emit(event, data);
+  }
+  function castShape(raw) {
+    if (!isRecord(raw)) return null;
+    const shape = aoe.normalizeShape({ kind: raw.kind, sizeFt: raw.sizeFt, rangeFt: raw.rangeFt, widthFt: raw.widthFt });
+    return aoe.shapeNeedsPoint(shape) || (shape.kind === 'self' && shape.sizeFt > 0) ? shape : null;
+  }
+  function castPoint(raw) {
+    if (!isRecord(raw)) return null;
+    const x = Number(raw.x), z = Number(raw.z);
+    return Number.isFinite(x) && Number.isFinite(z) ? { x: Math.round(x * 100) / 100, z: Math.round(z * 100) / 100 } : null;
+  }
+  // The player's own token for that character on this map (or the GM's pick).
+  function castToken(key, tokenId, charId, username) {
+    const object = ownValue((maps[key] && maps[key].objects) || {}, boundedText(tokenId, 80));
+    if (!object || !object.position || !object.characterData || object.characterData.id !== charId) return null;
+    return object;
+  }
+  function tellCaster(request, text) {
+    for (const sock of io.sockets.sockets.values()) {
+      if (sock.username === request.user && sock.campaignId === activeCampaignId()) sock.emit('cast-denied', { id: request.id, spell: request.spell, reason: text });
+    }
+  }
+  // The ground under a point, for something set down there (terrain only).
+  function groundY(key, x, z, fallback) {
+    try {
+      const priced = movementGround(key);
+      const y = priced ? Number(priced.ground.height(x, z)) : NaN;
+      return Number.isFinite(y) ? y : fallback;
+    } catch (_) { return fallback; }
+  }
+  function runCast(request, approver, deny) {
+    const payload = {
+      ...request.roll, actor: request.name,
+      ...(request.slot ? { slot: request.slot } : {}),
+      ...(request.concentration ? { concentration: { charId: request.charId, name: request.spell } } : {})
+    };
+    const fx = { action: request.spell, ...(request.type ? { type: request.type } : {}), ...(request.form ? { form: request.form, landed: true } : {}) };
+    let caught = null;
+    const objects = (maps[request.mapKey] && maps[request.mapKey].objects) || {};
+    const token = request.tokenId ? castToken(request.mapKey, request.tokenId, request.charId) : null;
+    if (token) fx.actor = token.id;
+    let summonAt = null;
+    if (token && request.summon) {
+      const point = request.aim ? aoe.resolveAim(request.aim.shape, token.position, request.aim.point).center : null;
+      summonAt = point && Number.isFinite(point.x) ? { x: point.x, z: point.z } : { x: token.position.x + 1, z: token.position.z };
+    } else if (token && request.aim) {
+      const aim = aoe.resolveAim(request.aim.shape, token.position, request.aim.point);
+      const creatures = [];
+      for (const object of Object.values(objects)) {
+        if (!object || !object.position || (object.type !== 'token' && object.type !== 'character')) continue;
+        creatures.push({ id: object.id, x: object.position.x, y: object.position.y, z: object.position.z });
+      }
+      const occ = visionState(request.mapKey).occ;
+      const fromCaster = aim.kind === 'cone' || aim.kind === 'line' || aim.kind === 'self';
+      caught = aoe.caughtIn(aim, creatures, {
+        exclude: fromCaster ? token.id : null,
+        blocked: (source, creature) => vision.sightBlocked(occ, source.x, creature.y + 0.5, source.z, creature.x, creature.y + 0.5, creature.z)
+      }).map(id => {
+        const object = objects[id];
+        return boundedString((object.characterData && object.characterData.name) || object.name, 40) || 'a creature';
+      });
+      fx.area = areaFx(aim);
+    }
+    if (!performRoll(payload, request.user, deny)) return false;
+    emitToMap(request.mapKey, 'cast-fx', { fx });
+    if (summonAt) {
+      const soles = token.position.y - CHARACTER_SOLE_DEPTH;
+      conjure(request.mapKey, {
+        ...request.summon, spell: request.spell, owner: request.user, charId: request.charId,
+        casterId: token.id, casterName: request.name, held: request.concentration === true,
+        position: { x: summonAt.x, y: groundY(request.mapKey, summonAt.x, summonAt.z, soles), z: summonAt.z }
+      });
+      saveMaps();
+      flushSummonChanges();
+    }
+    // Light, Daylight, Darkness: it sits on the caster's token until changed
+    // (the vision chip's carried-light picker, or the GM's inspector).
+    if (token && request.light) {
+      token.light = request.light;
+      saveMaps();
+      touchVision();
+      emitObjectUpdated(request.mapKey, token, { light: token.light });
+      reconcileVision(request.mapKey);
+    }
+    // Who stands in it is the GM's to know (some may be unseen by the party).
+    if (caught) {
+      appendTableLog([{
+        id: crypto.randomUUID().slice(0, 8), ts: Date.now(), kind: 'roll', user: approver, gm: true, gmOnly: true,
+        actor: request.name, label: `${request.spell}: ${caught.length ? `${caught.length} in the area` : 'no one in the area'}`,
+        ...(caught.length ? { note: caught.join(', ') } : {}),
+        text: `${request.name}'s ${request.spell} catches ${caught.length ? caught.join(', ') : 'no one'}`
+      }]);
+    }
+    return true;
+  }
+
+  onCampaign('get-cast-requests', () => {
+    if (socket.username) socket.emit('cast-requests', { requests: castList() });
+  });
+
+  // The template a player is still moving about: shown, faded, to the others
+  // on the map. { tokenId, name, type, shape, point | null }. Nothing is kept.
+  onCampaign('cast-aim', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const now = Date.now();
+    const point = castPoint(payload.point);
+    if (point && now - (socket.lastCastAimAt || 0) < 40) return;
+    socket.lastCastAimAt = now;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const tokenId = boundedText(payload.tokenId, 80);
+    const object = ownValue((maps[key] && maps[key].objects) || {}, tokenId);
+    if (!object || !object.characterData) return;
+    const character = ownValue(charactersDB, object.characterData.id);
+    if (!character || !canAccessCharacter(socket.username, character)) return;
+    const shape = castShape(payload.shape);
+    emitToMap(key, 'cast-aim', {
+      user: socket.username, tokenId, name: boundedString(payload.name, 40) || 'a spell',
+      type: boundedString(payload.type, 20), shape, point: shape ? point : null
+    }, socket);
+  });
+
+  onCampaign('cast-request', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const charId = boundedText(payload.charId, 80);
+    const character = charId && ownValue(charactersDB, charId);
+    if (!character || !canAccessCharacter(socket.username, character)) return combatDeny('Not your character');
+    const spell = boundedString(payload.spell, 40);
+    const raw = isRecord(payload.roll) ? payload.roll : {};
+    if (!spell) return combatDeny('Cast what?');
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const roll = { label: boundedString(raw.label, 120) || `casts ${spell}`, note: boundedString(raw.note, 400) || `casts ${spell}` };
+    if (isRecord(raw.d20)) roll.d20 = { bonus: clampInt(raw.d20.bonus, -50, 50, 0), mode: raw.d20.mode === 'adv' ? 'adv' : raw.d20.mode === 'dis' ? 'dis' : '' };
+    if (Array.isArray(raw.dice)) {
+      roll.dice = raw.dice.slice(0, 4).filter(isRecord).map(part => ({ expr: boundedString(part.expr, 40), type: boundedString(part.type, 24) }));
+    }
+    const request = {
+      id: crypto.randomUUID().slice(0, 8), ts: Date.now(), user: socket.username, charId,
+      name: boundedString(character.name, 80) || 'Adventurer', spell, level: clampInt(payload.level, 0, 9, 0),
+      type: boundedString(payload.type, 20), mapKey: key, roll,
+      concentration: payload.concentration === true,
+      ...(SPELL_FORMS.has(payload.form) ? { form: payload.form } : {}),
+      ...(vision.normalizeLight(payload.light) ? { light: vision.normalizeLight(payload.light) } : {}),
+      ...(normalizeSummon(payload.summon) ? { summon: normalizeSummon(payload.summon) } : {})
+    };
+    if (isRecord(payload.slot)) {
+      request.slot = { charId, level: clampInt(payload.slot.level, 1, 9, 1), max: clampInt(payload.slot.max, 0, 20, 0), ...(payload.slot.pact === true ? { pact: true } : {}) };
+    }
+    const token = castToken(key, payload.tokenId, charId);
+    if (token) {
+      request.tokenId = token.id;
+      const shape = isRecord(payload.aim) ? castShape(payload.aim.shape) : null;
+      const point = shape ? (castPoint(payload.aim.point) || { x: token.position.x, z: token.position.z }) : null;
+      if (shape) {
+        request.aim = { shape, point };
+        request.area = aoe.describeShape(shape);
+      }
+    }
+    if (isCampaignGM(socket.username)) { runCast(request, socket.username, combatDeny); return; } // the GM needs nobody's leave
+    const list = castList().filter(other => !(other.user === request.user && other.charId === charId));
+    list.push(request);
+    activeStore.castRequests = list.slice(-20);
+    emitCastRequests();
+  });
+
+  onCampaign('cancel-cast', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const id = boundedText(payload.id, 24);
+    const list = castList();
+    const request = list.find(other => other.id === id);
+    if (!request || (request.user !== socket.username && !isCampaignGM(socket.username))) return;
+    activeStore.castRequests = list.filter(other => other !== request);
+    emitCastRequests();
+  });
+
+  onCampaign('resolve-cast', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
+    if (!isRecord(payload)) return;
+    const id = boundedText(payload.id, 24);
+    const list = castList();
+    const request = list.find(other => other.id === id);
+    if (!request) return;
+    activeStore.castRequests = list.filter(other => other !== request);
+    if (payload.approve === true) {
+      // What stops it now (no slot left) goes to both of them.
+      runCast(request, socket.username, (reason) => { combatDeny(reason); tellCaster(request, reason); });
+    } else {
+      tellCaster(request, `The GM refused ${request.spell}`);
+    }
+    emitCastRequests();
+  });
+
+  onCampaign('get-roll-log', () => {
+    if (!socket.username) return;
+    socket.emit('roll-log', { entries: tableLog().filter(entry => tableEntryVisibleTo(socket.username, entry)) });
+  });
+
+  onCampaign('clear-roll-log', () => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
+    tableLog().length = 0;
+    saveTableLog();
+    io.to(campRoom(activeCampaignId())).emit('roll-log', { entries: [] });
+  });
+
+  // Pools and rests. Everyone at the table sees what is spent and who asked
+  // for a rest; a player asks, the GM grants (or grants one unasked).
+  onCampaign('get-pools', () => {
+    if (!socket.username) return;
+    socket.emit('pools', { pools: poolsDB(), requests: restList() });
+  });
+
+  // The owner's screen reports what the sheet derives (the server has no
+  // SRD): maximum hit points, CON modifier and hit dice by die size.
+  onCampaign('set-vitals', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const charId = boundedText(payload.charId, 80);
+    const character = charId && ownValue(charactersDB, charId);
+    if (!character || !canAccessCharacter(socket.username, character)) return;
+    const vit = sanitizeVitals(payload);
+    const pool = poolOf(charId);
+    if (!vit || JSON.stringify(pool.vit || null) === JSON.stringify(vit)) return;
+    pool.vit = vit;
+    savePools([charId]);
+  });
+
+  // During a short rest: roll one hit die + CON and heal that much.
+  onCampaign('spend-hit-die', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const charId = boundedText(payload.charId, 80);
+    const character = charId && ownValue(charactersDB, charId);
+    if (!character || !canAccessCharacter(socket.username, character)) return combatDeny('Not your character');
+    const pool = poolOf(charId);
+    if (!pool.hdOpen && !isCampaignGM(socket.username)) return combatDeny('Hit dice are spent during a short rest: ask the GM for one');
+    if (combatantsOfCharacter(charId).length) return combatDeny('No resting in the middle of a fight');
+    if (!pool.vit) return combatDeny('Open this character on its player screen first');
+    const die = clampInt(payload.die, 6, 12, 0);
+    const max = pool.vit.hd[die] || 0;
+    const used = pool.hd[die] || 0;
+    if (!HIT_DICE.includes(die) || used >= max) return combatDeny(`No d${die} hit dice left`);
+    const rolled = 1 + Math.floor(Math.random() * die);
+    const healed = Math.max(0, rolled + pool.vit.con);
+    const before = Math.min(pool.vit.maxHP, character.hp && Number.isFinite(character.hp.current) ? character.hp.current : pool.vit.maxHP);
+    const after = Math.min(pool.vit.maxHP, before + healed);
+    pool.hd[die] = used + 1;
+    applyCharacterHP(charId, after);
+    savePools([charId]);
+    const name = character.name || 'A character';
+    appendTableLog([{
+      id: crypto.randomUUID().slice(0, 8), ts: Date.now(), kind: 'roll', user: socket.username, gm: isCampaignGM(socket.username),
+      actor: name, label: 'spends a hit die',
+      dice: [{ expr: `1d${die}${pool.vit.con ? fmtSigned(pool.vit.con).replace(/\s+/g, '') : ''}`, rolls: [rolled], total: healed, type: 'healing' }],
+      note: `${before} → ${after} HP · d${die} hit dice ${max - used - 1}/${max}`,
+      text: `${name} spends a hit die: ${healed} healed (${before} → ${after} HP)`
+    }]);
+  });
+
+  onCampaign('end-rest', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const charId = boundedText(payload.charId, 80);
+    const character = charId && ownValue(charactersDB, charId);
+    if (!character || !canAccessCharacter(socket.username, character)) return;
+    const pool = poolOf(charId);
+    if (!pool.hdOpen) return;
+    delete pool.hdOpen;
+    savePools([charId]);
+  });
+
+  onCampaign('request-rest', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const charId = boundedText(payload.charId, 80);
+    const character = charId && ownValue(charactersDB, charId);
+    if (!character || !canAccessCharacter(socket.username, character)) return combatDeny('Not your character');
+    const kind = REST_KINDS.includes(payload.kind) ? payload.kind : null;
+    if (!kind) return combatDeny('Short rest or long rest?');
+    if (isCampaignGM(socket.username)) { // the GM needs nobody's leave
+      const problem = applyRest(charId, kind, socket.username);
+      if (problem) combatDeny(problem);
+      return;
+    }
+    if (combatantsOfCharacter(charId).length) return combatDeny('No resting in the middle of a fight');
+    const list = restList().filter(request => request.charId !== charId).slice(-39);
+    list.push({
+      id: crypto.randomUUID().slice(0, 8), charId, name: boundedString(character.name, 80) || 'Adventurer',
+      owner: socket.username, kind, ts: Date.now()
+    });
+    setRestList(list);
+    emitRestRequests();
+  });
+
+  onCampaign('cancel-rest', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const id = boundedText(payload.id, 20);
+    const list = restList();
+    const request = list.find(candidate => candidate.id === id);
+    if (!request || (request.owner !== socket.username && !isCampaignGM(socket.username))) return;
+    setRestList(list.filter(candidate => candidate !== request));
+    emitRestRequests();
+  });
+
+  onCampaign('resolve-rest', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
+    const id = isRecord(payload) ? boundedText(payload.id, 20) : '';
+    const list = restList();
+    const request = list.find(candidate => candidate.id === id);
+    if (!request) return;
+    if (payload.approve === true) {
+      const problem = applyRest(request.charId, request.kind, socket.username);
+      if (problem) return combatDeny(problem);
+    }
+    setRestList(list.filter(candidate => candidate !== request));
+    emitRestRequests();
+    if (payload.approve !== true) {
+      io.to(campRoom(activeCampaignId())).emit('rest-denied', { charId: request.charId, kind: request.kind, owner: request.owner, name: request.name });
+    }
+  });
+
+  // GM: a rest for the whole party (every character with a token on a map),
+  // or for the characters named.
+  onCampaign('grant-rest', (payload) => {
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
+    const kind = isRecord(payload) && REST_KINDS.includes(payload.kind) ? payload.kind : null;
+    if (!kind) return;
+    let ids = Array.isArray(payload.charIds) ? payload.charIds.map(id => boundedText(id, 80)).filter(Boolean).slice(0, 100) : null;
+    if (!ids) {
+      const onMaps = new Set();
+      for (const map of Object.values(maps)) {
+        for (const object of Object.values((map && map.objects) || {})) {
+          const id = object && object.characterData && object.characterData.id;
+          if (id && hasOwn(charactersDB, id)) onMaps.add(id);
+        }
+      }
+      ids = [...onMaps];
+    }
+    if (!ids.length) return combatDeny('No characters on the map to rest');
+    const problems = ids.map(id => applyRest(id, kind, socket.username)).filter(Boolean);
+    setRestList(restList().filter(request => !ids.includes(request.charId)));
+    emitRestRequests();
+    if (problems.length) combatDeny(problems[0]);
+  });
+
+  // Use a piece of furniture (shared/passage.js PROP_POSES): lie down on a
+  // cot, sit on a bench or a high seat. The character has to stand within
+  // reach with nothing in between; using it again, or walking off, gets up.
+  // `tokenId` picks which of the sender's characters (the GM: any character).
+  onCampaign('use-prop', (payload) => {
+    if (!socket.username || !isRecord(payload)) return;
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const map = getMap(key);
+    const prop = ownValue(map.objects, boundedText(payload.id, 80));
+    const kind = prop && prop.type === 'prop' && prop.position && passage.PROP_POSES[prop.kind];
+    if (!kind) return;
+    const gm = isCampaignGM(socket.username);
+    const wanted = boundedText(payload.tokenId, 80);
+    const distanceTo = (o) => Math.hypot(o.position.x - prop.position.x, o.position.z - prop.position.z);
+    const token = Object.values(map.objects)
+      .filter(o => o.type === 'character' && o.position && (gm || ownsObject(socket.username, o)) && (!wanted || o.id === wanted))
+      .sort((a, b) => distanceTo(a) - distanceTo(b))[0];
+    if (!token) return combatDeny(gm ? 'Select a character first' : 'Place a character first');
+    const combat = map.combat;
+    const c = combat && combat.started && ownValue(combat.combatants, token.id);
+    if (c && !gm && combat.activeId !== token.id) return combatDeny("Not this token's turn");
+    const previousObject = structuredClone(token);
+    const oldPos = { ...token.position };
+    const using = isRecord(token.pose) && token.pose.prop === prop.id;
+    if (using) {
+      delete token.pose;
+    } else {
+      if (!gm) {
+        const near = distanceTo(token) <= passage.USE_REACH && Math.abs(token.position.y - prop.position.y) <= 3;
+        if (!near) return combatDeny('Move a character next to it first');
+        if (wallsStopMoves() && !passage.walkable(barriersFor(key), walkerAt(token), walkerAt(token, prop.position)).ok) {
+          return combatDeny('The way is blocked');
+        }
+      }
+      const taken = Object.values(map.objects).some(o => o !== token && isRecord(o.pose) && o.pose.prop === prop.id);
+      if (taken) return combatDeny('Someone is already there');
+      token.position = { x: prop.position.x, y: prop.position.y + CHARACTER_SOLE_DEPTH, z: prop.position.z };
+      token.pose = { kind, prop: prop.id, propKind: prop.kind, rot: Math.round(boundedNumber(prop.rot, 0, 3, 0)) };
+    }
+    if (!saveMaps()) {
+      map.objects[token.id] = previousObject;
+      socket.emit('error', 'Could not save the pose');
+      return;
+    }
+    if (!using) broadcastMove(key, token, oldPos, null);
+    emitObjectUpdated(key, token, { pose: token.pose || null });
+    reconcileVision(key);
+    if (!using) pushCharacterInstances();
   });
 
   onCampaign('delete-object', (data) => {
@@ -3881,7 +6048,11 @@ io.on('connection', (socket) => {
       const event = { id };
       if (isUnifiedKey(key)) emitToUnified(null, (sock) => sock.emit('object-deleted', event));
       else io.to(mapRoom(activeCampaignId(), key)).emit('object-deleted', event);
+      if (banishWhere(summon => summon.casterId === id, key)) saveMaps();
+      flushSummonChanges(); // those, and any a lost concentration took along
+      reconcileVision(key);
       if (wasCharacter) pushCharacterInstances();
+      if (obj.type === 'portal') pushDungeons();
       if (combatChanged) emitCombatState(key);
     }
   });
@@ -3890,8 +6061,22 @@ io.on('connection', (socket) => {
   // answer only the offending socket with combat-denied (never 'error': the
   // player client routes that to the login modal). ---
   function combatDeny(reason) { socket.emit('combat-denied', { reason }); }
+  // Lights a spell put on (or took off) tokens: tell the screens, re-rule sight.
+  function flushLightChanges() {
+    const keys = new Set();
+    for (const { key, id } of lightChanges.splice(0)) {
+      const object = ownValue((maps[key] && maps[key].objects) || {}, id);
+      if (!object) continue;
+      emitObjectUpdated(key, object, { light: object.light || null });
+      keys.add(key);
+    }
+    for (const key of keys) reconcileVision(key);
+  }
+
   function persistCombat(key, previousCombat, stagedCharacterHP = []) {
     const map = getMap(key);
+    sweepZones(key, map.combat, stagedCharacterHP, rollsSaveNow);
+    sweepConcentration(key, map.combat, rollsSaveNow);
     const { finalStages, touchedCombats } = stageCharacterCombatMirrors(
       stagedCharacterHP,
       new Map([[key, { key, map, previousCombat }]])
@@ -3920,6 +6105,8 @@ io.on('connection', (socket) => {
       }
       for (const stage of finalStages) emitCharacterHP(stage);
       for (const touched of touchedCombats) emitCombatState(touched.key);
+      flushLightChanges();
+      flushSummonChanges();
       return true;
     }
     restoreTransaction();
@@ -3980,45 +6167,36 @@ io.on('connection', (socket) => {
     c.speedFeet = clampInt(payload.speedFeet, 0, 120, c.speedFeet);
     c.initMod = clampInt(payload.initMod, -10, 20, c.initMod);
     c.maxHP = clampInt(payload.maxHP, 1, 999, c.maxHP);
-    if (Array.isArray(payload.attacks)) {
-      c.attacks = payload.attacks.slice(0, 8).map(a => {
-        const attack = {
-          name: String((a && a.name) || 'Attack').slice(0, 30),
-          attack: clampInt(a && a.attack, -10, 30, 0),
-          damage: String((a && a.damage) || '1').slice(0, 20),
-          damageType: String((a && a.damageType) || '').slice(0, 20),
-          ranged: !!(a && a.ranged),
-          rangeFt: clampInt(a && a.rangeFt, 5, 600, 5)
-        };
-        const parts = (Array.isArray(a && a.damageParts) ? a.damageParts : [])
-          .slice(0, 4).map(part => ({
-            damage: String((part && part.damage) || '1').slice(0, 20),
-            damageType: String((part && part.damageType) || '').slice(0, 20)
-          }));
-        if (parts.length > 1) attack.damageParts = parts;
-        return attack;
-      });
+    if (Array.isArray(payload.attacks)) c.attacks = normalizeAttacks(payload.attacks);
+    c.abilities = normalizeAbilities(payload.abilities);
+    c.riders = normalizeRiders(payload.riders);
+    c.resources = normalizeResources(payload.resources);
+    // A character walks into the fight with what it has left (pools.json);
+    // per-fight and per-turn pools, and monsters, start full.
+    const carried = c.kind === 'character' && c.charId && hasOwn(poolsDB(), c.charId) ? poolsDB()[c.charId] : null;
+    for (const [resourceKey, resource] of Object.entries(c.resources)) {
+      const spent = carried && (resource.recharge === 'short' || resource.recharge === 'long') && carried.res[resourceKey];
+      resource.current = Math.max(0, resource.max - (spent ? spent.used : 0));
     }
+    Object.assign(c, normalizeTurnState({
+      attacksPerAction: payload.attacksPerAction, critRange: payload.critRange
+    }));
     const ABILS = ['str','dex','con','int','wis','cha'];
     c.saves = {};
     for (const a of ABILS) c.saves[a] = clampInt(payload.saves && payload.saves[a], -20, 30, 0);
     c.spellAtk = clampInt(payload.spellAtk, -10, 30, 0);
     c.spellDC  = clampInt(payload.spellDC, 1, 40, 8);
     c.slots = {};
-    for (let l = 1; l <= 9; l++) c.slots[l] = clampInt(payload.slots && payload.slots[l], 0, 20, 0);
-    if (Array.isArray(payload.spells)) {
-      c.spells = payload.spells.slice(0, 20).map((s, i) => {
-        const base = {
-          name: String((s && s.name) || 'Spell').slice(0, 40),
-          level: clampInt(s && s.level, 0, 9, 0),
-          damage: String((s && s.damage) || '1d4').slice(0, 20),
-          damageType: String((s && s.damageType) || '').slice(0, 20),
-          spellIndex: i
-        };
-        if (s && s.saveAbility) return { ...base, saveAbility: ABILS.includes(s.saveAbility) ? s.saveAbility : 'dex', saveSuccess: s.saveSuccess === 'none' ? 'none' : 'half' };
-        return { ...base, attackType: (s && s.attackType === 'melee') ? 'melee' : 'ranged' };
-      });
+    c.slotMax = {};
+    for (let l = 1; l <= 9; l++) {
+      c.slotMax[l] = clampInt(payload.slots && payload.slots[l], 0, 20, 0);
+      c.slots[l] = Math.max(0, c.slotMax[l] - ((carried && carried.slots[l]) || 0));
     }
+    const pact = sanitizePact(payload.pact, (carried && carried.pact) || 0);
+    if (pact) c.pact = pact; else delete c.pact;
+    if (Array.isArray(payload.spells)) c.spells = normalizeSpells(payload.spells);
+    c.saveMods = normalizeSaveMods(payload.saveMods);
+    if (carried && carried.conc) c.concentration = { name: carried.conc.name, effects: [] };
     if (!c.hp) c.hp = { current: c.maxHP };
     c.statsPending = false;
     persistCombat(key, previousCombat);
@@ -4058,6 +6236,188 @@ io.on('connection', (socket) => {
     persistCombat(key, previousCombat);
   });
 
+  // One weapon attack inside the Attack action, an Extra Attack or a granted
+  // bonus-action strike. Riders (Sneak Attack, Rage) add their dice on a hit.
+  function resolveWeaponAttack(key, combat, c, target, atk, payload, stagedCharacterHP) {
+    const sight = sightModifiers(key, c, target);
+    const roll = rollD20(payload.advantage === true || sight.advantage, hasEffect(target, 'dodging') || sight.disadvantage);
+    const crit = roll.used >= (c.critRange || 20);
+    const total = roll.used + atk.attack;
+    const hit = roll.used !== 1 && (crit || total >= target.ac);
+    let text = `${c.name} attacks ${target.name} (${atk.name})${sight.note}: d20 ${roll.text} ${fmtSigned(atk.attack)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
+    const entry = {
+      kind: 'attack', actorName: c.name, targetName: target.name,
+      roll: { d20: roll.d20, used: roll.used, mod: atk.attack, total, vs: target.ac, hit, crit, disadvantage: roll.mode < 0, advantage: roll.mode > 0 }
+    };
+    entry.fx = combatFx(c, target, atk.name, atk.damageType, hit);
+    if (hit) {
+      const damageParts = Array.isArray(atk.damageParts) && atk.damageParts.length > 1
+        ? atk.damageParts
+        : [{ damage: atk.damage, damageType: atk.damageType }];
+      const rolledParts = damageParts.map(part => ({
+        ...rollDamage(part.damage, crit),
+        damageType: boundedString(part.damageType, 20)
+      }));
+      // Automatic riders always apply; the rest only when the attacker asked.
+      const requested = new Set((Array.isArray(payload.riders) ? payload.riders : []).slice(0, 8).map(Number));
+      const riderNames = [];
+      (c.riders || []).forEach((rider, index) => {
+        if (!rider.auto && !requested.has(index)) return;
+        if (!riderApplies(rider, atk, c, c.ridersUsed || [], index)) return;
+        rolledParts.push({ ...rollDamage(rider.damage, crit), damageType: rider.damageType || '' });
+        riderNames.push(rider.name);
+        if (rider.oncePerTurn) c.ridersUsed = [...(c.ridersUsed || []), index];
+      });
+      const damageTotal = rolledParts.reduce((sum, part) => sum + part.total, 0);
+      entry.dmg = rolledParts.length === 1
+        ? rolledParts[0]
+        : {
+            expr: rolledParts.map(part => part.expr).join(' + '),
+            rolls: rolledParts.flatMap(part => part.rolls),
+            total: damageTotal,
+            parts: rolledParts
+          };
+      const damageText = rolledParts.map(part =>
+        `${part.expr} → ${part.total}${part.damageType ? ' ' + part.damageType : ''}`
+      ).join(' + ');
+      text += ` · ${damageText}${crit ? ' (crit ×2 dice)' : ''}`;
+      if (riderNames.length) text += ` [${riderNames.join(', ')}]`;
+      if (rolledParts.length > 1) text += ` · ${damageTotal} total`;
+      const next = applyDamageToTarget(target, damageTotal, stagedCharacterHP);
+      if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
+    }
+    entry.text = text;
+    pushLog(key, combat, entry);
+  }
+
+  // Whose saving throw the acting user rolls on the spot: their own creatures
+  // (for the GM: everything no player owns). The rest wait for their player.
+  function rollsSaveNow(target) {
+    if (target.owner) return target.owner === socket.username;
+    return isCampaignGM(socket.username);
+  }
+  function abilityShape(ability) {
+    const fromCaster = ability.area === 'cone' || ability.area === 'line' || ability.area === 'cube' || ability.area === 'self';
+    return aoe.normalizeShape({ kind: ability.area, sizeFt: ability.areaFt, rangeFt: fromCaster ? 0 : ability.rangeFt });
+  }
+
+  // A feature ability: attack-roll, save-for-damage, heal or utility. Returns
+  // an error string when it cannot be used (nothing is spent in that case).
+  function resolveAbility(key, combat, c, ability, payload, stagedCharacterHP) {
+    // An area with a size is aimed, and the server says who stands in it; the
+    // rest (one creature, or a shape the data gives no size for) name targets.
+    const shape = abilityShape(ability);
+    const aimed = ability.type === 'save' && (aoe.shapeNeedsPoint(shape) || (shape.kind === 'self' && shape.sizeFt > 0));
+    let targets = [], aim = null;
+    if (aimed) {
+      if (shape.kind !== 'self' && !isRecord(payload.aim)) return `Aim ${ability.name} first`;
+      const area = areaTargets(key, combat, c, shape, payload.aim);
+      if (typeof area === 'string') return area;
+      ({ aim, targets } = area);
+    } else {
+      const requested = Array.isArray(payload.targetIds) ? payload.targetIds : (payload.targetId ? [payload.targetId] : []);
+      for (const id of requested.slice(0, 12)) {
+        const target = ownValue(combat.combatants, id);
+        if (target && !targets.includes(target)) targets.push(target);
+      }
+      if (targets.length > ability.maxTargets) return `${ability.name} affects at most ${ability.maxTargets} target(s)`;
+    }
+    const offensive = ability.type === 'attack' || ability.type === 'save';
+    if (offensive && !aimed && !targets.length) return `Pick a target for ${ability.name}`;
+    if (offensive && !aimed && targets.includes(c)) return "Can't target yourself";
+    if (ability.rechargeOn && ability.spent) return `${ability.name} has not recharged`;
+    const resource = ability.resource ? ownValue(c.resources, ability.resource) : null;
+    if (ability.resource && (!resource || resource.current < ability.resourceCost)) {
+      return `No ${resource ? resource.name : ability.name} uses left`;
+    }
+    if (ability.cost === 'action' && c.actionUsed) return 'Action already used this turn';
+    if (ability.cost === 'bonus' && c.bonusUsed) return 'Bonus action already used this turn';
+
+    if (resource) resource.current -= ability.resourceCost;
+    if (ability.rechargeOn) ability.spent = true;
+    if (ability.cost === 'action') { c.actionUsed = true; c.attacksLeft = 0; }
+    if (ability.cost === 'bonus') c.bonusUsed = true;
+    const spent = resource ? ` (${resource.name} ${resource.current}/${resource.max})` : '';
+    const applyEffect = (target) => {
+      if (!ability.effect || hasEffect(target, ability.effect)) return '';
+      addEffect(target, ability.effect, false);
+      return ` — ${target.name} is ${CONDITION_LABELS[ability.effect].toLowerCase()}`;
+    };
+
+    if (ability.type === 'save') {
+      // One damage roll for the whole area (5e), one save per creature.
+      openSave(key, combat, c, {
+        name: ability.name, verb: 'uses', note: spent, aim,
+        saveAbility: ability.saveAbility, dc: ability.dc, saveSuccess: ability.saveSuccess,
+        damage: ability.damage, damageType: ability.damageType, effect: ability.effect
+      }, targets, stagedCharacterHP, rollsSaveNow);
+    } else if (ability.type === 'attack') {
+      targets.forEach((target, index) => {
+        const sight = sightModifiers(key, c, target);
+        const roll = rollD20(payload.advantage === true || sight.advantage, hasEffect(target, 'dodging') || sight.disadvantage);
+        const crit = roll.used === 20;
+        const total = roll.used + ability.attack;
+        const hit = roll.used !== 1 && (crit || total >= target.ac);
+        let text = `${c.name} uses ${ability.name}${index === 0 ? spent : ''} on ${target.name}${sight.note}: d20 ${roll.text} ${fmtSigned(ability.attack)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
+        const entry = {
+          kind: 'attack', actorName: c.name, targetName: target.name,
+          roll: { d20: roll.d20, used: roll.used, mod: ability.attack, total, vs: target.ac, hit, crit, disadvantage: roll.mode < 0, advantage: roll.mode > 0 }
+        };
+        if (hit) {
+          if (ability.damage) {
+            const dmg = rollDamage(ability.damage, crit);
+            entry.dmg = dmg;
+            text += ` · ${dmg.expr}${crit ? ' (crit ×2 dice)' : ''} → ${dmg.total}${ability.damageType ? ' ' + ability.damageType : ''}`;
+            const next = applyDamageToTarget(target, dmg.total, stagedCharacterHP);
+            if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
+          }
+          text += applyEffect(target);
+        }
+        entry.text = text;
+        entry.fx = combatFx(c, target, ability.name, ability.damageType, hit);
+        pushLog(key, combat, entry);
+      });
+    } else if (ability.type === 'heal') {
+      const amount = rollDamage(ability.damage || '0', false);
+      for (const target of (targets.length ? targets : [c])) {
+        const before = (target.hp && typeof target.hp.current === 'number') ? target.hp.current : target.maxHP;
+        const next = applyHealToTarget(target, amount.total, stagedCharacterHP);
+        pushLog(key, combat, {
+          kind: 'action', actorName: c.name, targetName: target.name,
+          dmg: { expr: amount.expr, rolls: amount.rolls, total: amount.total },
+          text: `${c.name} uses ${ability.name}${spent} on ${target === c ? 'themself' : target.name}: ${amount.expr} → ${amount.total} healed (${before} → ${next == null ? before : next} HP)`
+        });
+      }
+    } else {
+      const notes = [];
+      if (ability.selfEffect) {
+        addEffect(c, ability.selfEffect, false);
+        notes.push(CONDITION_LABELS[ability.selfEffect].toLowerCase());
+      }
+      for (const target of targets) { const note = applyEffect(target); if (note) notes.push(note.replace(/^ — /, '')); }
+      if (ability.grant === 'dash') {
+        c.dashFeet += c.speedFeet; addEffect(c, 'dashed', true);
+        notes.push(`+${c.speedFeet} ft movement`);
+      } else if (ability.grant === 'dodge') {
+        addEffect(c, 'dodging', true); notes.push('attacks against them at disadvantage');
+      } else if (ability.grant === 'disengage') {
+        addEffect(c, 'disengaged', true); notes.push('disengaged');
+      } else if (ability.grant === 'attacks') {
+        c.bonusAttacks = { count: ability.grantCount || 1, only: ability.grantAttack || '' };
+        notes.push(`${c.bonusAttacks.count} extra ${c.bonusAttacks.only || 'weapon'} attack(s)`);
+      } else if (ability.grant === 'action') {
+        c.actionUsed = false; c.attacksLeft = 0;
+        notes.push('one more action this turn');
+      }
+      pushLog(key, combat, {
+        kind: 'action', actorName: c.name,
+        fx: combatFx(c, null, ability.name),
+        text: `${c.name} uses ${ability.name}${spent}${notes.length ? ' — ' + notes.join(', ') : ''}`
+      });
+    }
+    return null;
+  }
+
   onCampaign('combat-action', (payload) => {
     const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
     const combat = getCombat(key);
@@ -4066,111 +6426,309 @@ io.on('connection', (socket) => {
     if (!c) return;
     if (!canControl(c)) return combatDeny('Not your combatant');
     if (combat.activeId !== c.id) return combatDeny("Not this combatant's turn");
-    if (c.actionUsed) return combatDeny('Action already used this turn');
     if (hasEffect(c, 'down')) return combatDeny(`${c.name} is down`);
     const previousCombat = snapshotField(getMap(key), 'combat');
     const stagedCharacterHP = [];
     const kind = String(payload.kind || '');
+    const actionSpent = () => combatDeny('Action already used this turn');
     if (kind === 'dash') {
+      if (c.actionUsed) return actionSpent();
       c.dashFeet += c.speedFeet;
       addEffect(c, 'dashed', true);
       pushLog(key, combat, { kind: 'action', actorName: c.name, text: `${c.name} dashes (+${c.speedFeet} ft movement)` });
+      c.actionUsed = true; c.attacksLeft = 0;
     } else if (kind === 'dodge') {
+      if (c.actionUsed) return actionSpent();
       addEffect(c, 'dodging', true);
       pushLog(key, combat, { kind: 'action', actorName: c.name, text: `${c.name} takes the Dodge action (attacks against them at disadvantage)` });
+      c.actionUsed = true; c.attacksLeft = 0;
     } else if (kind === 'disengage') {
+      if (c.actionUsed) return actionSpent();
       addEffect(c, 'disengaged', true);
       pushLog(key, combat, { kind: 'action', actorName: c.name, text: `${c.name} disengages` });
+      c.actionUsed = true; c.attacksLeft = 0;
     } else if (kind === 'attack') {
       const target = ownValue(combat.combatants, payload.targetId);
       if (!target) return combatDeny('No such target');
       if (target.id === c.id) return combatDeny("Can't target yourself");
       const atk = c.attacks[clampInt(payload.attackIndex, 0, 99, -1)];
       if (!atk) return combatDeny('No such attack');
-      const disadvantage = hasEffect(target, 'dodging');
-      const d20 = [rollDie(20)];
-      if (disadvantage) d20.push(rollDie(20));
-      const used = disadvantage ? Math.min(d20[0], d20[1]) : d20[0];
-      const crit = used === 20;
-      const total = used + atk.attack;
-      const hit = used !== 1 && (crit || total >= target.ac);
-      const dieTxt = disadvantage ? `[${d20.join(', ')}] → ${used}` : `${used}`;
-      let text = `${c.name} attacks ${target.name} (${atk.name}): d20 ${dieTxt} ${fmtSigned(atk.attack)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
-      const entry = {
-        kind: 'attack', actorName: c.name, targetName: target.name,
-        roll: { d20, used, mod: atk.attack, total, vs: target.ac, hit, crit, disadvantage }
-      };
-      if (hit) {
-        const damageParts = Array.isArray(atk.damageParts) && atk.damageParts.length > 1
-          ? atk.damageParts
-          : [{ damage: atk.damage, damageType: atk.damageType }];
-        const rolledParts = damageParts.map(part => ({
-          ...rollDamage(part.damage, crit),
-          damageType: boundedString(part.damageType, 20)
-        }));
-        const damageTotal = rolledParts.reduce((sum, part) => sum + part.total, 0);
-        entry.dmg = rolledParts.length === 1
-          ? rolledParts[0]
-          : {
-              expr: rolledParts.map(part => part.expr).join(' + '),
-              rolls: rolledParts.flatMap(part => part.rolls),
-              total: damageTotal,
-              parts: rolledParts
-            };
-        const damageText = rolledParts.map(part =>
-          `${part.expr} → ${part.total}${part.damageType ? ' ' + part.damageType : ''}`
-        ).join(' + ');
-        text += ` · ${damageText}${crit ? ' (crit ×2 dice)' : ''}`;
-        if (rolledParts.length > 1) text += ` · ${damageTotal} total`;
-        const next = applyDamageToTarget(target, damageTotal, stagedCharacterHP);
-        if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
+      // Where does this swing come from? The Attack action, an Extra Attack
+      // left over from it, or a strike granted by a bonus action.
+      const granted = c.bonusAttacks && c.bonusAttacks.count > 0 &&
+        (!c.bonusAttacks.only || atk.name.toLowerCase().includes(c.bonusAttacks.only.toLowerCase()));
+      if (!c.actionUsed) {
+        c.actionUsed = true;
+        c.attacksLeft = Math.max(0, (c.attacksPerAction || 1) - 1);
+      } else if (c.attacksLeft > 0) {
+        c.attacksLeft -= 1;
+      } else if (granted) {
+        c.bonusAttacks.count -= 1;
+        if (c.bonusAttacks.count <= 0) c.bonusAttacks = null;
+      } else {
+        return actionSpent();
       }
-      entry.text = text;
-      pushLog(key, combat, entry);
+      resolveWeaponAttack(key, combat, c, target, atk, payload, stagedCharacterHP);
+    } else if (kind === 'strike') {
+      // A summoned weapon attacks a creature within 5 ft of it: free on the
+      // turn it was cast (part of the casting), a bonus action afterwards.
+      const weapon = ownValue(getMap(key).objects, boundedText(payload.summonId, 80));
+      if (!weapon || weapon.type !== 'summon' || weapon.casterId !== c.id || !isRecord(weapon.strike)) return combatDeny('Nothing to strike with');
+      const target = ownValue(combat.combatants, payload.targetId);
+      const targetObject = target && ownValue(getMap(key).objects, target.id);
+      if (!target || !targetObject || !targetObject.position) return combatDeny('No such target');
+      if (hasEffect(target, 'down')) return combatDeny(`${target.name} is down`);
+      if (Math.hypot(targetObject.position.x - weapon.position.x, targetObject.position.z - weapon.position.z) * 5 > 7.6) {
+        return combatDeny(`${target.name} is not within 5 ft of ${weapon.name}: move it first`);
+      }
+      const turn = `${combat.round}:${c.id}`;
+      if (weapon.castTurn === turn && weapon.struck !== turn) weapon.struck = turn;
+      else if (c.bonusUsed) return combatDeny('Bonus action already used this turn');
+      else c.bonusUsed = true;
+      const roll = rollD20(payload.advantage === true, hasEffect(target, 'dodging'));
+      const crit = roll.used === 20;
+      const atk = poolInt(weapon.strike.atk, -10, 30, 0);
+      const total = roll.used + atk;
+      const hit = roll.used !== 1 && (crit || total >= target.ac);
+      let text = `${c.name}'s ${weapon.name} strikes at ${target.name}: d20 ${roll.text} ${fmtSigned(atk)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
+      const entry = { kind: 'cast', actorName: c.name, targetName: target.name, spellName: weapon.name, roll: { d20: roll.d20, used: roll.used, mod: atk, total, vs: target.ac, hit, crit, disadvantage: roll.mode < 0 } };
+      if (hit) {
+        const dmg = rollDamage(weapon.strike.damage, crit);
+        entry.dmg = dmg;
+        text += ` · ${dmg.expr}${crit ? ' (crit ×2 dice)' : ''} → ${dmg.total} ${weapon.strike.damageType || 'force'}`;
+        if (applyDamageToTarget(target, dmg.total, stagedCharacterHP) === 0) text += ` — ${target.name} drops to 0 HP!`;
+      }
+      entry.fx = { actor: weapon.id, target: target.id, action: weapon.name, type: weapon.strike.damageType || 'force', landed: hit, form: 'touch' };
+      entry.text = text; pushLog(key, combat, entry);
+    } else if (kind === 'ability') {
+      const ability = (c.abilities || [])[clampInt(payload.abilityIndex, 0, 99, -1)];
+      if (!ability) return combatDeny('No such ability');
+      const problem = resolveAbility(key, combat, c, ability, payload, stagedCharacterHP);
+      if (problem) return combatDeny(problem);
+    } else if (kind === 'cast' && isRecord(payload.utility)) {
+      // A spell with no damage the tracker can apply (a buff, a wall, a
+      // charm): it costs its action and its slot, the effect is the table's.
+      const name = boundedString(payload.utility.name, 40) || 'a spell';
+      const level = clampInt(payload.utility.level, 0, 9, 0);
+      const bonus = payload.utility.time === 'bonus';
+      if (bonus ? c.bonusUsed : c.actionUsed) return combatDeny(bonus ? 'Bonus action already used this turn' : 'Action already used this turn');
+      let castLevel = 0;
+      if (level > 0) {
+        castLevel = takeCombatSlot(c, level, payload.slotLevel);
+        if (!castLevel) return combatDeny(`No spell slots left for ${name}`);
+      }
+      if (bonus) c.bonusUsed = true; else { c.actionUsed = true; c.attacksLeft = 0; }
+      if (payload.utility.concentration === true) beginConcentration(key, combat, c, name, clampInt(payload.utility.rounds, 1, 14400, 0));
+      const detail = boundedString(payload.utility.note, 200);
+      pushLog(key, combat, {
+        kind: 'action', actorName: c.name, fx: combatFx(c, null, name),
+        text: `${c.name} casts ${name}${castLevel > level ? ` with a level ${castLevel} slot` : ''}${bonus ? ' (bonus action)' : ''}${detail ? ' — ' + detail : ''}`
+      });
     } else if (kind === 'cast') {
       const spell = c.spells && c.spells[clampInt(payload.spellIndex, 0, 19, -1)];
       if (!spell) return combatDeny('No such spell');
-      const target = ownValue(combat.combatants, payload.targetId);
-      if (!target) return combatDeny('No such target');
-      if (target.id === c.id) return combatDeny("Can't target yourself");
-      if (hasEffect(target, 'down')) return combatDeny(`${target.name} is down`);
-      if (spell.level > 0) {
-        if (!c.slots || (c.slots[spell.level] || 0) < 1) return combatDeny(`No level ${spell.level} spell slots left`);
-        c.slots[spell.level] -= 1; // a miss still spends the slot (5e)
+      const quick = spell.time === 'bonus'; // Healing Word: a bonus action, the action stays
+      if (quick ? c.bonusUsed : c.actionUsed) return quick ? combatDeny('Bonus action already used this turn') : actionSpent();
+      // A spell with an area is aimed at a point; the server says who is in it.
+      const shape = aoe.normalizeShape({ kind: spell.area, sizeFt: spell.areaFt, rangeFt: spell.area === 'sphere' || spell.area === 'cylinder' || spell.area === 'cube' ? spell.rangeFt : 0 });
+      const buff = !spell.attackType && !spell.saveAbility; // no roll: it simply lands on whoever is picked
+      const aimed = !!spell.saveAbility && (aoe.shapeNeedsPoint(shape) || (shape.kind === 'self' && shape.sizeFt > 0));
+      let area = null;
+      if (aimed) {
+        if (shape.kind !== 'self' && !isRecord(payload.aim)) return combatDeny(`Aim ${spell.name} first`);
+        area = areaTargets(key, combat, c, shape, payload.aim);
+        if (typeof area === 'string') return combatDeny(area);
       }
-      if (spell.attackType) { // attack-roll spell (spellAtk vs AC)
-        const disadvantage = hasEffect(target, 'dodging');
-        const d20 = [rollDie(20)]; if (disadvantage) d20.push(rollDie(20));
-        const used = disadvantage ? Math.min(d20[0], d20[1]) : d20[0];
+      const target = aimed || buff ? null : ownValue(combat.combatants, payload.targetId);
+      let friends = null;
+      if (buff) {
+        const ids = Array.isArray(payload.targetIds) ? payload.targetIds : [payload.targetId];
+        friends = [...new Set(ids.slice(0, 24).map(id => boundedText(id, 80)).filter(Boolean))]
+          .map(id => ownValue(combat.combatants, id)).filter(Boolean).slice(0, spell.maxTargets || 1);
+        if (!friends.length) friends = [c]; // nobody picked: the caster
+      } else if (!aimed) {
+        if (!target) return combatDeny('No such target');
+        if (target.id === c.id) return combatDeny("Can't target yourself");
+        if (hasEffect(target, 'down')) return combatDeny(`${target.name} is down`);
+      }
+      let castLevel = spell.level;
+      if (spell.level > 0) {
+        castLevel = takeCombatSlot(c, spell.level, payload.slotLevel); // a miss still spends the slot (5e)
+        if (!castLevel) return combatDeny(`No level ${spell.level} spell slots left`);
+      }
+      const spellDamage = (spell.bySlot && spell.bySlot[castLevel]) || spell.damage;
+      const upcastNote = castLevel > spell.level ? ` (level ${castLevel} slot)` : '';
+      if (spell.concentration) beginConcentration(key, combat, c, spell.name, spell.rounds || 0);
+      if (spell.summon) {
+        // Set down at the point aimed at (beside the caster when none is given).
+        const me = ownValue(getMap(key).objects, c.id);
+        const point = castPoint(payload.aim);
+        const reach = spell.rangeFt || 5;
+        const at = me && me.position ? (point || { x: me.position.x + 1, z: me.position.z }) : null;
+        const tooFar = at && Math.hypot(at.x - me.position.x, at.z - me.position.z) * 5 > reach + 2.5;
+        const soles = at ? me.position.y - (me.type === 'character' ? CHARACTER_SOLE_DEPTH : TOKEN_SOLE_DEPTH) : 0;
+        const made = at && !tooFar && conjure(key, {
+          ...spell.summon, spell: spell.name, owner: c.owner || '', charId: c.charId || '',
+          casterId: c.id, casterName: c.name, held: spell.concentration === true, color: c.color,
+          position: { x: at.x, y: groundY(key, at.x, at.z, soles), z: at.z },
+          castTurn: `${combat.round}:${c.id}`,
+          ...(spell.rounds && !spell.concentration ? { until: combat.round + spell.rounds } : {}),
+          ...(spell.summon.strike ? { strike: { atk: c.spellAtk, damage: spellDamage || '1d8', damageType: spell.damageType || 'force' } } : {})
+        });
+        if (!made) {
+          restoreCombatField(getMap(key), previousCombat);
+          flushSummonChanges();
+          return combatDeny(!at ? `${c.name} has no token on the map` : tooFar ? `${spell.name} reaches ${reach} ft` : 'Object limit reached');
+        }
+        pushLog(key, combat, {
+          kind: 'cast', actorName: c.name, spellName: spell.name,
+          fx: { ...combatFx(c, null, spell.name, spell.damageType), form: 'aura', landed: true },
+          text: `${c.name} casts ${spell.name}${upcastNote}${quick ? ' (bonus action)' : ''}${spell.summon.strike ? ' — it may strike once this turn' : ''}${spell.concentration ? ' (concentration)' : ''}`
+        });
+      } else if (buff) {
+        const outcome = [];
+        let healed = null;
+        if (spell.heal) { // one roll, given to everyone picked
+          healed = rollDamage((spell.bySlot && spell.bySlot[castLevel]) || spell.heal, false);
+          outcome.push(`${healed.expr} → ${healed.total} healed`);
+        }
+        for (const friend of friends) {
+          if (healed) {
+            const before = friend.hp && typeof friend.hp.current === 'number' ? friend.hp.current : friend.maxHP;
+            const after = applyHealToTarget(friend, healed.total, stagedCharacterHP);
+            if (friends.length > 1 || after - before !== healed.total) outcome.push(`${friend.name} ${before} → ${after} HP`);
+          }
+          if (spell.effect) {
+            addEffect(friend, spell.effect, false);
+            if (spell.concentration) holdEffect(c, friend, spell.effect);
+          }
+          if (spell.light && setSpellLight(key, friend.id, vision.normalizeLight(spell.light)) && isRecord(c.concentration) && spell.concentration) {
+            c.concentration.lights = [...(c.concentration.lights || []), friend.id].slice(-12);
+          }
+        }
+        if (spell.effect) outcome.push(CONDITION_LABELS[spell.effect].toLowerCase());
+        if (spell.light) outcome.push(spell.light.dark ? `magical darkness, ${spell.light.dark} ft` : `light, ${spell.light.bright + spell.light.dim} ft`);
+        const alone = friends.length === 1 ? friends[0] : null;
+        pushLog(key, combat, {
+          kind: 'cast', actorName: c.name, spellName: spell.name,
+          ...(healed ? { dmg: healed } : {}),
+          fx: {
+            ...combatFx(c, null, spell.name), targets: friends.map(friend => friend.id),
+            form: spell.form || (healed ? 'heal' : 'aura'), landed: true
+          },
+          text: `${c.name} casts ${spell.name}${upcastNote}${quick ? ' (bonus action)' : ''} on ${alone === c ? 'themself' : friends.map(friend => friend.name).join(', ')} — ${outcome.join(', ')}${spell.concentration ? ' (concentration)' : ''}`
+        });
+      } else if (spell.attackType) { // attack-roll spell (spellAtk vs AC)
+        const sight = sightModifiers(key, c, target);
+        const roll = rollD20(payload.advantage === true || sight.advantage, hasEffect(target, 'dodging') || sight.disadvantage);
+        const { d20, used } = roll;
+        const disadvantage = roll.mode < 0;
         const crit = used === 20;
         const total = used + c.spellAtk;
         const hit = used !== 1 && (crit || total >= target.ac);
-        const dieTxt = disadvantage ? `[${d20.join(', ')}] → ${used}` : `${used}`;
-        let text = `${c.name} casts ${spell.name} at ${target.name}: d20 ${dieTxt} ${fmtSigned(c.spellAtk)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
+        let text = `${c.name} casts ${spell.name} at ${target.name}${sight.note}: d20 ${roll.text} ${fmtSigned(c.spellAtk)} = ${total} vs AC ${target.ac} — ${crit ? 'CRIT!' : hit ? 'HIT' : 'MISS'}`;
         const entry = { kind: 'cast', actorName: c.name, targetName: target.name, spellName: spell.name, roll: { d20, used, mod: c.spellAtk, total, vs: target.ac, hit, crit, disadvantage } };
         if (hit) {
-          const dmg = rollDamage(spell.damage, crit);
+          const dmg = rollDamage(spellDamage, crit);
           entry.dmg = dmg;
           text += ` · ${dmg.expr}${crit ? ' (crit ×2 dice)' : ''} → ${dmg.total}${spell.damageType ? ' ' + spell.damageType : ''}`;
           const next = applyDamageToTarget(target, dmg.total, stagedCharacterHP);
           if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
         }
+        entry.fx = { ...combatFx(c, target, spell.name, spell.damageType, hit), form: spell.form || (spell.attackType === 'melee' ? 'touch' : 'bolt') };
         entry.text = text; pushLog(key, combat, entry);
-      } else { // save-for-half/none spell
-        const save = rollSave(target, spell.saveAbility, c.spellDC);
-        const raw = rollDamage(spell.damage, false);
-        const dealt = save.success ? (spell.saveSuccess === 'half' ? Math.floor(raw.total / 2) : 0) : raw.total;
-        let text = `${c.name} casts ${spell.name} at ${target.name} (DC ${c.spellDC} ${spell.saveAbility.toUpperCase()}): ${target.name} d20 ${save.used} ${fmtSigned(save.mod)} = ${save.total} — ${save.success ? 'SAVE' : 'FAIL'} · ${raw.expr} → ${dealt}${spell.damageType ? ' ' + spell.damageType : ''}${save.success && spell.saveSuccess === 'half' ? ' (half)' : ''}`;
-        const entry = { kind: 'cast', actorName: c.name, targetName: target.name, spellName: spell.name, save: { d20: save.d20, used: save.used, mod: save.mod, total: save.total, vs: save.vs, ability: spell.saveAbility, success: save.success }, dmg: { expr: raw.expr, rolls: raw.rolls, total: dealt } };
-        const next = applyDamageToTarget(target, dealt, stagedCharacterHP);
-        if (next === 0) text += ` — ${target.name} drops to 0 HP!`;
-        entry.text = text; pushLog(key, combat, entry);
+      } else if (spell.zone && area && !spell.zone.initial) {
+        // It only lingers: nobody saves until they start a turn in it or walk in.
+        pushLog(key, combat, {
+          kind: 'cast', actorName: c.name, spellName: spell.name,
+          fx: { ...combatFx(c, null, spell.name, spell.damageType), area: areaFx(area.aim) },
+          text: `${c.name} casts ${spell.name}${upcastNote} — the area stays (DC ${c.spellDC} ${spell.saveAbility.toUpperCase()}${spellDamage ? `, ${spellDamage}${spell.damageType ? ' ' + spell.damageType : ''}` : ''})${spell.concentration ? ' (concentration)' : ''}`
+        });
+      } else { // save-for-half/none spell: one damage roll, a save per creature
+        openSave(key, combat, c, {
+          name: spell.name, verb: 'casts', note: upcastNote, aim: area ? area.aim : null,
+          saveAbility: spell.saveAbility, dc: c.spellDC, saveSuccess: spell.saveSuccess,
+          damage: spellDamage, damageType: spell.damageType, form: spell.form,
+          effect: spell.effect, linked: spell.concentration === true
+        }, area ? area.targets : [target], stagedCharacterHP, rollsSaveNow);
       }
+      if (spell.zone && area) {
+        const fx = areaFx(area.aim);
+        const at = (pair) => ({ x: pair[0], z: pair[1] });
+        dropZones(combat, zone => !(zone.sourceId === c.id && zone.name === spell.name)); // cast again: it moves
+        combat.zones = [...(Array.isArray(combat.zones) ? combat.zones : []), {
+          id: crypto.randomUUID().slice(0, 8), sourceId: c.id, sourceName: c.name, name: spell.name,
+          aim: { kind: fx.kind, size: fx.size, width: fx.width, origin: at(fx.origin), center: at(fx.center), dir: at(fx.dir) },
+          on: spell.zone.on, saveAbility: spell.saveAbility, dc: c.spellDC, saveSuccess: spell.saveSuccess,
+          damage: spellDamage || '', damageType: spell.damageType || '',
+          ...(spell.effect ? { effect: spell.effect } : {}),
+          ...(spell.zone.follow ? { follow: true } : {}),
+          ...(spell.concentration ? { held: true } : {}),
+          ...(spell.rounds && !spell.concentration ? { until: combat.round + spell.rounds } : {}),
+          // Whoever saved as it was cast is not caught again this turn.
+          touched: spell.zone.initial ? area.targets.map(target => target.id) : []
+        }].slice(-12);
+      }
+      if (quick) c.bonusUsed = true; else { c.actionUsed = true; c.attacksLeft = 0; }
     } else {
       return;
     }
-    c.actionUsed = true;
     persistCombat(key, previousCombat, stagedCharacterHP);
+  });
+
+  // Roll a saving throw that is waiting: { pendingId?, combatantId? } — one
+  // creature's save, or (ids left out) every save this user may roll. A player
+  // rolls for their own characters, the GM for anyone.
+  onCampaign('combat-save', (payload) => {
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const combat = getCombat(key);
+    if (!combat || !Array.isArray(combat.pending) || !combat.pending.length) return;
+    const wanted = isRecord(payload) ? payload : {};
+    const pendingId = boundedText(wanted.pendingId, 24);
+    const combatantId = boundedText(wanted.combatantId, 80);
+    const mine = [];
+    for (const pending of combat.pending) {
+      if (pendingId && pending.id !== pendingId) continue;
+      for (const [id, state] of Object.entries(pending.targets)) {
+        const target = ownValue(combat.combatants, id);
+        if (!target || state.done || (combatantId && id !== combatantId)) continue;
+        if (canControl(target)) mine.push([pending, target]);
+      }
+    }
+    if (!mine.length) return combatDeny('No saving throw of yours is waiting');
+    const previousCombat = snapshotField(getMap(key), 'combat');
+    const stagedCharacterHP = [];
+    for (const [pending, target] of mine) resolvePendingSave(key, combat, pending, target, stagedCharacterHP);
+    prunePending(combat);
+    persistCombat(key, previousCombat, stagedCharacterHP);
+  });
+
+  // Dismiss an area that lingers: its caster's player, or the GM.
+  onCampaign('combat-zone', (payload) => {
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const combat = getCombat(key);
+    const id = isRecord(payload) ? boundedText(payload.id, 24) : '';
+    const zone = combat && (combat.zones || []).find(other => other.id === id);
+    if (!zone) return;
+    const source = ownValue(combat.combatants, zone.sourceId);
+    if (!isCampaignGM(socket.username) && !(source && canControl(source))) return combatDeny('Not your spell');
+    const previousCombat = snapshotField(getMap(key), 'combat');
+    dropZones(combat, other => other !== zone);
+    pushLog(key, combat, { kind: 'info', actorName: zone.sourceName, text: `${zone.sourceName}'s ${zone.name} is gone` });
+    persistCombat(key, previousCombat);
+  });
+
+  // Let go of the spell being concentrated on (no action; owner or GM).
+  onCampaign('combat-concentration', (payload) => {
+    const key = stateKey(socket.currentMapKey || DEFAULT_MAP_KEY);
+    const combat = getCombat(key);
+    const c = combat && isRecord(payload) && ownValue(combat.combatants, payload.combatantId);
+    if (!c) return;
+    if (!canControl(c)) return combatDeny('Not your combatant');
+    if (!isRecord(c.concentration)) return;
+    const previousCombat = snapshotField(getMap(key), 'combat');
+    endConcentration(key, combat, c, 'stops concentrating');
+    persistCombat(key, previousCombat);
   });
 
   onCampaign('combat-end-turn', () => {
@@ -4178,10 +6736,15 @@ io.on('connection', (socket) => {
     const combat = getCombat(key);
     if (!combat || !combat.started) return;
     const active = combat.activeId && ownValue(combat.combatants, combat.activeId);
-    if (!isCampaignGM(socket.username) && !(active && active.owner === socket.username)) return combatDeny('Not your turn');
+    const gm = isCampaignGM(socket.username);
+    if (!gm && !(active && active.owner === socket.username)) return combatDeny('Not your turn');
+    // The turn waits for the saves it caused; the GM moving on rolls them.
+    if (!gm && Array.isArray(combat.pending) && combat.pending.length) return combatDeny('Saving throws are still being rolled');
     const previousCombat = snapshotField(getMap(key), 'combat');
+    const stagedCharacterHP = [];
+    settlePending(key, combat, stagedCharacterHP);
     advanceTurn(key, combat);
-    persistCombat(key, previousCombat);
+    persistCombat(key, previousCombat, stagedCharacterHP);
   });
 
   onCampaign('combat-set-turn', (payload) => {
@@ -4191,8 +6754,10 @@ io.on('connection', (socket) => {
     const c = combat && combat.started && payload && ownValue(combat.combatants, payload.combatantId);
     if (!c) return;
     const previousCombat = snapshotField(getMap(key), 'combat');
+    const stagedCharacterHP = [];
+    settlePending(key, combat, stagedCharacterHP);
     startTurn(key, combat, c.id);
-    persistCombat(key, previousCombat);
+    persistCombat(key, previousCombat, stagedCharacterHP);
   });
 
   onCampaign('combat-update-combatant', (payload) => {
@@ -4213,8 +6778,16 @@ io.on('connection', (socket) => {
       c.initiative = clampInt(patch.initiative, -20, 60, c.initiative);
       if (combat.started) sortOrder(combat); // activeId is id-based, stays valid
     }
+    if (isRecord(patch.resources)) {
+      for (const [resourceKey, current] of Object.entries(patch.resources)) {
+        const resource = ownValue(c.resources, resourceKey);
+        if (resource) resource.current = clampInt(current, 0, resource.max, resource.current);
+      }
+    }
     if (patch.hpCurrent != null) {
       const v = clampInt(patch.hpCurrent, 0, 999, 0);
+      const had = c.hp && typeof c.hp.current === 'number' ? c.hp.current : c.maxHP;
+      if (v < had && isRecord(c.concentration)) c.concHits = [had - v];
       if (c.kind === 'character' && c.charId && hasOwn(charactersDB, c.charId)) {
         const stage = stageCharacterHP(c.charId, v);
         if (stage) {
@@ -4579,11 +7152,15 @@ io.on('connection', (socket) => {
         if (ownsObject(sock.username, obj)) continue; // visible either way
         const p = obj.position || {};
         if (!changedSet.has(fogHexKeyAt(Number(p.x) || 0, Number(p.z) || 0))) continue;
-        if (revealed) sock.emit('object-added', projectObjectFor(sock.username, obj));
+        // Creatures also answer to token vision: reconcileVision below
+        // decides them from both the fog and the sight rules.
+        if (vision.isCreature(obj)) continue;
+        if (revealed) { if (obj.hidden !== true) sock.emit('object-added', projectObjectFor(sock.username, obj)); }
         else sock.emit('object-deleted', { id: obj.id });
       }
       if (chunkDelta) sock.emit('terrain-updated', { chunks: chunkDelta });
     }
+    reconcileVision(WORLD_KEY);
   });
 
   // --- GM-directed player cameras (View control): thin, GM-authorized relay.
@@ -4650,15 +7227,33 @@ function getLocalIP() {
   return 'localhost';
 }
 
-server.listen(PORT, () => {
+// A cycling clock changes the light with no event to hang a reconcile on:
+// sweep the campaigns that have vision on and someone at the table.
+setInterval(() => {
+  const active = new Set();
+  for (const sock of io.sockets.sockets.values()) if (sock.campaignId) active.add(sock.campaignId);
+  for (const id of active) {
+    const campaign = campaignById(id);
+    const settings = campaign && campaign.settings;
+    if (!settings || !settings.vision || !settings.vision.enabled || settings.sky.clock !== 'cycle') continue;
+    const store = storeFor(id);
+    if (store) withStore(store, () => reconcileCampaignVision());
+  }
+}, 20000).unref();
+
+sharedModulesReady.then(() => server.listen(PORT, () => {
   const localIP = getLocalIP();
   console.log(`========================================`);
   console.log(`VTT Server Running`);
   console.log(`Local: http://localhost:${PORT}`);
   console.log(`Network: http://${localIP}:${PORT}`);
   console.log(`========================================`);
-  console.log(`Character Creator: /`);
+  console.log(`Home: /`);
+  console.log(`Character Creator: /creator`);
   console.log(`GM Screen: /gm`);
   console.log(`Player Screen: /player`);
   console.log(`========================================`);
+})).catch((error) => {
+  console.error('[BOOT] Could not load the shared vision modules:', error);
+  process.exit(1);
 });

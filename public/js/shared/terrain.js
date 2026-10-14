@@ -18,17 +18,18 @@
 
 import * as THREE from 'three';
 import { SEA_LEVEL, fbm, WorldGen, SEASONS, SNOW_T } from './worldgen.js';
-import { TIER_WIDTH, worldToHexAtTier, hexCenterAtTier, hexEdgeDistance, hexDistance, HEX_FIELD_RADIUS } from './hexworld.js';
+import { warpFields, waterDepthAt } from './ground.js';
 
 export const VSPACE = 0.5;                       // world units between lattice verts
 // World sea level: real ocean water renders here, LOD rings paint blue below it,
 // and beaches form just above it. One constant so every representation agrees.
 export { SEA_LEVEL };                            // defined with the generator (worldgen.js)
 export const CHUNK_VERTS = 64;                   // unique verts per chunk side
+const RIVER_ACROSS = 9;                          // ribbon vertices bank to bank
+const RIVER_OVERHANG = 1.3;                      // ribbon width / river width (banks fade inside it)
 export const CHUNK_SIZE = CHUNK_VERTS * VSPACE;  // 32 world units per chunk side
 const MESH_VERTS = CHUNK_VERTS + 1;              // 65: owned verts + 1 apron row/col
 const HEIGHT_QUANT = 0.05;                       // Int16 quantization step for sync
-const HEIGHT_LIMIT = 50;
 
 // Paintable materials, in splat channel order R,G,B,A.
 export const MATERIALS = [
@@ -47,25 +48,8 @@ const SUMMARY_COLORS = {
 };
 const SUMMARY_SEA = 0x2f6ea5;
 
-// GM biome painting (hex tags) as generator overrides: each biome pulls the
-// elevation/moisture FIELDS toward these targets, so heights, biome selection
-// and materials all follow naturally (and blend continuously — no cliffs at
-// hex borders). Values sit safely inside genBiomeAt's classification bands.
-// `t` also pulls the temperature (so a painted forest thaws a frozen land and
-// painted tundra chills a warm one); mountains and coast keep the local climate.
-const BIOME_FIELDS = {
-  plains:    { e: 0.52, mo: 0.50, t: 0.55 },
-  forest:    { e: 0.56, mo: 0.78, t: 0.55 },
-  mountains: { e: 0.85, mo: 0.50 },
-  desert:    { e: 0.55, mo: 0.12, t: 0.70 },
-  swamp:     { e: 0.44, mo: 0.85, t: 0.58 },  // wet lowland: mud, reeds, standing trees
-  coast:     { e: 0.45, mo: 0.55 },           // hugs the waterline: beaches + shallow sea
-  tundra:    { e: 0.52, mo: 0.30, t: 0.31 },
-  taiga:     { e: 0.56, mo: 0.75, t: 0.31 },
-  snow:      { e: 0.58, mo: 0.50, t: 0.12 }
-};
-// Feather width at hex borders, as a fraction of the tier's hex width.
-const BIOME_FEATHER = 0.18;
+// Painted-hex field targets and the warp itself live in ground.js (the server
+// needs the same heights to price movement).
 
 // --- base64 <-> typed array (browser btoa/atob; server stores these opaquely) ---
 function u8ToB64(u8) {
@@ -88,22 +72,101 @@ function hashStr(s) {
   return h >>> 0;
 }
 
+// Terrain surface look, shared by the chunk material and every LOD ring. All
+// of it is shader-only — nothing synced, no geometry touched.
+//
+// Ground "life": flat splat/biome colors read as plastic, so the surface gets
+// world-anchored value-noise mottling, a warm/cool hue drift, darker steep
+// faces and banded strata on bare rock. Each octave fades out once a pixel
+// covers more than its wavelength, so it never shimmers and every zoom lens
+// keeps some variation.
+//
 // Snow is not a splat material: every terrain vertex carries its temperature
 // (aTemp, from WorldGen) and the shader whitens whatever is colder than the
 // snowline. uSeason slides that line for the whole table without touching a
-// single mesh. Steep faces stay bare rock.
-function applySnowShader(shader, uniforms) {
+// single mesh. The line is ragged (noise), snow slides off steep faces (the
+// colder it is, the steeper it clings) leaving dark rock, and snow is lit
+// cool: white in the sun, blue in shade — not the warm earth bounce.
+// tSnow stays in main() scope for later chunks (the grid reads it).
+function applyTerrainLook(shader, uniforms) {
   Object.assign(shader.uniforms, uniforms);
   shader.vertexShader = shader.vertexShader
-    .replace('#include <common>', '#include <common>\nattribute float aTemp;\nvarying float vSnowT;\nvarying float vSnowUp;')
-    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSnowT = aTemp;\nvSnowUp = normal.y;');
+    .replace('#include <common>',
+      '#include <common>\nattribute float aTemp;\nvarying float vSnowT;\nvarying float vSnowUp;\nvarying vec3 vGroundPos;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSnowT = aTemp;\nvSnowUp = normal.y;')
+    .replace('#include <fog_vertex>',
+      '#include <fog_vertex>\nvGroundPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
   const line = SNOW_T.toFixed(3);
   shader.fragmentShader = shader.fragmentShader
-    .replace('#include <common>', '#include <common>\nuniform float uSeason;\nvarying float vSnowT;\nvarying float vSnowUp;')
+    .replace('#include <common>', [
+      '#include <common>',
+      'uniform float uSeason;',
+      'uniform vec2 uGroundOrigin;',
+      'varying float vSnowT;',
+      'varying float vSnowUp;',
+      'varying vec3 vGroundPos;',
+      'float gHash(vec2 p) {',
+      '  vec3 p3 = fract(vec3(p.xyx) * 0.1031);',
+      '  p3 += dot(p3, p3.yzx + 33.33);',
+      '  return fract((p3.x + p3.y) * p3.z);',
+      '}',
+      'float gNoise(vec2 p) {',
+      '  vec2 i = floor(p), f = fract(p);',
+      '  f = f * f * (3.0 - 2.0 * f);',
+      '  return mix(mix(gHash(i), gHash(i + vec2(1.0, 0.0)), f.x),',
+      '             mix(gHash(i + vec2(0.0, 1.0)), gHash(i + vec2(1.0, 1.0)), f.x), f.y) - 0.5;',
+      '}'
+    ].join('\n'))
     .replace('#include <color_fragment>', [
       '#include <color_fragment>',
-      `float snowAmt = (1.0 - smoothstep(${line} - 0.025, ${line} + 0.025, vSnowT + uSeason)) * smoothstep(0.45, 0.75, abs(vSnowUp));`,
-      'diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.92, 0.95, 0.98), snowAmt);'
+      'vec2 gw = vGroundPos.xz + uGroundOrigin;',            // true world XZ (stable across rebases)
+      'float gpx = max(fwidth(gw.x), fwidth(gw.y));',        // world units per pixel
+      'float g1 = gNoise(gw / 2.3) * (1.0 - smoothstep(0.4, 1.6, gpx));',
+      'float g2 = gNoise(gw / 11.0) * (1.0 - smoothstep(2.0, 8.0, gpx));',
+      'float g3 = gNoise(gw / 85.0) * (1.0 - smoothstep(15.0, 60.0, gpx));',
+      'float g4 = gNoise(gw / 1100.0) * (1.0 - smoothstep(200.0, 800.0, gpx));',
+      'float g5 = gNoise(gw / 14000.0);',
+      // Slope: the smooth vertex normal up close; on the coarse far rings it
+      // smears rock/snow edges into blurry blobs, so blend toward the true
+      // per-face normal (screen derivatives) as triangles grow on screen.
+      'float gFaceUp = abs(normalize(cross(dFdx(vGroundPos), dFdy(vGroundPos))).y);',
+      'float gUp = mix(abs(vSnowUp), gFaceUp, smoothstep(0.12, 0.5, gpx) * 0.85);',
+      'float gSteep = 1.0 - smoothstep(0.62, 0.93, gUp);',
+      'float gFace = 1.0 - smoothstep(0.70, 0.93, gUp);',      // any real slope: where strata show
+      // Bare rock = grey splat (low saturation) or any steep face.
+      'float gMax = max(diffuseColor.r, max(diffuseColor.g, diffuseColor.b));',
+      'float gMin = min(diffuseColor.r, min(diffuseColor.g, diffuseColor.b));',
+      'float gRock = max(gSteep, 1.0 - smoothstep(0.06, 0.2, (gMax - gMin) / max(gMax, 0.001)));',
+      'float gv = g1 * 0.10 + g2 * 0.14 + g3 * 0.20 + g4 * 0.18 + g5 * 0.14;',
+      'float gt = g2 * 0.5 + g3 + g4 + g5 * 0.6;',            // hue drift follows the broad octaves
+      'diffuseColor.rgb *= (1.0 + gv) * vec3(1.0 + 0.16 * gt, 1.0 + 0.03 * gt, 1.0 - 0.20 * gt);',
+      // Strata: wavy horizontal bands by altitude, warm low rock easing to cold grey up high.
+      'float gBandY = vGroundPos.y * 0.85 + g3 * 4.0 + g2 * 1.0;',
+      'float gBand = (gNoise(vec2(gBandY, 3.7)) + 0.5 * gNoise(vec2(gBandY * 3.1, 9.2))) * (1.0 - smoothstep(1.5, 6.0, gpx));',
+      'vec3 gRockTint = mix(vec3(1.10, 1.0, 0.88), vec3(0.90, 0.96, 1.06), smoothstep(4.0, 26.0, vGroundPos.y));',
+      'diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * gRockTint * (1.0 + gBand * 0.34 * gFace), gRock);',
+      'diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.66, 0.61, 0.58) + 0.02, gSteep * 0.7);',
+      // Wet shore: sand and soil darken in a wobbling band just above the sea.
+      'float gWet = (1.0 - smoothstep(-0.55, 0.02, vGroundPos.y + g1 * 0.3 + g2 * 0.2)) * step(-0.95, vGroundPos.y);',
+      'diffuseColor.rgb *= mix(vec3(1.0), vec3(0.66, 0.69, 0.72), gWet);',
+      // Snow.
+      `float tCold = ${line} - (vSnowT + uSeason + (g2 * 0.5 + g3 + g4 * 0.6) * 0.07);`,
+      'float tCover = smoothstep(-0.02, 0.02, tCold);',
+      'float tGrip = mix(0.60, 0.34, clamp(tCold / 0.16, 0.0, 1.0));',   // deep cold clings to steeper faces
+      'float tSnow = tCover * smoothstep(tGrip, tGrip + 0.09, gUp + g1 * 0.08 + g2 * 0.10);',
+      // Rock showing through the snow zone is wet and dark.
+      'diffuseColor.rgb *= 1.0 - 0.3 * tCover * (1.0 - tSnow);',
+      'float tDrift = gNoise(vec2(gw.x * 0.45 + gw.y * 0.07, gw.y * 0.05)) * (1.0 - smoothstep(1.0, 4.0, gpx));',
+      'float tSpark = step(0.36, gNoise(gw * 7.0)) * (1.0 - smoothstep(0.015, 0.06, gpx));',
+      'vec3 tSnowCol = vec3(0.90, 0.94, 1.0) * (1.0 + tDrift * 0.07 + g2 * 0.05 + g3 * 0.05) + tSpark * 0.10;',
+      'diffuseColor.rgb = mix(diffuseColor.rgb, tSnowCol, tSnow);'
+    ].join('\n'))
+    // Cool the light on snow: shade/ambient turns sky-blue instead of the warm
+    // ground bounce, and the golden sun stops tinting it cream.
+    .replace('#include <aomap_fragment>', [
+      '#include <aomap_fragment>',
+      'reflectedLight.indirectDiffuse *= mix(vec3(1.0), vec3(0.82, 0.93, 1.16), tSnow);',
+      'reflectedLight.directDiffuse *= mix(vec3(1.0), vec3(0.97, 1.0, 1.08), tSnow);'
     ].join('\n'));
 }
 
@@ -149,6 +212,8 @@ export class Terrain {
     this.gen = new WorldGen();
     this.seasonOffset = 0;                  // SEASONS[season]: slides the snowline
     this._snowUniforms = { uSeason: { value: 0 } };
+    this._groundUniforms = { uGroundOrigin: { value: new THREE.Vector2(0, 0) } };
+    this._lookUniforms = { ...this._snowUniforms, ...this._groundUniforms };
     // Pocket maps are their own flat little worlds: the pages switch the
     // generator OFF there so unedited ground is implicit flat 0 (the original
     // pocket semantics), not whatever the procedural world happens to contain
@@ -188,7 +253,7 @@ export class Terrain {
     this.material = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
     this.material.extensions = { derivatives: true }; // fwidth() for the AA grid (WebGL1 safety)
     this.material.onBeforeCompile = (shader) => {
-      applySnowShader(shader, this._snowUniforms);
+      applyTerrainLook(shader, this._lookUniforms);
       Object.assign(shader.uniforms, this._brushUniforms);
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec3 vBrushWorld;')
@@ -216,7 +281,8 @@ export class Terrain {
           '  vec2 cc = gc / cell;',
           '  vec2 gr = abs(fract(cc - 0.5) - 0.5) / fwidth(cc);',
           '  float ln = 1.0 - min(min(gr.x, gr.y), 1.0);',
-          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, uGridColor, ln * 0.35 * uGridOn);',
+          // Dark lines shout on a snowfield: ease them to a soft blue-grey there.
+          '  gl_FragColor.rgb = mix(gl_FragColor.rgb, mix(uGridColor, vec3(0.42, 0.52, 0.68), tSnow), ln * mix(0.35, 0.24, tSnow) * uGridOn);',
           '}',
           'if (uBrushVisible > 0.5) {',
           '  float d = distance(vBrushWorld.xz, uBrushPos);',
@@ -250,7 +316,9 @@ export class Terrain {
         uIceBase:   { value: 0.55 },
         uIceLatK:   { value: 0 },
         uIceSpan:   { value: 200000 },
-        uOrigin:    { value: new THREE.Vector2(0, 0) }   // floating origin (x, z)
+        uOrigin:    { value: new THREE.Vector2(0, 0) },  // floating origin (x, z)
+        uLight:     { value: new THREE.Color(1, 1, 1) }, // daylight (atmosphere.js): this shader is unlit
+        uSky:       { value: new THREE.Color(0xbcd6ea) } // horizon color, mirrored at grazing angles (tick)
       },
       vertexShader: [
         'attribute float aDepth;',
@@ -280,6 +348,8 @@ export class Terrain {
         'uniform float uIceLatK;',
         'uniform float uIceSpan;',
         'uniform vec2 uOrigin;',
+        'uniform vec3 uLight;',
+        'uniform vec3 uSky;',
         'varying float vDepth;',
         'varying vec3 vWorld;',
         'varying vec2 vFlow;',
@@ -297,6 +367,11 @@ export class Terrain {
         '  float t = 1.0 - exp(-d * 0.45);',
         '  if (uBands > 0.5) t = (floor(t * uBands) + 0.5) / uBands;',
         '  vec3 col = mix(uShallow, uDeep, t);',
+        //    broad wind patches (readable from straight above) and a shimmer
+        //    of light on the bed where the water is shallow
+        '  col *= 0.90 + 0.2 * vnoise(vWorld.xz * 0.11 + uTime * 0.02);',
+        '  float caus = vnoise(vWorld.xz * 1.9 + uTime * 0.33) * vnoise(vWorld.xz * 2.7 - uTime * 0.26);',
+        '  col += vec3(0.22, 0.30, 0.20) * smoothstep(0.26, 0.44, caus) * (1.0 - t) * (1.0 - t);',
         // 3. surface motion: scrolling noise perturbs a fake normal -> sun glints.
         //    Lakes drift in world space; rivers scroll along their flow coord.
         '  vec2 p1, p2;',
@@ -312,26 +387,50 @@ export class Terrain {
         '  float glint = pow(max(dot(N, normalize(vec3(0.35, 0.8, 0.25))), 0.0), 40.0);',
         // 2. foam contact line where water meets terrain, edge wobbled by noise
         '  float foamEdge = uFoamWidth * (0.75 + 0.5 * vnoise(vWorld.xz * 1.7 + uTime * 0.25));',
-        '  float foam = 1.0 - smoothstep(foamEdge * 0.6, foamEdge, d);',
+        '  float foam = (1.0 - smoothstep(foamEdge * 0.12, foamEdge * 0.42, d)) * 0.85;',
+        //    still water: ripple rings lapping in toward the shore
+        '  if (vFlowSpeed <= 0.001) {',
+        '    float lap = sin(d * 12.0 + uTime * 1.5 + vnoise(vWorld.xz * 0.55) * 5.0);',
+        '    float lapMask = (1.0 - smoothstep(0.3, 1.3, d)) * smoothstep(0.03, 0.22, d);',
+        '    foam = max(foam, smoothstep(0.82, 0.97, lap) * lapMask * 0.5);',
+        '  }',
         //    rivers: elongated foam streaks racing along the flow
         '  if (vFlowSpeed > 0.001) {',
         '    float streak = vnoise(vec2(vFlow.x * 0.9 - uTime * vFlowSpeed * 1.3, vFlow.y * 2.2));',
-        '    foam = max(foam, smoothstep(0.72, 0.95, streak) * 0.65);',
+        '    foam = max(foam, smoothstep(0.62, 0.9, streak) * 0.75);',
+        '    col *= 1.0 - 0.22 * (1.0 - abs(vFlow.y));',
+        '    float fine = vnoise(vec2(vFlow.x * 2.6 - uTime * vFlowSpeed * 2.1, vFlow.y * 5.0 + 3.7));',
+        '    foam = max(foam, smoothstep(0.8, 0.97, fine) * 0.4);',
+        '    float bank = smoothstep(0.78, 1.0, abs(vFlow.y));',
+        '    foam = max(foam, bank * (0.25 + 0.5 * vnoise(vec2(vFlow.x * 1.5 - uTime * vFlowSpeed * 0.8, vFlow.y * 3.0))));',
         '  }',
         // 4. fresnel-ish rim: opaque at grazing angles, clear from above
         '  vec3 V = normalize(cameraPosition - vWorld);',
         '  float fres = pow(1.0 - max(dot(V, vec3(0.0, 1.0, 0.0)), 0.0), 2.0);',
-        '  float alpha = mix(0.45, 0.85, t) + fres * 0.15;',
-        '  col += glint * 0.35 + fres * 0.08;',
+        '  float alpha = mix(0.34, 0.9, t) + fres * 0.15;',
+        '  col = mix(col, uSky, 0.12 + fres * 0.42) + glint * 0.35;',   // the sky tints it; far water mirrors it
         '  col = mix(col, uFoamColor, foam * 0.85);',
         '  alpha = max(alpha, foam * 0.9);',
         // 5. ice: cold water freezes over (pack ice with a noisy edge)
         '  vec2 tw = vWorld.xz + uOrigin;',
-        '  float iceT = uIceBase + uIceLatK * clamp(tw.y / uIceSpan, -1.0, 1.0) + (vnoise(tw * 0.02) - 0.5) * 0.04;',
+        '  float iceT = uIceBase + uIceLatK * clamp(tw.y / uIceSpan, -1.0, 1.0) + (vnoise(tw * 0.02) - 0.5) * 0.04\n'
+        + '    + (vnoise(tw * 0.17) - 0.5) * 0.012;',                 // broken floe edge
         `  float ice = 1.0 - smoothstep(${(SNOW_T - 0.06).toFixed(3)}, ${(SNOW_T - 0.02).toFixed(3)}, iceT);`,
-        '  col = mix(col, vec3(0.86, 0.92, 0.96), ice * 0.92);',
-        '  alpha = max(alpha, ice * 0.93);',
-        '  gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.95));',
+        //    blue ice darkening over deep water, hairline pressure cracks,
+        //    wind-packed snow drifts, and a snowed-in rim along the shore
+        '  vec3 iceCol = mix(vec3(0.66, 0.83, 0.94), vec3(0.40, 0.60, 0.80), t);',
+        '  float crack = 1.0 - smoothstep(0.0, 0.03, abs(vnoise(tw * 0.21) - 0.5));',
+        '  crack = max(crack, (1.0 - smoothstep(0.0, 0.025, abs(vnoise(tw * 0.63 + 7.3) - 0.5))) * 0.6);',
+        '  float drift = smoothstep(0.48, 0.72, vnoise(vec2(tw.x * 0.05 + tw.y * 0.02, tw.y * 0.09)));',
+        '  float rim = 1.0 - smoothstep(0.1, 0.7, d);',
+        '  iceCol = mix(iceCol, vec3(0.88, 0.96, 1.0), crack * 0.6);',
+        '  iceCol = mix(iceCol, vec3(0.93, 0.96, 1.0), max(drift * 0.9, rim));',
+        '  col = mix(col, iceCol + glint * 0.12, ice * 0.97);',
+        '  alpha = max(alpha, ice * 0.96);',
+        //    fade out exactly where the surface meets the ground, so the edge
+        //    is the real waterline and never the stair-step of the mesh cells
+        '  alpha *= smoothstep(-0.015, 0.09, vDepth);',
+        '  gl_FragColor = vec4(col * uLight, clamp(alpha, 0.0, 0.95));',
         '}'
       ].join('\n')
     });
@@ -409,7 +508,8 @@ export class Terrain {
         polygonOffsetFactor: ring.lod * 2,
         polygonOffsetUnits: ring.lod * 2
       });
-      ring.material.onBeforeCompile = (shader) => applySnowShader(shader, this._snowUniforms);
+      ring.material.extensions = { derivatives: true }; // fwidth() in applyTerrainLook
+      ring.material.onBeforeCompile = (shader) => applyTerrainLook(shader, this._lookUniforms);
     }
     // Edit revisions instead of booleans: ring rebuilds are time-sliced (one
     // ring job at a time, a few rows per frame), so each ring records the
@@ -432,6 +532,9 @@ export class Terrain {
   tick(nowSeconds) {
     this.waterMaterial.uniforms.uTime.value = nowSeconds;
     this.waterMaterial.uniforms.uOrigin.value.set(this.worldOrigin.x, this.worldOrigin.z);
+    this._groundUniforms.uGroundOrigin.value.set(this.worldOrigin.x, this.worldOrigin.z);
+    const sceneFog = this.group && this.group.parent && this.group.parent.fog;
+    if (sceneFog) this.waterMaterial.uniforms.uSky.value.copy(sceneFog.color);
     this.mistMaterial.uniforms.uTime.value = nowSeconds;
   }
 
@@ -445,6 +548,7 @@ export class Terrain {
   // The field math itself lives in worldgen.js (WorldGen) so the preview map
   // and tests share it; this class adds the GM's painted-hex overrides on top.
   get genSeed() { return this.gen.seed; }
+  get fogAltitude() { return this.gen.fogAltitude; }
 
   // Adopt a campaign's generation settings ({ seed, world, season }). Returns
   // true when generated ground changed, so the caller can regenerate() it (a
@@ -503,35 +607,8 @@ export class Terrain {
     // fields are the expensive half (11 fbm octaves). Exact-key, pure function
     // — invalidated only when the painted-hex overrides change.
     if (wx === this._fMemoX && wz === this._fMemoZ) return this._fMemo;
-    let e = this.gen.elev(wx, wz);
-    let mo = this.gen.moisture(wx, wz);
-    let tt = 0, tw = 0;
-    const tree = this._hexTree;
-    if (tree) {
-      let cx = 0, cz = 0, key = 'world';
-      for (let d = 0; d < 3; d++) {
-        const lx = wx - cx, lz = wz - cz;
-        const h = worldToHexAtTier(d, lx, lz);
-        if (hexDistance(h) > HEX_FIELD_RADIUS) break; // outside this layer's field
-        const tags = tree[key];
-        const tag = tags && tags[h.q + ',' + h.r];
-        const target = tag && BIOME_FIELDS[tag.biome];
-        if (target) {
-          const w = Math.max(0, Math.min(1, hexEdgeDistance(d, lx, lz, h.q, h.r) / (TIER_WIDTH[d] * BIOME_FEATHER)));
-          e += (target.e - e) * w;
-          mo += (target.mo - mo) * w;
-          if (target.t != null) {
-            tt = tw > 0 ? tt + (target.t - tt) * w : target.t;
-            tw = Math.max(tw, w);
-          }
-        }
-        const c = hexCenterAtTier(d, h.q, h.r);
-        cx += c.x; cz += c.z;
-        key += '/' + h.q + ',' + h.r;
-      }
-    }
     this._fMemoX = wx; this._fMemoZ = wz;
-    return (this._fMemo = { e, mo, tt, tw });
+    return (this._fMemo = warpFields(this.gen, this._hexTree, wx, wz));
   }
   // Ground height at a world point (see WorldGen.height). `lod` drops the
   // high-frequency octaves for the far LOD rings.
@@ -664,7 +741,15 @@ export class Terrain {
         if (ring.holeCells > 0) {
           const cheb = Math.max(Math.abs(i - mid), Math.abs(j - mid));
           const edge = ring.holeCells + ring.skirtCells;
-          if (cheb < edge) dip += (edge - cheb) * ring.skirtRate;
+          if (cheb < edge) {
+            if (this.gen.world.relief > 0) {
+              const covered = ring.holeCells + 3;                       // <= 22 guaranteed cells
+              const bigRate = Math.max(ring.skirtRate, (this.gen._ridgeAmp * 0.3) / ring.skirtCells);
+              dip += (cheb < covered ? (covered - cheb) * bigRate : (edge - cheb) * ring.skirtRate);
+            } else {
+              dip += (edge - cheb) * ring.skirtRate;                    // relief 0: byte-identical
+            }
+          }
         }
         pos[k] = wx - scx; pos[k + 1] = h - dip; pos[k + 2] = wz - scz; // anchor-local
         col[k] = tmp.r; col[k + 1] = tmp.g; col[k + 2] = tmp.b;
@@ -783,10 +868,27 @@ export class Terrain {
 
   setH(gx, gz, v) {
     const { c, k, cx, cz, lx, lz } = this._chunkForWrite(gx, gz);
-    const clamped = Math.max(-HEIGHT_LIMIT, Math.min(HEIGHT_LIMIT, v));
-    c.heights[lz * CHUNK_VERTS + lx] = clamped;
-    if (clamped < c.minH) c.minH = clamped; // stale-high minH is harmless (extra scan only)
+    c.heights[lz * CHUNK_VERTS + lx] = v;
+    if (v < c.minH) c.minH = v;
     this._markDirty(k, cx, cz, lx, lz, 'heights');
+  }
+
+  // World-space bounds of every chunk dug below the implicit floor, or null.
+  // Pocket pages cut the backdrop plane away there (scene.js setGroundCut).
+  dugBounds() {
+    const b = this._dugBounds || (this._dugBounds = { x0: 0, z0: 0, x1: 0, z1: 0 });
+    let any = false;
+    for (const [k, c] of this.chunks) {
+      if (!(c.minH < -0.02)) continue;
+      const comma = k.indexOf(',');
+      const x = Number(k.slice(0, comma)) * CHUNK_SIZE, z = Number(k.slice(comma + 1)) * CHUNK_SIZE;
+      if (!any) { b.x0 = x; b.z0 = z; b.x1 = x + CHUNK_SIZE; b.z1 = z + CHUNK_SIZE; any = true; continue; }
+      if (x < b.x0) b.x0 = x;
+      if (z < b.z0) b.z0 = z;
+      if (x + CHUNK_SIZE > b.x1) b.x1 = x + CHUNK_SIZE;
+      if (z + CHUNK_SIZE > b.z1) b.z1 = z + CHUNK_SIZE;
+    }
+    return any ? b : null;
   }
 
   // Bilinear height at world (x,z); 0 where no chunk exists (implicit flat ground).
@@ -797,6 +899,16 @@ export class Terrain {
     const h00 = this.getH(gx, gz), h10 = this.getH(gx + 1, gz);
     const h01 = this.getH(gx, gz + 1), h11 = this.getH(gx + 1, gz + 1);
     return (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz;
+  }
+
+  // This ground as ground.js `pathCost` reads it (the movement preview; the
+  // server prices the same move from its own copy of these heights).
+  costGround() {
+    return {
+      height: (x, z) => this.sampleHeight(x, z),
+      waterDepth: (x, z, h) => waterDepthAt(this.water.bodies, x, z, h, this.generatorOn, (px, pz) => this.sampleHeight(px, pz)),
+      snow: (x, z, h) => this.snowAt(x, z, h)
+    };
   }
 
   // Dominant material channel at world (x,z) (eyedropper).
@@ -1389,7 +1501,18 @@ export class Terrain {
     const ax = Math.round(body.seed.x), az = Math.round(body.seed.z);
     const pos = [], depth = [];
     const corner = (cx, cz) => level - this.getH(cx * 2, cz * 2);
+    // The flood fills whole cells, so its outline is a staircase. Add the ring
+    // of cells just outside it: their corners mostly sit above the water
+    // (negative depth), and the shader fades the surface out where depth
+    // reaches zero — the visible edge becomes the true, smooth waterline.
+    const cells = new Set(fp.cells);
     for (const k of fp.cells) {
+      const c = k.indexOf(','), cx = +k.slice(0, c), cz = +k.slice(c + 1);
+      for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
+        if (dx || dz) cells.add((cx + dx) + ',' + (cz + dz));
+      }
+    }
+    for (const k of cells) {
       const [cx, cz] = k.split(',').map(Number);
       const d00 = corner(cx, cz), d10 = corner(cx + 1, cz);
       const d01 = corner(cx, cz + 1), d11 = corner(cx + 1, cz + 1);
@@ -1454,7 +1577,17 @@ export class Terrain {
     this._clearWaterMesh(body.id);
     if (!samples || samples.length < 2) return;
     // Drape + smooth heights along the path.
-    const hs = samples.map(s => this.sampleHeight(s.x, s.z));
+    // The surface rides just above the bed — or, where the bed was carved into
+    // a trench, just below the lower bank, so the channel is actually FULL and
+    // the water meets its banks instead of lying as a film at the bottom.
+    const bankAt = half0 => samples.map((s, i) => {
+      const a = samples[Math.max(0, i - 1)], b = samples[Math.min(samples.length - 1, i + 1)];
+      const tl = Math.hypot(b.x - a.x, b.z - a.z) || 1;
+      const px = -(b.z - a.z) / tl * half0, pz = (b.x - a.x) / tl * half0;
+      return Math.min(this.sampleHeight(s.x + px, s.z + pz), this.sampleHeight(s.x - px, s.z - pz));
+    });
+    const banks = bankAt(body.width / 2 * 1.1);
+    const hs = samples.map((s, i) => Math.max(this.sampleHeight(s.x, s.z), banks[i] - 0.18));
     for (let pass = 0; pass < 2; pass++) {
       for (let i = 1; i < hs.length - 1; i++) hs[i] = (hs[i - 1] + hs[i] * 2 + hs[i + 1]) / 4;
     }
@@ -1492,15 +1625,31 @@ export class Terrain {
       const fall = i > 0 && (hs[i - 1] - hs[i]) > 1.2; // steep drop = waterfall
       if (fall) mistBases.push({ x: s.x - ax, y: hs[i], z: s.z - az });
       const y = hs[i] + 0.06;
-      const dEdge = fall ? 0.02 : 0.06, dMid = fall ? 0.05 : 0.5; // shallow = foamy
       const lx = s.x - ax, lz = s.z - az;
-      pos.push(lx - px * half, y, lz - pz * half, lx, y, lz, lx + px * half, y, lz + pz * half);
-      depth.push(dEdge, dMid, dEdge);
-      flow.push(arc, -1, arc, 0, arc, 1);
-      fspd.push(body.speed, body.speed, body.speed);
+      // Across the stream: RIVER_ACROSS vertices on a ribbon a little wider
+      // than the river, each carrying the real depth of water over the ground
+      // beneath it. The shader fades the surface out as that depth reaches
+      // zero, so the bank is wherever the carved bed actually meets the water
+      // — a soft, natural line — instead of the flat ribbon slicing through
+      // the terrain grid in hard square steps. The outer rim tapers to zero so
+      // the ribbon's own edge never shows either.
+      for (let j = 0; j < RIVER_ACROSS; j++) {
+        const u = j / (RIVER_ACROSS - 1) * 2 - 1;               // -1 bank .. +1 bank
+        const off = u * half * RIVER_OVERHANG;
+        const vx = s.x + px * off, vz = s.z + pz * off;
+        let d = y - this.sampleHeight(vx, vz);
+        d = Math.min(d, (1 - Math.abs(u)) * 4 * half, fall ? 0.05 : 2);
+        pos.push(lx + px * off, y, lz + pz * off);
+        depth.push(d);
+        flow.push(arc, Math.max(-1, Math.min(1, u * RIVER_OVERHANG)));
+        fspd.push(body.speed);
+      }
       if (i > 0) {
-        const o = (i - 1) * 3;
-        idx.push(o, o + 3, o + 1, o + 1, o + 3, o + 4, o + 1, o + 4, o + 2, o + 2, o + 4, o + 5);
+        const o = (i - 1) * RIVER_ACROSS;
+        for (let j = 0; j < RIVER_ACROSS - 1; j++) {
+          const a0 = o + j, b0 = o + RIVER_ACROSS + j;
+          idx.push(a0, b0, a0 + 1, a0 + 1, b0, b0 + 1);
+        }
       }
     }
     const geo = new THREE.BufferGeometry();
@@ -1529,6 +1678,7 @@ export class Terrain {
   }
 
   _recomputeBody(body) {
+    this.rev++; // vegetation re-checks what now lies under water
     if (body.kind === 'river') {
       const samples = this._riverSamples(body.points);
       this._footprints.set(body.id, { samples, width: body.width });
@@ -1581,6 +1731,13 @@ export class Terrain {
     this._recomputeBody(body);
     return body;
   }
+  // Is world (x,z) under an authored lake or river? Vegetation asks, so
+  // nothing grows on a lakebed or mid-stream.
+  inWater(x, z) {
+    if (!this.water.bodies.length) return false;
+    return !!(this.findLakeAt(x, z) || this.findRiverAt(x, z));
+  }
+
   // Which lake footprint contains world (x,z)? Used for click-select/delete.
   findLakeAt(x, z) {
     const k = Math.floor(x) + ',' + Math.floor(z);

@@ -14,7 +14,7 @@
     <!-- Login Modal -->
 <div id="login-overlay">
   <div id="login-modal">
-    <h2>&#128214; 3D VTT Login</h2>
+    <h2>&#128214; 3DX Tabletop</h2>
     <input
       type="text"
       id="username-input"
@@ -35,23 +35,98 @@
         </div>
         <div class="lobby-topbar-actions">
             <span id="lobby-user" class="workspace-user"></span>
-            <a class="workspace-top-button" href="/" title="Character Studio">Studio</a>
-            <a class="workspace-top-button" href="/homebrew" title="Homebrew studio">Homebrew</a>
+            <button id="btn-logout" class="workspace-top-button" title="Sign out on this device">Log out</button>
         </div>
     </header>
 
+    <nav id="lobby-tabs" aria-label="Lobby sections">
+        <button class="lobby-tab active" data-tab="campaigns">Campaigns</button>
+        <button class="lobby-tab" data-tab="invited">Invitations <span id="invited-count" class="lobby-count hidden"></span></button>
+        <a class="lobby-tab" href="/creator" title="Create and edit your characters">Characters</a>
+        <a class="lobby-tab" href="/homebrew" title="Custom races, classes and monsters">Homebrew</a>
+        <button class="lobby-tab hidden" data-tab="host" id="tab-button-host">Host <span id="host-count" class="lobby-count hidden"></span></button>
+    </nav>
+
     <main id="lobby-main">
-        <div class="lobby-section-head">
-            <div>
-                <h1>Your campaigns</h1>
-                <p class="lobby-sub">Enter a table as GM, or as one of your characters.</p>
+        <p id="lobby-toast" class="hidden" role="status"></p>
+
+        <section class="lobby-panel" data-panel="campaigns">
+            <div class="lobby-section-head">
+                <div>
+                    <h1>Your campaigns</h1>
+                    <p id="lobby-mine-sub" class="lobby-sub">Tables you run.</p>
+                </div>
+                <button id="btn-new-campaign" class="lobby-primary" disabled>+ New campaign</button>
             </div>
-            <button id="btn-new-campaign" class="lobby-primary" disabled>+ New campaign</button>
-        </div>
-        <div id="lobby-campaign-list" class="lobby-grid" aria-live="polite">
-            <p class="lobby-empty">Waiting for the campaign list&hellip;</p>
-        </div>
+            <div id="lobby-mine" class="lobby-grid" aria-live="polite">
+                <p class="lobby-empty">Waiting for the campaign list&hellip;</p>
+            </div>
+            <div class="lobby-section-head lobby-section-gap">
+                <div>
+                    <h2 id="lobby-public-title">Public campaigns</h2>
+                    <p id="lobby-public-sub" class="lobby-sub">Open tables anyone on this server can join.</p>
+                </div>
+            </div>
+            <div id="lobby-public" class="lobby-grid" aria-live="polite"></div>
+        </section>
+
+        <section class="lobby-panel hidden" data-panel="invited">
+            <div class="lobby-section-head">
+                <div>
+                    <h1>Invitations</h1>
+                    <p class="lobby-sub">Private campaigns whose GM invited you.</p>
+                </div>
+            </div>
+            <div id="lobby-invited" class="lobby-grid" aria-live="polite"></div>
+        </section>
+
+        <section class="lobby-panel hidden" data-panel="host">
+            <div class="lobby-section-head">
+                <div>
+                    <h1>Campaign requests</h1>
+                    <p class="lobby-sub">Campaigns waiting for your approval. Preview opens the world as GM.</p>
+                </div>
+            </div>
+            <div id="host-requests" class="lobby-grid" aria-live="polite"></div>
+
+            <div class="lobby-section-head lobby-section-gap">
+                <div>
+                    <h2>Players</h2>
+                    <p class="lobby-sub">Accounts on this server. Players cannot change their password &mdash; only you can set a new one here. Trusted players create campaigns without approval.</p>
+                </div>
+            </div>
+            <form id="host-create-user" class="host-create" autocomplete="off">
+                <input id="host-new-username" type="text" maxlength="20" placeholder="Username" autocomplete="off" />
+                <input id="host-new-password" type="text" maxlength="200" placeholder="Password" autocomplete="off" />
+                <label class="host-check"><input id="host-new-trusted" type="checkbox" /> Trusted</label>
+                <button class="lobby-primary" type="submit">Add player</button>
+            </form>
+            <div id="host-users" class="host-users"></div>
+        </section>
     </main>
+
+    <!-- Privacy + invites for one campaign (its GM) -->
+    <div id="access-overlay" class="hidden">
+        <div id="access-modal" role="dialog" aria-modal="true" aria-labelledby="access-title">
+            <h2 id="access-title">Campaign access</h2>
+            <p id="access-sub" class="lobby-sub"></p>
+            <label class="wizard-radio">
+                <input type="radio" name="access-visibility" value="private" />
+                <span><strong>Private</strong> &mdash; only players you invite can see and join it.</span>
+            </label>
+            <label class="wizard-radio">
+                <input type="radio" name="access-visibility" value="public" />
+                <span><strong>Public</strong> &mdash; everyone on this server can see and join it.</span>
+            </label>
+            <h3 class="access-heading">Invited players</h3>
+            <div id="access-members" class="wizard-party"></div>
+            <div class="lobby-modal-actions">
+                <div id="access-error" class="hidden"></div>
+                <button id="access-cancel" class="lobby-secondary">Cancel</button>
+                <button id="access-save" class="lobby-primary">Save</button>
+            </div>
+        </div>
+    </div>
 
     <!-- Enter as player: pick which of your characters you are playing -->
     <div id="party-overlay" class="hidden">
@@ -88,6 +163,18 @@
                     <label for="wizard-description">Description</label>
                     <textarea id="wizard-description" maxlength="400" rows="3"
                         placeholder="A one-line pitch shown on the lobby card."></textarea>
+                    <fieldset>
+                        <legend>Who can see it</legend>
+                        <label class="wizard-radio">
+                            <input type="radio" name="wizard-visibility" value="private" checked />
+                            <span><strong>Private</strong> &mdash; only players you invite.</span>
+                        </label>
+                        <label class="wizard-radio">
+                            <input type="radio" name="wizard-visibility" value="public" />
+                            <span><strong>Public</strong> &mdash; everyone on this server.</span>
+                        </label>
+                    </fieldset>
+                    <p id="wizard-approval-note" class="lobby-sub hidden">Your campaign is sent to the host as a request and opens once it is approved.</p>
                 </section>
 
                 <section class="wizard-step hidden" data-step="2">
@@ -136,9 +223,10 @@
                 </section>
 
                 <section class="wizard-step hidden" data-step="5">
+                    <p id="wizard-pending-note" class="lobby-sub hidden"><strong>Request sent.</strong> The campaign opens as soon as the host approves it.</p>
                     <p class="lobby-sub">Copy characters from your other campaigns into this one &mdash; or create a fresh one in the studio.</p>
                     <div id="wizard-party-list" class="wizard-party"></div>
-                    <a id="wizard-create-character" class="lobby-secondary" href="/">Create a character</a>
+                    <a id="wizard-create-character" class="lobby-secondary" href="/creator">Create a character</a>
                 </section>
             </div>
 

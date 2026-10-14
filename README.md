@@ -14,9 +14,11 @@ npm install
 npm start
 ```
 
-Then open http://localhost:3000/lobby — the campaign browser is the entry
-point for every screen (the character creator is still served at `/`). Log in with any username — the name `gm`
-(case-insensitive) gets GM powers.
+Then open http://localhost:3000 — the home hub is the entry point for every
+screen (campaigns, invitations, characters, homebrew). The first visit from the
+host computer creates the host account; the host then adds every other player
+from the Host tab and approves new campaigns. Players cannot change their own
+password.
 
 Run the dependency-free regression suite with `npm test`.
 
@@ -24,11 +26,11 @@ Run the dependency-free regression suite with `npm test`.
 
 | Route       | What it is |
 |-------------|------------|
-| `/lobby`    | Campaign browser: pick or create a campaign, then enter as GM or with selected characters |
-| `/`         | Character creator (SRD 5.1 rules, live 3D preview of the tabletop model); `?campaign=<id>` scopes the roster |
+| `/`         | Home hub (also `/lobby`): pick or create a campaign, then enter as GM or with selected characters |
+| `/creator`  | Character creator (SRD 5.1 rules, live 3D preview of the tabletop model); `?campaign=<id>` scopes the roster |
 | `/gm`       | GM screen: world map ladder (Continent → Kingdom → Province → Tactical), terrain editing, object placement, structures, combat tracker |
 | `/player`   | Player screen: shared map view + character-sheet HUD |
-| `/homebrew` | Custom monster/race/class builder |
+| `/homebrew` | Homebrew builder: monsters, races, subraces, classes, subclasses, backgrounds, feats, spells and items |
 
 `/gm` and `/player` require `?campaign=<id>`; lobby and workspace links always
 carry it.
@@ -67,7 +69,14 @@ carry it.
   overlays, attack/dash/dodge/disengage actions and conditions; the server
   rolls all dice and enforces turns and movement.
 - **Character creator & homebrew** — SRD 5.1 rules math (AC, HP, spell slots,
-  weapon attacks), plus custom monsters/races/classes shared to every screen.
+  weapon attacks), plus custom monsters, races, subraces, classes, subclasses,
+  backgrounds, feats, spells and items shared to every screen. Features can
+  carry mechanics (passive bonuses, combat actions, bonus damage, resource
+  pools, pick-N choices), any SRD entry can be cloned as a template, and the
+  creator imports Aurora Builder `.dnd5e` characters. If you have Aurora
+  installed, `node tools/import-aurora-backgrounds.mjs` copies every background
+  it knows (proficiencies, features, equipment, personality tables) into your
+  local homebrew — restart the server afterwards.
 - **Monster library** — 334 CC-BY SRD 5.1 creatures plus table-made monsters,
   searchable by name/type/CR and placeable as size-aware combat tokens. Their
   AC, HP, speed, initiative, saves, and standard attacks seed encounters.
