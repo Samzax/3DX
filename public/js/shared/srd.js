@@ -32,7 +32,12 @@ const FILES = {
   classes: 'classes', subclasses: 'subclasses', races: 'races', subraces: 'subraces',
   backgrounds: 'backgrounds', levels: 'levels', features: 'features', skills: 'skills',
   abilityScores: 'ability-scores', alignments: 'alignments', languages: 'languages',
-  proficiencies: 'proficiencies', equipment: 'equipment', spells: 'spells'
+  proficiencies: 'proficiencies', equipment: 'equipment', spells: 'spells', feats: 'feats'
+};
+// Homebrew payload collection → the SRD collection it merges into.
+const HOMEBREW_TARGETS = {
+  races: 'races', subraces: 'subraces', classes: 'classes', subclasses: 'subclasses',
+  backgrounds: 'backgrounds', feats: 'feats', spells: 'spells', items: 'equipment'
 };
 
 let _cache = null;
@@ -73,19 +78,30 @@ class SRD {
       for (const item of this[key]) m.set(item.index, item);
       this._maps[key] = m;
     }
+    // SRD feats list prerequisites as ability minimums; fold them into the
+    // shared feature `prereq` block (rules.js) so homebrew and SRD feats match.
+    for (const feat of this.feats || []) {
+      const abilities = {};
+      for (const p of feat.prerequisites || []) {
+        if (p.ability_score && p.minimum_score) abilities[p.ability_score.index] = p.minimum_score;
+      }
+      if (Object.keys(abilities).length) feat.prereq = { abilities };
+    }
     this._subclassLevel = this._computeSubclassLevels();
   }
 
   get(coll, idx) { return this._maps[coll] ? this._maps[coll].get(idx) : undefined; }
 
-  // Merge shared homebrew (custom races/classes) into the SRD collections.
+  // Merge shared homebrew into the SRD collections. Every homebrew record is
+  // shaped like its SRD counterpart (lib/homebrew.cjs), so the rest of this
+  // class never needs to know which is which beyond the `custom` flag.
   setHomebrew(hb) {
-    this.races = this.races.filter(r => !r.custom);
-    this.classes = this.classes.filter(c => !c.custom);
-    for (const r of (hb && hb.races) || []) { r.custom = true; this.races.push(r); }
-    for (const c of (hb && hb.classes) || []) { c.custom = true; this.classes.push(c); }
-    this._maps.races = new Map(this.races.map(x => [x.index, x]));
-    this._maps.classes = new Map(this.classes.map(x => [x.index, x]));
+    for (const [source, target] of Object.entries(HOMEBREW_TARGETS)) {
+      this[target] = (this[target] || []).filter(x => !x.custom);
+      for (const entry of (hb && hb[source]) || []) { entry.custom = true; this[target].push(entry); }
+      this._maps[target] = new Map(this[target].map(x => [x.index, x]));
+    }
+    this._subclassLevel = this._computeSubclassLevels();
   }
 
   // Level at which each class chooses its subclass (min level of any subclass feature).
@@ -99,7 +115,11 @@ class SRD {
     }
     return out;
   }
-  subclassChoiceLevel(classIdx) { return this._subclassLevel[classIdx] || 3; }
+  subclassChoiceLevel(classIdx) {
+    const cls = this.get('classes', classIdx);
+    if (cls && cls.custom) return cls.subclassLevel || 3;
+    return this._subclassLevel[classIdx] || 3;
+  }
   subclassesForClass(classIdx) {
     return this.subclasses.filter(s => s.class && s.class.index === classIdx);
   }
@@ -120,8 +140,8 @@ class SRD {
   }
 
   // Fixed + optional skill grants from a race.
-  raceSkillGrants(raceIdx) {
-    const race = this.get('races', raceIdx);
+  raceSkillGrants(raceIdx, collection = 'races') {
+    const race = this.get(collection, raceIdx);
     const fixed = [], choice = this._skillOptionGroup(race && race.starting_proficiency_options);
     for (const p of (race && race.starting_proficiencies) || []) {
       const s = profToSkill(p.index); if (s) fixed.push(s);
@@ -143,7 +163,8 @@ class SRD {
   }
 
   // --- Racial ability bonuses -------------------------------------------------
-  // Returns { fixed: {abil:bonus}, options: {choose, from:[abil]} | null }
+  // Returns { fixed: {abil:bonus}, options: {choose, from:[abil]} | null,
+  //           spreads: [{ bonuses: [..] }] | null }
   racialAbilityBonuses(raceIdx, subraceIdx) {
     const fixed = {};
     const add = (list) => {
@@ -160,15 +181,26 @@ class SRD {
     if (opt && opt.from && opt.from.options) {
       options = { choose: opt.choose, from: opt.from.options.map(o => o.ability_score && o.ability_score.index).filter(Boolean) };
     }
-    return { fixed, options };
+    // A race may instead offer alternative spreads (Monsters of the
+    // Multiverse): the player picks ONE spread and fills its slots.
+    let spreads = null;
+    if (race && Array.isArray(race.ability_spreads) && race.ability_spreads.length) {
+      spreads = race.ability_spreads.map(s => ({ bonuses: [...s.bonuses] }));
+    }
+    return { fixed, options, spreads };
   }
 
-  // Final ability scores = base + fixed racial + chosen racial (+1 each).
-  finalAbilities(base, raceIdx, subraceIdx, chosen = []) {
+  // Final ability scores = base + fixed racial + the chosen picks. A pick adds
+  // +1, unless the sheet chose a spread — pick i then takes the spread's bonus i.
+  finalAbilities(base, raceIdx, subraceIdx, chosen = [], spreadIdx = null) {
     const out = { ...base };
-    const { fixed } = this.racialAbilityBonuses(raceIdx, subraceIdx);
+    const { fixed, spreads } = this.racialAbilityBonuses(raceIdx, subraceIdx);
     for (const a of ABILITIES) out[a] = (out[a] || 8) + (fixed[a] || 0);
-    for (const a of chosen) out[a] = (out[a] || 8) + 1;
+    const bonuses = spreadIdx != null && spreads && spreads[spreadIdx] ? spreads[spreadIdx].bonuses : null;
+    chosen.forEach((a, i) => {
+      if (!ABILITIES.includes(a)) return;
+      out[a] = (out[a] || 8) + (bonuses ? (bonuses[i] || 0) : 1);
+    });
     return out;
   }
 
@@ -209,7 +241,7 @@ class SRD {
       const acd = armor.armor_class;
       let dex = acd.dex_bonus ? dexMod : 0;
       if (acd.dex_bonus && acd.max_bonus != null) dex = Math.min(dex, acd.max_bonus);
-      ac = acd.base + dex; source = armor.name;
+      ac = acd.base + dex + (armor.bonus || 0); source = armor.name;
     } else if ((classes || []).some(c => c.class === 'barbarian')) {
       ac = 10 + dexMod + conMod; source = 'Unarmored Defense (Barbarian)';
     } else if ((classes || []).some(c => c.class === 'monk') && !shield) {
@@ -239,8 +271,10 @@ class SRD {
     const ranged = weapon.weapon_range === 'Ranged';
     let abil = ranged ? 'dex' : 'str';
     if (props.includes('finesse')) abil = (mods.dex >= mods.str) ? 'dex' : 'str';
-    const m = mods[abil] || 0;
-    const modStr = m ? (m > 0 ? '+' + m : '' + m) : '';
+    const magic = weapon.bonus || 0;   // homebrew magic weapons: +N to hit and damage
+    const flat = (mods[abil] || 0) + magic;
+    const m = (mods[abil] || 0) + magic;
+    const modStr = flat ? (flat > 0 ? '+' + flat : '' + flat) : '';
     const prof = this.weaponProficient(classes, weapon) ? profBonus : 0;
     const dd = weapon.damage ? weapon.damage.damage_dice : '—';
     const dt = weapon.damage && weapon.damage.damage_type ? weapon.damage.damage_type.name : '';
@@ -253,15 +287,16 @@ class SRD {
   isCaster(classIdx) { const c = this.get('classes', classIdx); return !!(c && c.spellcasting); }
   spellcastingAbility(classIdx) { const c = this.get('classes', classIdx); return c && c.spellcasting ? c.spellcasting.spellcasting_ability.index : null; }
   spellsForClass(classIdx) {
-    // Custom caster classes borrow an existing class's spell list.
+    // Custom caster classes may borrow an existing class's spell list; any
+    // spell that names the class itself (homebrew spells) is always included.
     const cls = this.get('classes', classIdx);
-    const src = (cls && cls.custom) ? (cls.spellList || (this.casterType(classIdx) ? 'wizard' : classIdx)) : classIdx;
-    return this.spells.filter(s => (s.classes || []).some(c => c.index === src))
+    const src = (cls && cls.custom) ? (cls.spellList || classIdx) : classIdx;
+    return this.spells.filter(s => (s.classes || []).some(c => c.index === src || c.index === classIdx))
       .sort((a, b) => a.level - b.level || a.name.localeCompare(b.name));
   }
   casterType(classIdx) {
     const c = this.get('classes', classIdx);
-    if (c && c.custom) return (c.caster === 'full' || c.caster === 'half') ? c.caster : null;
+    if (c && c.custom) return ['full', 'half', 'third', 'pact'].includes(c.caster) ? c.caster : null;
     if (FULL_CASTERS.includes(classIdx)) return 'full';
     if (HALF_CASTERS.includes(classIdx)) return 'half';
     if (classIdx === 'warlock') return 'pact';
@@ -274,7 +309,7 @@ class SRD {
     const casters = (classes || []).filter(c => this.isCaster(c.class));
     const slots = {}; for (let i = 1; i <= 9; i++) slots[i] = 0;
     let pact = null;
-    const warlock = (classes || []).find(c => c.class === 'warlock');
+    const warlock = (classes || []).find(c => this.casterType(c.class) === 'pact');
     if (warlock) {
       const ld = this.classLevelData('warlock', warlock.level);
       if (ld && ld.spellcasting) {
@@ -283,7 +318,7 @@ class SRD {
         if (count) pact = { level: lvl, count };
       }
     }
-    const nonWarlock = casters.filter(c => c.class !== 'warlock');
+    const nonWarlock = casters.filter(c => this.casterType(c.class) !== 'pact');
     const allStandard = nonWarlock.every(c => !this.get('classes', c.class)?.custom);
     if (nonWarlock.length === 1 && allStandard) {
       // Single standard caster: use the exact per-level table from the SRD.
@@ -292,7 +327,7 @@ class SRD {
     } else if (nonWarlock.length >= 1) {
       // Multiclass and/or custom casters: combined caster level via the standard table.
       let cl = 0;
-      for (const c of nonWarlock) { const t = this.casterType(c.class); if (t === 'full') cl += c.level; else if (t === 'half') cl += Math.floor(c.level / 2); }
+      for (const c of nonWarlock) { const t = this.casterType(c.class); if (t === 'full') cl += c.level; else if (t === 'half') cl += Math.floor(c.level / 2); else if (t === 'third') cl += Math.floor(c.level / 3); }
       if (cl >= 1) { const row = MULTI_SLOTS[Math.min(cl, 20)] || []; for (let i = 1; i <= 9; i++) slots[i] = row[i - 1] || 0; }
     }
     return { slots, pact, casters: casters.map(c => ({ class: c.class, ability: this.spellcastingAbility(c.class) })) };
@@ -306,7 +341,7 @@ class SRD {
     if (cls && cls.custom) {
       const t = this.casterType(classIdx);
       if (!t) return { cantrips: 0, known: null, prepared: false };
-      const eff = t === 'half' ? Math.floor(level / 2) : level;
+      const eff = t === 'half' ? Math.floor(level / 2) : t === 'third' ? Math.floor(level / 3) : level;
       const cantrips = eff >= 1 ? (eff < 4 ? 2 : eff < 10 ? 3 : 4) : 0;
       const known = eff >= 1 ? Math.max(1, (abilityMod || 0) + eff) : 0;
       return { cantrips, known, prepared: true };
@@ -320,23 +355,21 @@ class SRD {
     return { cantrips, known, prepared };
   }
 
-  // Features gained, grouped, across the build: [{class, level, name, desc}]
+  // Features gained, grouped, across the build: [{class, level, name, desc}].
+  // (The mechanics-aware view lives in rules.js collectFeatures.)
   classFeatures(classes) {
     const out = [];
+    const text = (desc) => Array.isArray(desc) ? desc.join(' ') : (desc || '');
     for (const c of classes || []) {
       const cls = this.get('classes', c.class);
-      if (cls && cls.custom) {
-        for (const f of cls.customFeatures || []) {
-          if ((f.level || 1) <= (c.level || 0)) out.push({ class: c.class, level: f.level || 1, name: f.name, desc: f.desc || '' });
-        }
-        continue;
-      }
-      const subIdx = c.subclass;
-      for (const f of this.features) {
-        if (!f.class || f.class.index !== c.class) continue;
-        if ((f.level || 0) > (c.level || 0)) continue;
-        if (f.subclass && (!subIdx || f.subclass.index !== subIdx)) continue;
-        out.push({ class: c.class, level: f.level, name: f.name, desc: (f.desc || []).join(' ') });
+      const sub = c.subclass && this.get('subclasses', c.subclass);
+      const own = (cls && cls.custom) ? (cls.customFeatures || [])
+        : this.features.filter(f => f.class && f.class.index === c.class && !f.subclass);
+      const subFeatures = !sub ? [] : sub.custom ? (sub.features || [])
+        : this.features.filter(f => f.subclass && f.subclass.index === sub.index);
+      for (const f of [...own, ...subFeatures]) {
+        if ((f.level || 1) > (c.level || 0)) continue;
+        out.push({ class: c.class, level: f.level || 1, name: f.name, desc: text(f.desc) });
       }
     }
     return out.sort((a, b) => a.level - b.level);

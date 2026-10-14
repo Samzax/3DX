@@ -29,7 +29,7 @@
   <div id="app" class="wrap hidden">
     <div class="topbar">
       <div class="title"><span>Character creator</span><span class="badge">SRD 5.1</span></div>
-      <div style="display:flex; align-items:center; gap:14px;"><a href="/homebrew" style="color:var(--accent); font-size:14px; text-decoration:none;">+ Homebrew</a><span class="who" id="who"></span></div>
+      <div style="display:flex; align-items:center; gap:14px;"><a href="/" style="color:var(--accent); font-size:14px; text-decoration:none;">← Home</a><a href="/homebrew" style="color:var(--accent); font-size:14px; text-decoration:none;">+ Homebrew</a><span class="who" id="who"></span></div>
     </div>
 
     <div class="tabs" id="tabs"></div>
@@ -40,6 +40,12 @@
       <div class="rail">
         <div class="panel" style="padding:12px;">
           <canvas id="preview-canvas"></canvas>
+          <div id="preview-roles" class="preview-roles">
+            <button class="btn btn-ghost btn-sm" data-role="idle">Idle</button>
+            <button class="btn btn-ghost btn-sm" data-role="walk">Walk</button>
+            <button class="btn btn-ghost btn-sm" data-role="attack">Attack</button>
+            <button class="btn btn-ghost btn-sm" data-role="cast">Cast</button>
+          </div>
         </div>
         <div class="panel" style="padding:12px;">
           <div class="metrics" id="metrics"></div>
@@ -48,10 +54,11 @@
           <button class="btn btn-ghost btn-sm" id="new-btn" style="width:100%; margin-top:6px;">New / clear</button>
           <div style="display:flex; gap:6px; margin-top:6px;">
             <button class="btn btn-ghost btn-sm" id="export-btn" style="flex:1;" title="Download this character as JSON">Export</button>
-            <button class="btn btn-ghost btn-sm" id="import-btn" style="flex:1;" title="Load a character JSON (saved as a new character)">Import</button>
+            <button class="btn btn-ghost btn-sm" id="import-btn" style="flex:1;" title="Load a character JSON export or an Aurora Builder .dnd5e file (saved as a new character)">Import</button>
           </div>
-          <input type="file" id="import-file" accept=".json,application/json" class="hidden">
+          <input type="file" id="import-file" accept=".json,application/json,.dnd5e,.xml" class="hidden">
           <div class="msg" id="msg"></div>
+          <div class="info hidden" id="import-report" style="font-size:12px; margin-top:8px;"></div>
         </div>
         <div class="panel" style="padding:12px;">
           <h3 style="font-size:14px; margin-bottom:8px;">Campaign roster</h3>
