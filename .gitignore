@@ -11,3 +11,5 @@ data/packs/
 # Owner-private Meshy body-form sculpts (see docs/race-generation-handoff.md)
 public/assets/characters/mh/assets/dragonborn-*/
 public/assets/characters/mh/assets/tabaxi-*/
+public/assets/characters/mh/targets/dragonborn-*.bin
+public/assets/characters/mh/targets/tabaxi-*.bin

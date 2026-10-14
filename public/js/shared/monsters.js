@@ -234,10 +234,12 @@ export function monsterStatBlockHTML(monster) {
     const saves = monsterSavingThrows(monster);
     const abilities = MONSTER_ABILITIES.map(ability => {
         const score = Number(monster[ABILITY_FIELDS[ability]]) || 10;
-        return `<div><span>${ability.toUpperCase()}</span><strong>${score}</strong><small>${signed(monsterAbilityMod(monster, ability))}</small></div>`;
+        const mod = monsterAbilityMod(monster, ability);
+        return `<div class="rollable" data-roll="${ability.toUpperCase()} check" data-roll-bonus="${mod}" title="Roll a ${ability.toUpperCase()} check"><span>${ability.toUpperCase()}</span><strong>${score}</strong><small>${signed(mod)}</small></div>`;
     }).join('');
     const senses = Object.entries(monster.senses || {}).map(([key, value]) => `${key.replace(/_/g, ' ')} ${value}`).join(', ');
-    const savesText = MONSTER_ABILITIES.map(ability => `${ability.toUpperCase()} ${signed(saves[ability])}`).join(', ');
+    const savesHTML = MONSTER_ABILITIES.map(ability =>
+        `<span class="rollable" data-roll="${ability.toUpperCase()} saving throw" data-roll-bonus="${Number(saves[ability]) || 0}" title="Roll a ${ability.toUpperCase()} save">${ability.toUpperCase()} ${escapeHTML(signed(saves[ability]))}</span>`).join(' ');
     const defenses = [
         ['Vulnerable', monster.damage_vulnerabilities],
         ['Resistant', monster.damage_resistances],
@@ -254,7 +256,7 @@ export function monsterStatBlockHTML(monster) {
         </div>
         <div class="monster-abilities">${abilities}</div>
         <dl class="monster-stat-lines">
-            <div><dt>Saves</dt><dd>${escapeHTML(savesText)}</dd></div>
+            <div><dt>Saves</dt><dd class="monster-saves">${savesHTML}</dd></div>
             ${senses ? `<div><dt>Senses</dt><dd>${escapeHTML(senses)}</dd></div>` : ''}
             ${monster.languages ? `<div><dt>Languages</dt><dd>${escapeHTML(monster.languages)}</dd></div>` : ''}
             ${defenses.map(([label, values]) => `<div><dt>${escapeHTML(label)}</dt><dd>${escapeHTML(values.map(value => value?.name || value?.index || value).join(', '))}</dd></div>`).join('')}

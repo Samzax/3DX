@@ -21,7 +21,7 @@
     <!-- Socket.IO client (served by server.js) -->
     <script src="/socket.io/socket.io.js"></script>
 </head>
-<body>
+<body class="hall-open">
     <!-- Login Modal -->
 <div id="login-overlay">
   <div id="login-modal">
@@ -53,7 +53,8 @@
         </div>
         <div class="workspace-actions">
             <span id="workspace-user" class="workspace-user"></span>
-            <button class="workspace-top-button workspace-optional-action" data-workspace-studio="/" data-workspace-studio-title="Character Studio">Studio</button>
+            <button class="workspace-top-button workspace-optional-action" data-workspace-studio="/creator" data-workspace-studio-title="Character Studio">Studio</button>
+            <button id="btn-workspace-hall" class="workspace-top-button" title="Campaign briefing: the premise, last session's recap and who is at the table">Briefing</button>
             <button id="btn-workspace-characters" class="workspace-top-button" data-workspace-open="character-menu" data-workspace-title="Characters">Characters</button>
             <button id="btn-workspace-encounter" class="workspace-top-button hidden" aria-expanded="false">Encounter</button>
             <button id="btn-workspace-help" class="workspace-top-button workspace-help-button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
@@ -63,6 +64,9 @@
     <!-- --- Tool Menu (Left) --- -->
     <div id="tool-menu">
         <div class="workspace-rail-label">Map</div>
+        <button id="btn-tool-select" class="tool-button" data-label="Select" title="Select Tool (S): click a token to inspect it without moving it">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 8-6 2-2 6z"/><path d="M13 13l6 6"/></svg>
+        </button>
         <div id="tool-move-wrapper" style="position: relative;">
             <button id="btn-tool-move" class="tool-button" data-label="Move" title="Move Tool (M · hold for options)">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
@@ -130,6 +134,37 @@
 
     <!-- --- GM view lock (camera-goto with lock: the GM is steering this camera) --- -->
     <div id="view-lock-banner" class="hidden">&#128065; The GM is directing your view</div>
+
+    <!-- --- Campaign hall: the threshold between the lobby and the table. It
+         sits over the live world (slow orbit behind it) with the premise, the
+         GM's recap and who is here; a closed table holds players here. --- -->
+    <section id="campaign-hall" aria-label="Campaign briefing">
+        <div class="hall-card">
+            <div class="hall-kicker" id="hall-kicker">Campaign</div>
+            <h1 id="hall-title">&nbsp;</h1>
+            <p id="hall-premise" class="hall-premise hidden"></p>
+            <div id="hall-recap-block" class="hall-recap hidden">
+                <div class="hall-label">Last time</div>
+                <p id="hall-recap"></p>
+            </div>
+            <div class="hall-meta">
+                <div>
+                    <div class="hall-label">At the table</div>
+                    <div id="hall-roster" class="hall-roster"></div>
+                </div>
+                <div>
+                    <div class="hall-label">You play</div>
+                    <div id="hall-party" class="hall-party"></div>
+                </div>
+                <div>
+                    <div class="hall-label">Out there</div>
+                    <div id="hall-sky" class="hall-party">&hellip;</div>
+                </div>
+            </div>
+            <button id="hall-enter" class="hall-enter" disabled>Entering&hellip;</button>
+            <div id="hall-status" class="hall-status"></div>
+        </div>
+    </section>
 
     <!-- Local cutaway control for multi-storey buildings. It appears only when
          the current map contains elevated/basement construction. -->

@@ -68,10 +68,10 @@
 #monster-search,
 .monster-filters select {
   width: 100%;
-  border: 1px solid #454b56;
+  border: 1px solid #4a4032;
   border-radius: 6px;
-  background: #20242b;
-  color: #eef2f7;
+  background: #231c14;
+  color: #f3ead8;
   font: inherit;
 }
 #monster-search {
@@ -90,13 +90,13 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: #929baa;
+  color: #a39884;
   font: inherit;
   font-size: 11px;
   line-height: 1.35;
   text-align: left;
 }
-.monster-library-status:not(:disabled) { color: #b9c3d1; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.monster-library-status:not(:disabled) { color: #c2b8a2; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 #monster-button-list { max-height: 320px; overflow-y: auto; scrollbar-gutter: stable; }
 .monster-card { --character-color: #b45309; }
 .monster-card-source {
@@ -108,7 +108,7 @@
   text-transform: uppercase;
 }
 .monster-create { margin-top: 8px; }
-.monster-license { display: block; margin-top: 8px; color: #7f8998; font-size: 10px; text-align: center; }
+.monster-license { display: block; margin-top: 8px; color: #958a76; font-size: 10px; text-align: center; }
 
 #move-submenu .menu-button {
   font-size: 13px;
@@ -167,14 +167,14 @@
   transition: background-color 0.15s;
 }
 #terrain-panel .brush-mode:hover, #build-panel .brush-mode:hover, #fog-panel .brush-mode:hover, #view-panel .brush-mode:hover { background: var(--btn-bg-hover); }
-#terrain-panel .brush-mode.active, #build-panel .brush-mode.active, #fog-panel .brush-mode.active, #view-panel .brush-mode.active { background: var(--accent-warm); color: #1a1a1a; font-weight: 700; border-color: var(--accent-warm); }
+#terrain-panel .brush-mode.active, #build-panel .brush-mode.active, #fog-panel .brush-mode.active, #view-panel .brush-mode.active { background: var(--accent-warm); color: #17120d; font-weight: 700; border-color: var(--accent-warm); }
 #terrain-panel .brush-mode:focus-visible, #build-panel .brush-mode:focus-visible, #fog-panel .brush-mode:focus-visible, #view-panel .brush-mode:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 #terrain-mats { gap: 8px; }
 #terrain-mats .mat-swatch { width: 34px; height: 28px; border-radius: var(--btn-radius); border: 2px solid #555; cursor: pointer; }
 #terrain-mats .mat-swatch.active { border-color: #fff; box-shadow: 0 0 6px #fff; }
 #terrain-mats .mat-swatch:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 #terrain-panel .tp-slider, #build-panel .tp-slider, #fog-panel .tp-slider, #view-panel .tp-slider { margin: 8px 0; }
-#terrain-panel .tp-slider label, #build-panel .tp-slider label, #fog-panel .tp-slider label, #view-panel .tp-slider label { display: block; font-size: 12px; color: #cbd0d8; margin-bottom: 3px; }
+#terrain-panel .tp-slider label, #build-panel .tp-slider label, #fog-panel .tp-slider label, #view-panel .tp-slider label { display: block; font-size: 12px; color: #d6ccb8; margin-bottom: 3px; }
 #terrain-panel .tp-slider input[type=range], #build-panel .tp-slider input[type=range], #fog-panel .tp-slider input[type=range], #view-panel .tp-slider input[type=range] { width: 100%; accent-color: var(--accent-warm); }
 #terrain-panel .tp-chip {
   display: inline-block; margin-left: 6px; padding: 2px 10px;
@@ -204,7 +204,7 @@
   border: 1px solid rgba(255,255,255,.09);
   border-radius: var(--btn-radius);
   background: rgba(0,0,0,.18);
-  color: #d9dee7;
+  color: #e0d6c2;
   font-size: 12px;
   text-align: center;
 }
@@ -222,10 +222,10 @@
 /* --- View panel extras (player rows + send/release buttons) --- */
 #view-players .view-player { flex: 1 1 100%; text-align: left; display: flex; justify-content: space-between; align-items: baseline; }
 #view-players .vp-sub { font-size: 10px; color: var(--text-dim); font-weight: 400; }
-#view-players .view-player.active .vp-sub { color: #1a1a1a; }
+#view-players .view-player.active .vp-sub { color: #17120d; }
 #view-panel .tp-send {
   width: 100%; margin-top: 10px; padding: 7px;
-  background: var(--accent-warm); color: #1a1a1a; font-weight: 700;
+  background: var(--accent-warm); color: #17120d; font-weight: 700;
   border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px;
 }
 #view-panel .tp-send:hover { filter: brightness(1.12); }
@@ -252,7 +252,7 @@
   transition: background-color 0.15s;
 }
 #biome-panel .biome-swatch:hover { background: var(--btn-bg-hover); }
-#biome-panel .biome-swatch.active { background: var(--swatch); color: #101014; font-weight: 700; }
+#biome-panel .biome-swatch.active { background: var(--swatch); color: #120e0a; font-weight: 700; }
 #biome-panel .biome-swatch:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 
 /* --- Campaign settings panel (worldbuilding) --- */
@@ -264,23 +264,23 @@
 #campaign-panel input[type=text],
 #campaign-panel input[type=number],
 #campaign-panel textarea {
-  width: 100%; background: #1a1a1f; color: var(--text);
+  width: 100%; background: #1a150f; color: var(--text);
   border: 1px solid var(--panel-border); border-radius: var(--btn-radius);
   font-size: 12px; padding: 5px 7px; font-family: inherit;
 }
 #campaign-panel input:focus, #campaign-panel textarea:focus { outline: none; border-color: var(--accent-warm); }
 #campaign-panel .tp-checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 4px 8px; }
-#campaign-panel .tp-check { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #cbd0d8; cursor: pointer; }
+#campaign-panel .tp-check { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #d6ccb8; cursor: pointer; }
 #campaign-panel .tp-check input { accent-color: var(--accent-warm); }
 #campaign-panel .tp-chip {
   padding: 4px 9px; font-size: 12px; background: var(--btn-bg); color: var(--text);
   border: 1px solid var(--panel-border); border-radius: var(--btn-radius); cursor: pointer;
 }
 #campaign-panel .tp-chip:hover { background: var(--btn-bg-hover); }
-#campaign-panel .tp-send { width: 100%; margin-top: 10px; padding: 7px; background: var(--accent-warm); color: #101014; border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; font-weight: 700; }
+#campaign-panel .tp-send { width: 100%; margin-top: 10px; padding: 7px; background: var(--accent-warm); color: #120e0a; border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; font-weight: 700; }
 #campaign-panel .tp-send:hover { filter: brightness(1.12); }
 #campaign-status, #campaign-world-status { min-height: 14px; margin-top: 6px; font-size: 11px; color: var(--text-dim); }
-#campaign-panel .tp-chip.active { background: var(--accent-warm); color: #101014; border-color: var(--accent-warm); font-weight: 700; }
+#campaign-panel .tp-chip.active { background: var(--accent-warm); color: #120e0a; border-color: var(--accent-warm); font-weight: 700; }
 #campaign-panel .tp-section { margin: 18px 0 4px; padding-top: 14px; border-top: 1px solid var(--panel-border); font-size: 15px; font-weight: 700; color: var(--text); }
 #campaign-panel .tp-check-wide { margin-top: 10px; }
 #campaign-panel .tp-rebuild { background: #b4532a; color: #fff; }
@@ -297,3 +297,17 @@
 #combat-panel #btn-combat-toggle { width: 200px; background: #5d3a2f; }
 #combat-panel #btn-combat-toggle:hover { background: #75492f; }
 #combat-panel #btn-combat-toggle.hidden { display: none; }
+
+/* Add Object > prop: kind picker, facing, then the place button. */
+#prop-menu { display: grid; grid-template-columns: 1fr auto; gap: 6px; margin-bottom: var(--gap); }
+#prop-menu select, #prop-menu #btn-prop-rot {
+  background-color: var(--btn-bg);
+  color: var(--text);
+  border: none;
+  border-radius: var(--btn-radius);
+  padding: 6px;
+  font-size: 13px;
+  min-width: 0;
+}
+#prop-menu #btn-prop-rot { cursor: pointer; }
+#prop-menu .menu-button { grid-column: 1 / -1; margin-bottom: 0; }

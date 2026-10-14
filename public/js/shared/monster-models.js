@@ -17,6 +17,12 @@
 // load keeps the disc). In Node (no DOM) GLB entries return null and the
 // caller's disc stands in, so tests never touch a loader.
 //
+// Model packs (lib/monster-packs.cjs, served under /packs/) arrive through the
+// same manifest URL as extra kind:'gltf' entries. Those may declare `clips`
+// (role → clip name), a shared clip-library GLB (`animUrl`, bound by bone
+// name), bone `proportions` and a `breath` socket; such tokens get a live rig
+// from monster-anim.js. Entries without `clips` stay posed and static.
+//
 // Seating contract: every model is scaled to the entry height and its soles
 // are placed at TOKEN_SEAT_Y (-0.1), which is exactly the token halfHeight the
 // pages already use for discs, so stored positions never migrate.
@@ -25,6 +31,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as skeletonClone } from 'three/addons/utils/SkeletonUtils.js';
 import { buildMonsterModel } from './monster-generators.js';
+import { applyProportions, attachMonsterRig } from './monster-anim.js';
 import { APE_APPEARANCE_VARIANTS, setMonsterVariantCatalog } from './monsters.js';
 
 export const TOKEN_SEAT_Y = -0.1;
@@ -145,6 +152,10 @@ function nameplateFor(entry) {
 function disposeChildren(group) {
     const seen = new Set();
     [...group.children].forEach(child => {
+        // Presentation riding on the token (base plinth, nameplate, selection
+        // ring) belongs to the token, not to the model being swapped out.
+        const tag = child.userData || {};
+        if (tag.tokenBase || tag.objectNameplate || tag.workspaceSelectionRing) return;
         child.traverse(object => {
             const onDispose = object.userData && object.userData.onDispose;
             if (typeof onDispose === 'function') {
@@ -269,14 +280,71 @@ function loadGlbTemplate(url) {
     return glbTemplates.get(url);
 }
 
+// The tabletop renderers output linear (no gamma), and every colour in the
+// game is authored for that. A pack model's sRGB base-colour texture would be
+// decoded and then shown undecoded — far too dark — so its colour maps are
+// read as-is instead. Done once per template; revisit if the tabletop ever
+// switches to sRGB output.
+const colourFixed = new WeakSet();
+function showPackColoursAsAuthored(gltf) {
+    if (!gltf || !gltf.scene || colourFixed.has(gltf)) return;
+    colourFixed.add(gltf);
+    gltf.scene.traverse(object => {
+        const materials = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of materials.filter(Boolean)) {
+            for (const texture of [material.map, material.emissiveMap].filter(Boolean)) {
+                if ('colorSpace' in texture) texture.colorSpace = THREE.NoColorSpace || '';
+                else if (THREE.LinearEncoding != null) texture.encoding = THREE.LinearEncoding;
+                texture.needsUpdate = true;
+            }
+            material.needsUpdate = true;
+        }
+    });
+}
+
+// A pack entry's `tint` multiplies the base colour (age stages of one sculpt).
+// Tinted materials are cloned once per (model, tint) and shared by its tokens.
+const tintedMaterials = new Map(); // `${url}|${tint}` → Map<material, clone>
+function applyTint(model, entry) {
+    if (typeof entry.tint !== 'string' || !entry.tint) return;
+    const key = `${entry.url}|${entry.tint}`;
+    if (!tintedMaterials.has(key)) tintedMaterials.set(key, new Map());
+    const clones = tintedMaterials.get(key);
+    const tint = new THREE.Color(entry.tint);
+    const swap = material => {
+        if (!material || !material.color) return material;
+        if (!clones.has(material)) {
+            const clone = material.clone();
+            clone.color.multiply(tint);
+            clones.set(material, clone);
+        }
+        return clones.get(material);
+    };
+    model.traverse(object => {
+        if (!object.material) return;
+        object.material = Array.isArray(object.material) ? object.material.map(swap) : swap(object.material);
+    });
+}
+
 // Clone the shared template, then the usual measure → scale → seat path.
 // GLB entries carry no variants; a missing URL degrades to the disc.
 async function buildGltfTokenModel(entry) {
     if (!HAS_DOM || typeof entry.url !== 'string' || !entry.url) return null;
     const gltf = await loadGlbTemplate(entry.url);
     if (!gltf || !gltf.scene) return null;
+    if (entry.pack) showPackColoursAsAuthored(gltf);
     const model = skeletonClone(gltf.scene);
-    return { ...seatInHolder(entry, model), variant: null };
+    applyProportions(model, entry.proportions);
+    applyTint(model, entry);
+    let clips = null;
+    if (entry.clips) {
+        // A missing clip library only costs the clips it carried.
+        const library = typeof entry.animUrl === 'string' && entry.animUrl
+            ? await loadGlbTemplate(entry.animUrl).catch(() => null)
+            : null;
+        clips = [...(gltf.animations || []), ...((library && library.animations) || [])];
+    }
+    return { ...seatInHolder(entry, model), variant: null, model, clips };
 }
 
 // Async counterpart of swapInModel: disc placeholder first, model the moment
@@ -289,6 +357,7 @@ function swapInGltf(wrapper, entry) {
             disposeChildren(wrapper);
             wrapper.add(built.holder);
             applyTokenMetadata(wrapper, built, entry);
+            if (built.clips) attachMonsterRig(wrapper, built.holder, built.model, entry, built.clips);
         })
         .catch(error => console.warn('[monsters] GLB load failed for', entry.index, error));
 }

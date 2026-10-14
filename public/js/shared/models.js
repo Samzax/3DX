@@ -7,6 +7,8 @@ import { GRID_CELL_SIZE } from './scene.js';
 import { buildWallRun, buildFloorPatch, buildStaircase, buildRoofPatch } from './structures.js';
 import { createRigCharacter } from './charmesh.js';
 import { createMonsterTokenGroup, TOKEN_HALF_HEIGHT } from './monster-models.js';
+import { buildProp } from './props.js';
+import { buildSummon } from './summons.js';
 
 export const defaultMaterial = new THREE.MeshLambertMaterial({ color: 0xdd4444 });
 export const selectedMaterial = new THREE.MeshLambertMaterial({ color: 0xffff44, emissive: 0xaaaa00 });
@@ -322,6 +324,25 @@ function buildTokenDisc(data) {
     return disc;
 }
 
+// A miniature's base: a low brass-rimmed plinth in the token's color under
+// every modelled figure (monsters and characters), so it reads as a game
+// piece standing ON the map and its footprint is obvious at a glance. Sits on
+// the ground plane (object origin is halfHeight above it).
+function addTokenBase(object, radius, halfHeight, color) {
+    const tint = new THREE.Color(color).multiplyScalar(0.55);
+    const base = new THREE.Mesh(
+        new THREE.CylinderGeometry(radius * 0.94, radius, 0.07, 36),
+        [
+            new THREE.MeshLambertMaterial({ color: 0xa8843c }),   // rim
+            new THREE.MeshLambertMaterial({ color: tint }),       // top
+            new THREE.MeshLambertMaterial({ color: 0x2a2018 })    // underside
+        ]);
+    base.position.y = -halfHeight + 0.035;
+    base.receiveShadow = true;
+    base.userData.tokenBase = true;
+    object.add(base);
+}
+
 // Build a synced scene object from server data ('object-added' / 'map-state').
 // Returns the mesh with userData (syncId, halfHeight, characterData/objectType)
 // filled in, or null for unknown types. The caller adds it to scene + object list.
@@ -335,8 +356,15 @@ export function buildObjectFromData(id, data) {
             // vendored GLB, whichever the manifest entry says); anything else
             // keeps the plain disc.
             const makeDisc = () => buildTokenDisc(data);
-            objectMesh = createMonsterTokenGroup(data, makeDisc) || makeDisc();
+            const modelled = createMonsterTokenGroup(data, makeDisc);
+            objectMesh = modelled || makeDisc();
             halfHeight = TOKEN_HALF_HEIGHT;
+            if (modelled) {
+                const sizeScale = ({ Tiny: 0.5, Small: 0.75, Medium: 1, Large: 2, Huge: 3, Gargantuan: 4 })[
+                    data.monsterData && data.monsterData.size
+                ] || 1;
+                addTokenBase(modelled, GRID_CELL_SIZE * 0.44 * sizeScale, halfHeight, data.color == null ? 0xdd4444 : data.color);
+            }
             break;
         }
         case 'cube':
@@ -370,6 +398,8 @@ export function buildObjectFromData(id, data) {
                 const ph = createCharacterModel(data.characterData);
                 objectMesh.add(ph);
                 objectMesh.userData.placeholder = ph;
+                addTokenBase(objectMesh, GRID_CELL_SIZE * 0.44, halfHeight,
+                    data.characterData.color || charColors(data.characterData).torso || 0x6ea8fe);
             }
             break;
         case 'cave':
@@ -379,6 +409,15 @@ export function buildObjectFromData(id, data) {
             break;
         case 'portal':
             objectMesh = createPortalMesh();
+            halfHeight = 0;
+            break;
+        case 'prop':
+            objectMesh = buildProp(data);
+            halfHeight = 0;
+            break;
+        case 'summon':
+            // What a spell left for its caster to move about (summons.js).
+            objectMesh = buildSummon(data);
             halfHeight = 0;
             break;
         case 'wall':
@@ -422,6 +461,7 @@ export function buildObjectFromData(id, data) {
     };
     if (data.type === 'character') {
         objectMesh.userData.characterData = data.characterData;
+        objectMesh.userData.pose = data.pose || null;   // on furniture (charmesh.js applyPose)
     } else {
         objectMesh.userData.objectType = data.type;
     }

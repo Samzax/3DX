@@ -209,7 +209,7 @@ export function createTabletopWorkspace({
         if (userLabel) userLabel.textContent = text || '';
     }
 
-    function openStudio(path = '/', title = 'Character Studio') {
+    function openStudio(path = '/creator', title = 'Character Studio') {
         if (!studio || !studioFrame) return;
         if (studioTitle) studioTitle.textContent = title;
         // The Studio keeps the campaign context (roster scoping, save targets).
@@ -307,7 +307,7 @@ export function createTabletopWorkspace({
         const studioTrigger = event.target.closest('[data-workspace-studio]');
         if (studioTrigger) {
             event.preventDefault();
-            openStudio(studioTrigger.dataset.workspaceStudio || '/', studioTrigger.dataset.workspaceStudioTitle || 'Character Studio');
+            openStudio(studioTrigger.dataset.workspaceStudio || '/creator', studioTrigger.dataset.workspaceStudioTitle || 'Character Studio');
         }
     });
 

@@ -6,6 +6,7 @@
 // as well as simple meshes.
 
 import * as THREE from 'three';
+import { propLabel } from './props.js';
 
 function colorValue(value, fallback = '#7f8a99') {
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -34,7 +35,8 @@ function identityBase(object) {
     const labels = {
         token: 'Token', cube: 'Cube', sphere: 'Sphere', cave: 'Cave', arch: 'Rock Arch',
         portal: data.name || object?.userData?.portalName || 'Portal',
-        wall: 'Wall', floor: 'Floor', stair: 'Staircase', roof: 'Roof'
+        wall: 'Wall', floor: 'Floor', stair: 'Staircase', roof: 'Roof',
+        prop: propLabel(data.kind)
     };
     const name = data.name || labels[type] || type.replace(/(^|-)(\w)/g, (_, __, c) => ` ${c.toUpperCase()}`).trim();
     return {
@@ -64,31 +66,40 @@ export function objectIdentity(object, objects = []) {
     };
 }
 
+const NAMEPLATE_FONT = '700 33px Georgia, "Palatino Linotype", "Book Antiqua", serif';
+
 function makeNameplate(text, accent) {
     const canvas = document.createElement('canvas');
     canvas.height = 96;
     const safeText = String(text || '').slice(0, 38);
     let ctx = canvas.getContext('2d');
-    ctx.font = '700 34px system-ui, -apple-system, sans-serif';
+    ctx.font = NAMEPLATE_FONT;
     const measured = Math.min(455, Math.ceil(ctx.measureText(safeText).width));
-    const width = Math.max(116, measured + 62);
+    const width = Math.max(116, measured + 78);
     canvas.width = width;
     ctx = canvas.getContext('2d');
-    ctx.font = '700 34px system-ui, -apple-system, sans-serif';
-    const x = 0;
+    ctx.font = NAMEPLATE_FONT;
 
-    ctx.fillStyle = 'rgba(9, 12, 18, 0.86)';
+    // A small plaque: warm ink ground, brass hairline, the token's color as a
+    // gem at the left, the name in a bookish serif.
+    ctx.fillStyle = 'rgba(22, 17, 12, 0.9)';
     ctx.beginPath();
-    ctx.roundRect(x, 14, width, 64, 18);
+    ctx.roundRect(2, 14, width - 4, 64, 16);
     ctx.fill();
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(201, 164, 92, 0.85)';
+    ctx.stroke();
     ctx.fillStyle = accent;
     ctx.beginPath();
-    ctx.roundRect(x + 8, 22, 8, 48, 4);
+    ctx.arc(30, 46, 10, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#f4f7fb';
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255, 244, 214, 0.75)';
+    ctx.stroke();
+    ctx.fillStyle = '#f6ecd4';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(safeText, canvas.width / 2 + 4, 47, width - 38);
+    ctx.fillText(safeText, canvas.width / 2 + 16, 48, width - 72);
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
@@ -156,8 +167,10 @@ export function setObjectSelected(object, selected) {
     if (!selected) {
         if (!existing) return;
         object.remove(existing);
-        if (existing.geometry) existing.geometry.dispose();
-        if (existing.material) existing.material.dispose();
+        existing.traverse(part => {
+            if (part.geometry) part.geometry.dispose();
+            if (part.material) part.material.dispose();
+        });
         delete object.userData.workspaceSelectionRing;
         return;
     }
@@ -171,21 +184,29 @@ export function setObjectSelected(object, selected) {
         : type === 'token' ? Math.max(0.36, 0.62 * tokenSize)
         : type === 'cube' || type === 'sphere' ? 0.72
             : type === 'portal' ? 1.05 : 1.3;
-    const ring = new THREE.Mesh(
-        new THREE.RingGeometry(Math.max(0.18, outer - 0.085), outer, 48),
-        new THREE.MeshBasicMaterial({
-            color: 0x6ea8fe,
-            transparent: true,
-            opacity: 0.92,
-            depthTest: false,
-            depthWrite: false,
-            side: THREE.DoubleSide
-        })
-    );
+    // A bright gold band with a wide soft halo around it: reads on grass,
+    // snow, stone and water alike.
+    const band = (inner, outerR, opacity, order) => {
+        const mesh = new THREE.Mesh(
+            new THREE.RingGeometry(inner, outerR, 56),
+            new THREE.MeshBasicMaterial({
+                color: 0xffd772,
+                transparent: true,
+                opacity,
+                depthTest: false,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            })
+        );
+        mesh.renderOrder = order;
+        mesh.raycast = () => {};
+        return mesh;
+    };
+    const ring = new THREE.Group();
+    ring.add(band(Math.max(0.12, outer - 0.2), outer + 0.16, 0.2, 1189));
+    ring.add(band(Math.max(0.18, outer - 0.07), outer, 0.95, 1190));
     ring.rotation.x = -Math.PI / 2;
     ring.position.y = -(object.userData.halfHeight || 0) + 0.025;
-    ring.renderOrder = 1190;
-    ring.raycast = () => {};
     ring.userData.workspaceSelectionRing = true;
     object.add(ring);
     object.userData.workspaceSelectionRing = ring;
@@ -194,12 +215,23 @@ export function setObjectSelected(object, selected) {
 export function updateObjectPresentation(object, patch = {}) {
     if (!object || !object.userData) return;
     object.userData.objectData = { ...sourceData(object), ...patch };
+    if (Object.prototype.hasOwnProperty.call(patch, 'pose')) object.userData.pose = patch.pose || null;
     if (patch.name != null && object.userData.objectType === 'portal') {
         object.userData.portalName = String(patch.name);
     }
     if (patch.color != null && object.material && object.material.color) {
         object.material.color.set(patch.color);
     }
+}
+
+// A move preview carries the object under the cursor on this screen only; the
+// synced position is the one recorded in its data (updateObjectPositionData
+// runs on every committed or received move). Dropping the selection without
+// committing puts the object back there, so the screens cannot drift apart.
+export function revertUncommittedMove(object, startPosition) {
+    const synced = object && object.userData && sourceData(object).position;
+    if (!synced || !startPosition || object.position.equals(startPosition)) return;
+    object.position.set(synced.x, synced.y, synced.z);
 }
 
 export function updateObjectPositionData(object) {

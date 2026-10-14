@@ -19,7 +19,9 @@
 //            bx, bz,        // endpoint vector in world cells (legacy straight run)
 //            path: [{x,z}], // optional relative orthogonal corners; starts at 0,0
 //            ys: [...],     // per-piece ground offsets in path order
-//            segments: [...] } // optional per-cell 'door'|'window'|'gap'|'solid'
+//            segments: [...], // optional per-cell 'door'|'window'|'gap'|'solid'
+//            doors: [...] }   // optional per-cell 'open'|'locked' for door cells
+//                             // (a closed door blocks sight: shared/vision.js)
 //   floor: { type:'floor', style, scruffy, seed, cols, rows,
 //            level, levelHeight, heightMode:'terrain'|'flat',
 //            ys: [...],     // per-tile ground offsets, row-major cols*rows
@@ -55,8 +57,29 @@ export const BUILD_STYLES = {
         wallPattern: 'plaster', trim: 0x5f452a,
         floorA: 0xb7b0a0, floorB: 0xaba491, ceiling: 0xe1dccf,
         roofA: 0x98513e, roofB: 0x7f4033
+    },
+    // Underground masonry: the same courses and flagstones as Stone, dark and
+    // cold, for dungeons cut into rock.
+    dungeon: {
+        label: 'Dungeon', wall: 0x57534f, wallFace: 0x66625d, post: 0x403d3a,
+        wallPattern: 'stone', trim: 0x2e2c2a,
+        floorA: 0x5f5b56, floorB: 0x55514c, ceiling: 0x45423f,
+        roofA: 0x34373d, roofB: 0x292c31
+    },
+    // A wall with no body: it only blocks sight and light (shared/vision.js).
+    // The GM draws it along cave walls, cliffs and hedges the terrain cannot
+    // model; players never see it, only what it hides.
+    sight: {
+        label: 'Sight blocker', wall: 0x99948a, wallFace: 0xaaa59b, post: 0x827c70,
+        wallPattern: 'stone', trim: 0x746f65,
+        floorA: 0x8f8a7f, floorB: 0x847f73, ceiling: 0xb7b3aa,
+        roofA: 0x4d5868, roofB: 0x3e4755
     }
 };
+
+// Sight blockers draw as translucent panels on the GM screen only.
+let sightBlockersShown = false;
+export function showSightBlockers(shown) { sightBlockersShown = !!shown; }
 
 // One world unit is one 5-foot tactical cell, so a two-unit storey is 10 feet.
 // The value is copied into new structure records: old and new buildings can use
@@ -431,6 +454,65 @@ function wallPatternTexture(pattern) {
     return texture;
 }
 
+// Floors and roofs are merged vertex-colored boxes — one flat color per cell.
+// This paints the material onto them in the shader (object space, so it is
+// identical on every client and costs no geometry or saved data): flagstone
+// joints, floorboards or tiles on anything facing up, and courses of
+// staggered shingles on pitched roofs. `pattern` is the style's wallPattern.
+function applySurfaceDetail(mat, kind, pattern) {
+    const code = kind === 'roof' ? 3 : pattern === 'wood' ? 1 : pattern === 'plaster' ? 2 : 0;
+    mat.onBeforeCompile = (shader) => {
+        shader.vertexShader = shader.vertexShader
+            .replace('#include <common>', '#include <common>\nvarying vec3 vSurfPos;\nvarying vec3 vSurfNor;')
+            .replace('#include <begin_vertex>', '#include <begin_vertex>\nvSurfPos = position;\nvSurfNor = normal;');
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <common>', [
+                '#include <common>',
+                'varying vec3 vSurfPos;',
+                'varying vec3 vSurfNor;',
+                'float sHash(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }',
+                'float sLine(float f, float w) { return smoothstep(0.0, w, f) * smoothstep(0.0, w, 1.0 - f); }'
+            ].join('\n'))
+            .replace('#include <color_fragment>', [
+                '#include <color_fragment>',
+                `const int SURF = ${code};`,
+                `vec2 sp = vSurfPos.xz / ${CELL.toFixed(3)};`,
+                'vec3 sn = normalize(vSurfNor);',
+                'float sShade = 1.0;',
+                'if (SURF == 3 && sn.y > 0.15 && sn.y < 0.985) {',
+                // Shingle courses step down the slope; joints stagger row to row.
+                '  float course = vSurfPos.y * 4.6;',
+                '  float row = floor(course), up = fract(course);',
+                '  float along = (abs(sn.x) > abs(sn.z) ? vSurfPos.z : vSurfPos.x) * 3.2 + mod(row, 2.0) * 0.5;',
+                '  sShade = (1.0 - 0.30 * smoothstep(0.62, 1.0, up)) * (0.80 + 0.2 * sLine(fract(along), 0.07));',
+                '  sShade *= 0.88 + 0.24 * sHash(vec2(row, floor(along)));',
+                '} else if (sn.y > 0.5) {',
+                '  if (SURF == 1) {',
+                // Floorboards: four to a cell, butt joints at staggered lengths.
+                '    float board = floor(sp.y * 4.0);',
+                '    float run = sp.x * 0.45 + sHash(vec2(board, 3.0)) * 5.0;',
+                '    sShade = (0.70 + 0.3 * sLine(fract(sp.y * 4.0), 0.07)) * (0.82 + 0.18 * sLine(fract(run), 0.012));',
+                '    sShade *= 0.88 + 0.22 * sHash(vec2(board, floor(run)));',
+                '  } else if (SURF == 2) {',
+                // Square tiles, two to a cell, with pale grout.
+                '    vec2 t = fract(sp * 2.0);',
+                '    sShade = (0.74 + 0.26 * sLine(t.x, 0.05) * sLine(t.y, 0.05)) * (0.93 + 0.12 * sHash(floor(sp * 2.0)));',
+                '  } else {',
+                // Flagstones: one slab per cell, some split in two, worn mottling.
+                '    vec2 cell = floor(sp), f = fract(sp);',
+                '    float split = step(0.55, sHash(cell + 11.0));',
+                '    float halfF = mix(f.x, fract(f.x * 2.0), split * step(0.5, sHash(cell + 5.0)));',
+                '    float halfG = mix(f.y, fract(f.y * 2.0), split * (1.0 - step(0.5, sHash(cell + 5.0))));',
+                '    sShade = 0.66 + 0.34 * sLine(halfF, 0.045) * sLine(halfG, 0.045);',
+                '    sShade *= 0.9 + 0.2 * sHash(floor(vSurfPos.xz * 7.0));',
+                '  }',
+                '}',
+                'diffuseColor.rgb *= sShade;'
+            ].join('\n'));
+    };
+    mat.customProgramCacheKey = () => `structure-surface-${code}`;
+}
+
 function pieceMaterial(color, ghost, map = null) {
     const mat = new THREE.MeshLambertMaterial({ color, map });
     if (ghost) { mat.transparent = true; mat.opacity = 0.45; mat.depthWrite = false; }
@@ -454,6 +536,11 @@ export function buildWallRun(data, opts = {}) {
     const seed = data.seed || 1;
     const scruffy = !!data.scruffy;
     const segments = Array.isArray(data.segments) ? data.segments : [];
+    const doors = Array.isArray(data.doors) ? data.doors : [];
+    const sight = data.style === 'sight';
+    const sightMat = sight && (sightBlockersShown || ghost) ? new THREE.MeshBasicMaterial({
+        color: 0xff4fd8, transparent: true, opacity: ghost ? 0.3 : 0.2, depthWrite: false, side: THREE.DoubleSide
+    }) : null;
     const group = new THREE.Group();
     const wallTexture = wallPatternTexture(style.wallPattern);
     const wallMat = pieceMaterial(style.wall, ghost, wallTexture);
@@ -507,7 +594,11 @@ export function buildWallRun(data, opts = {}) {
         const yLo = Math.min(y, ys[i - 1] != null ? ys[i - 1] : y, ys[i + 1] != null ? ys[i + 1] : y);
         const embed = EMBED + (y - yLo);
 
-        if (kind === 'solid' && !(scruffy && rawKind !== 'solid' && buildRand(seed, i, 1) < 0.15)) {
+        if (sight) {
+            const blocks = kind === 'solid' || (kind === 'door' && doors[i] !== 'open');
+            const panel = blocks && sightMat ? addPanel(i, CELL, h, y, sightMat, 0, 0.05) : null;
+            if (panel) { panel.castShadow = false; panel.receiveShadow = false; }
+        } else if (kind === 'solid' && !(scruffy && rawKind !== 'solid' && buildRand(seed, i, 1) < 0.15)) {
             let ph = h;
             const m = addPanel(i, CELL * 1.06, ph + embed, y - embed);
             if (scruffy) {
@@ -536,18 +627,27 @@ export function buildWallRun(data, opts = {}) {
                 trimMat, 0, WALL_FRAME_THICKNESS);
             detailCount += 3;
 
-            // A leaf swung into the room makes this read as a traversable door,
-            // while the invisible segment picker still fills the original cell.
+            // The leaf hangs shut in its frame until someone opens the door:
+            // a closed door blocks sight, an open one swings clear of the
+            // doorway. The invisible segment picker still fills the cell.
             const pivot = tag(new THREE.Group(), i);
             const hingeAlong = CELL * 0.5 - doorW / 2;
             pivot.position.set(x + ux * hingeAlong, y + 0.025, z + uz * hingeAlong);
-            pivot.rotation.y = (ux ? -ux : uz) * Math.PI / 3;
+            pivot.rotation.y = doors[i] === 'open' ? (ux ? -ux : uz) * Math.PI * 0.47 : 0;
+            pivot.userData.doorLeaf = true;
             const leaf = tag(new THREE.Mesh(UNIT_BOX, doorMat), i);
             leaf.scale.set(ux ? doorW : 0.075, doorH * 0.94, uz ? doorW : 0.075);
             leaf.position.set(ux * doorW / 2, doorH * 0.47, uz * doorW / 2);
             leaf.castShadow = !ghost;
             leaf.receiveShadow = !ghost;
             pivot.add(leaf);
+            if (doors[i] === 'locked') {
+                // An iron bar across the leaf: this door will not open for players.
+                const bar = tag(new THREE.Mesh(UNIT_BOX, pieceMaterial(0x2c2f36, ghost)), i);
+                bar.scale.set(ux ? doorW * 1.08 : 0.13, 0.09, uz ? doorW * 1.08 : 0.13);
+                bar.position.set(ux * doorW / 2, doorH * 0.5, uz * doorW / 2);
+                pivot.add(bar);
+            }
             group.add(pivot);
         } else if (kind === 'window') {
             const sill = Math.max(0.16, h * 0.30);
@@ -579,7 +679,7 @@ export function buildWallRun(data, opts = {}) {
             x: cell.x + cell.ux * CELL, z: cell.z + cell.uz * CELL
         }))]
         : [path[0] || { x: 0, z: 0 }];
-    for (let j = 0; j < corners.length; j++) {
+    for (let j = 0; j < corners.length && !sight; j++) {
         const touchesOpening = ['door', 'window', 'gap'].includes(segments[j - 1]) ||
             ['door', 'window', 'gap'].includes(segments[j]);
         if (scruffy && n > 0 && !touchesOpening && buildRand(seed, j, 5) < 0.1) continue;
@@ -705,6 +805,7 @@ export function buildFloorPatch(data, opts = {}) {
     geo.setIndex(arr.idx);
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
     if (ghost) { mat.transparent = true; mat.opacity = 0.45; mat.depthWrite = false; }
+    else applySurfaceDetail(mat, 'floor', style.wallPattern);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = !ghost;
     mesh.userData.ownGeometry = true;  // merged per-patch geometry — safe to dispose
@@ -817,6 +918,7 @@ function buildTiledRoofShell({
         geo.computeVertexNormals();
         const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
         if (ghost) { mat.transparent = true; mat.opacity = 0.45; mat.depthWrite = false; }
+        else applySurfaceDetail(mat, 'roof');
         const shell = new THREE.Mesh(geo, mat);
         shell.castShadow = !ghost;
         shell.receiveShadow = !ghost;
@@ -943,6 +1045,7 @@ export function buildRoofPatch(data, opts = {}) {
     geo.computeVertexNormals();
     const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
     if (ghost) { mat.transparent = true; mat.opacity = 0.45; mat.depthWrite = false; }
+    else applySurfaceDetail(mat, 'roof');
     const shell = new THREE.Mesh(geo, mat);
     shell.castShadow = !ghost;
     shell.receiveShadow = !ghost;

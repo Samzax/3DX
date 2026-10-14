@@ -53,7 +53,7 @@
         </div>
         <div class="workspace-actions">
             <span id="workspace-user" class="workspace-user">GM</span>
-            <button class="workspace-top-button workspace-optional-action" data-workspace-studio="/" data-workspace-studio-title="Character Studio">Studio</button>
+            <button class="workspace-top-button workspace-optional-action" data-workspace-studio="/creator" data-workspace-studio-title="Character Studio">Studio</button>
             <button id="btn-workspace-library" class="workspace-top-button" data-workspace-open="object-menu" data-workspace-title="Library">Library</button>
             <button id="btn-workspace-encounter" class="workspace-top-button" aria-expanded="false">Encounter</button>
             <button id="btn-workspace-help" class="workspace-top-button workspace-help-button" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
@@ -67,6 +67,9 @@
             <span class="workspace-library-icon">+</span>
         </button>
         <div class="workspace-rail-label">Map</div>
+        <button id="btn-tool-select" class="tool-button" data-label="Select" title="Select Tool (S): click a token to inspect it without moving it">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 8-6 2-2 6z"/><path d="M13 13l6 6"/></svg>
+        </button>
         <div id="tool-move-wrapper" style="position: relative;">
             <button id="btn-tool-move" class="tool-button" data-label="Move" title="Move Tool (M · hold for options)">
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/></svg>
@@ -257,6 +260,8 @@
             <button class="brush-mode active" data-bstyle="stone">Stone</button>
             <button class="brush-mode" data-bstyle="wood">Wood</button>
             <button class="brush-mode" data-bstyle="plaster">Plaster</button>
+            <button class="brush-mode" data-bstyle="dungeon" title="Dark underground masonry and flagstones">Dungeon</button>
+            <button class="brush-mode" data-bstyle="sight" title="An invisible wall that only blocks sight and light: draw it along cave walls, cliffs and hedges. Players never see the wall itself.">Sight blocker</button>
         </div>
         <div class="tp-slider">
             <label>Wall height <span id="wall-height-val">2.0</span></label>
@@ -326,6 +331,15 @@
         <div class="tp-row"><input type="text" id="campaign-name-input" maxlength="80" placeholder="Campaign name"></div>
         <div class="tp-label">Description</div>
         <div class="tp-row"><textarea id="campaign-desc-input" rows="3" maxlength="400" placeholder="What is this campaign about?"></textarea></div>
+        <div class="tp-label">Table</div>
+        <div class="tp-row" id="campaign-session">
+            <button class="tp-chip" data-session="open">Open</button>
+            <button class="tp-chip" data-session="closed">Closed</button>
+        </div>
+        <div class="tp-hint" id="campaign-session-hint">Closed holds players at the campaign briefing; opening the table brings everyone waiting into the world together.</div>
+        <div class="tp-label">Recap &mdash; &ldquo;last time&rdquo;</div>
+        <div class="tp-row"><textarea id="campaign-recap-input" rows="5" maxlength="1200" placeholder="What happened last session? Players read this, under the description, before they enter. Leave it empty before session one."></textarea></div>
+        <div class="tp-row"><button id="campaign-recap-save" class="tp-chip">Post recap</button></div>
         <div class="tp-label">Style</div>
         <div class="tp-hint" id="campaign-style-label">Grand campaign (DMG ladder)</div>
         <div class="tp-label">Season</div>
@@ -347,6 +361,29 @@
         <button id="campaign-save" class="tp-send">Save campaign</button>
         <div id="campaign-status"></div>
         <div class="tp-hint">Only listed biomes can be painted. Spawn is where cameras land on first entry, and region campaigns lock the navigation lens to the hex that contains it.</div>
+
+        <div class="tp-section">Sky &amp; weather</div>
+        <div class="tp-hint">Changes at once for the whole table. Natural weather follows the climate of wherever each screen is looking: wet country rains, cold air snows, deserts stay clear.</div>
+        <div id="campaign-sky"></div>
+
+        <div class="tp-section">Vision &amp; light</div>
+        <div id="campaign-vision" class="vision-settings"></div>
+
+        <div class="tp-section">Movement</div>
+        <div id="campaign-movement" class="vision-settings">
+            <label class="vision-toggle"><input type="checkbox" data-movement="terrain">
+                <span>The ground sets what movement costs</span></label>
+            <p class="vision-note">In combat a move is priced along its path: steep ground and wading are difficult
+                terrain (2 ft per ft), cliffs are climbed and deep water swum (2 ft per ft without that speed).
+                Creatures off the ground (flying, on a floor or bridge) pay the plain distance.</p>
+            <label class="vision-toggle"><input type="checkbox" data-movement="snow">
+                <span>Snow is difficult terrain</span></label>
+            <label class="vision-toggle"><input type="checkbox" data-movement="walls">
+                <span>Walls, bars and shut doors stop players</span></label>
+            <p class="vision-note">A player's character only goes where the way is open: through a gap or an open door,
+                straight or round a corner. Locked doors stay shut for players (Alt + double-click a door to lock it).
+                You place tokens freely.</p>
+        </div>
 
         <div class="tp-section">World</div>
         <div class="tp-hint">Seed and shape rebuild the generated world on every screen. Ground you have sculpted or painted is kept. Check the map before you rebuild.</div>
@@ -382,8 +419,20 @@
         <button id="btn-sphere" class="menu-button">Sphere</button>
         <button id="btn-cave" class="menu-button">Cave (prop)</button>
         <button id="btn-arch" class="menu-button">Rock Arch (prop)</button>
+        <div id="prop-menu">
+            <select id="prop-kind" aria-label="Prop"></select>
+            <button id="btn-prop-rot" title="Turn the prop a quarter turn before placing it">Facing S</button>
+            <button id="btn-prop" class="menu-button" title="Furniture and fixtures; torches and braziers give light">Place prop</button>
+        </div>
         <button id="btn-portal-new" class="menu-button" title="Creates a new pocket map (dungeon/room) and places its entry portal">Portal: New Dungeon</button>
         <button id="btn-portal-link" class="menu-button" title="Places a portal to an existing map key">Portal: Link Map</button>
+
+        <div id="dungeon-menu-container">
+            <h2>Dungeons</h2>
+            <div id="dungeon-list">
+                <p style="font-size: 12px; color: #999;">No dungeons yet. Use "Portal: New Dungeon" to create one.</p>
+            </div>
+        </div>
 
         <div id="monster-menu-container">
             <h2>Monsters</h2>

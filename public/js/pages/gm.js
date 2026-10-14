@@ -5,36 +5,54 @@
 import * as THREE from 'three';
 import { Terrain, MATERIALS } from '../shared/terrain.js';
 import { createWorldSettings } from '../shared/worldsettings.js';
+import { createAtmosphere } from '../shared/atmosphere.js';
+import { createSkyPanel, createSkyChip } from '../shared/skypanel.js';
+import { nearestDoor, doorStateOf, normalizeSenses } from '../shared/vision.js';
+import { createVisionFx } from '../shared/visionfx.js';
+import { createVisionChip, createVisionSettings, visionInspectorHTML, wireVisionInspector } from '../shared/visionpanel.js';
+import { buildSheet } from '../shared/rules.js';
 import { createWorldMap } from '../shared/worldmap.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, styleGroundForTerrain, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
+import { GroundCover } from '../shared/groundcover.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, isCameraClick, styleGroundForTerrain, setGroundCut, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { buildObjectFromData, applyMove } from '../shared/models.js';
+import { PROP_KINDS, propLight } from '../shared/props.js';
 import { loadSRD, loadSRDMonsters } from '../shared/srd.js';
 import { loadMonsterModels } from '../shared/monster-models.js';
+import { queueCombatFx, syncMonsterStances, tickMonsterAnimations } from '../shared/monster-anim.js';
+import { createCombatAim, createZoneLayer } from '../shared/aiming.js';
 import {
     monsterAppearanceVariant, monsterAppearanceVariants, monsterChallengeLabel, monsterColor,
     monsterCombatStats, monsterStatBlockHTML, monsterTokenSnapshot
 } from '../shared/monsters.js';
-import { CombatTracker, CombatOverlays, deriveCombatStats, EFFECTS, remainingFeet } from '../shared/combat.js';
+import { AbilityTargeting, CombatTracker, CombatOverlays, attackPayloadOptions, deriveCombatStats, EFFECTS, remainingFeet } from '../shared/combat.js';
 import { combatInteger } from '../shared/combat-safety.js';
 import { tickRigCharacters } from '../shared/charmesh.js';
+import { configureGrounding, tickGrounding } from '../shared/grounding.js';
+import { pathCost, describeCost, normalizeMovement } from '../shared/ground.js';
 import {
     buildWallRun, buildFloorPatch, buildStaircase, buildRoofPatch, disposeBuiltObject,
     wallGesturePath, wallSegmentCount, structureTileCount,
     DEFAULT_LEVEL_HEIGHT, STRUCTURE_EDIT_PICK_LAYER,
     structureLevel, structureTouchesLevel, structureStoreyLevel,
     structureBuildingId, structureBuildingDatum, structureDatumCompatible,
-    newStructureIdentity, isStructureType
+    newStructureIdentity, isStructureType, showSightBlockers
 } from '../shared/structures.js';
 import { TIER_WIDTH, tierRadius, hexCenterAtTier, worldToHexAtTier, hexDistance, hexInField, pathWorldCenter } from '../shared/hexworld.js';
 import { FogMask, FogOverlay, fogHexAt, hexesWithin } from '../shared/fog.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
+import { attachTouchInput, createTouchBar, touchHint } from '../shared/touch.js';
 import { createTabletopWorkspace } from '../shared/workspace.js';
-import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData } from '../shared/object-ui.js';
+import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData, revertUncommittedMove } from '../shared/object-ui.js';
 import { AuthenticatedMapReload } from '../shared/sync-state.js';
 import { readCampaignId } from '../shared/campaigns.js';
+import { setupLoginModal } from '../shared/login.js';
+import { PROP_POSES } from '../shared/passage.js';
+import { createRollLog } from '../shared/rolllog.js';
+import { createRestDesk } from '../shared/rests.js';
+import { createCastDesk } from '../shared/castdesk.js';
 
 // Tabletop screens always enter through the lobby with ?campaign=<id>.
 const campaignId = readCampaignId();
@@ -46,6 +64,7 @@ const escHtml = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&':
 let terrain = null;
 let grass = null;                   // instanced ground-cover grass (shared/grass.js)
 let trees = null;                   // procedural low-poly trees (shared/trees.js)
+let groundCover = null;             // flowers/ferns/reeds/tufts/pebbles (shared/groundcover.js)
 let isSculpting = false;
 let strokeRef = 0;                         // flatten target captured at stroke start
 let lastDab = null;                        // last dab position, for fixed-spacing strokes
@@ -96,6 +115,9 @@ let buildCutawayState = null;               // terrain/plane visibility before b
 const pendingStructureBatches = new Map();  // requestId -> local UX context
 
 let wasRightDrag = null;                   // set in init(); see trackRightDrag
+let cameraPress = false;                   // this left press is a Ctrl+drag camera pan
+let touchInput = null;                     // shared/touch.js: fingers on the map
+let touchBar = null;                       // ...and the buttons that stand in for Enter / Esc / Delete
 
 // --- Fog of war (U4): GM paints reveal/hide on the global province-pitch
 // lattice; players only receive content inside revealed hexes (server-side).
@@ -120,8 +142,10 @@ let selectedObjectData = null;
 let selectedMonsterVariant = null;
 const monsterVariantChoices = new Map();
 let menuButtons = {};
+const propBrush = { kind: 'torch', rot: 0 };   // Add Object > prop: what and which way it faces
 
 let socket;
+let login;
 let workspace = null;
 let objectNameplates = null;
 let selectionReturnContext = null;
@@ -136,17 +160,29 @@ let monsterCatalogState = 'idle';
 let monsterCatalogPromise = null;
 let allCharacters = [];         // GM sees every character (stat-fill fallback)
 let characterInstances = [];    // every placed character token across all maps (Instances tab)
-let pendingFocus = null;        // world position to land on once the next map-state arrives
+let dungeons = [];              // every pocket map + its entry portals (Dungeons list)
+let pendingFocus = null;       // world position to land on once the next map-state arrives
 let combatState = null;
 let combatTracker = null;
 let combatOverlays = null;
 let pendingAttack = null;       // { combatantId, attackIndex } while picking a target
+let combatAim = null;           // the area template a spell or breath is aimed with (shared/aiming.js)
+let zoneLayer = null;           // areas that linger in a fight, drawn on the ground (shared/aiming.js)
 let pendingSpell = null;        // { combatantId, spellIndex } while picking a target
+// Feature abilities (breath weapons, ki moves…) collect one or more targets.
+const abilityTargeting = new AbilityTargeting({
+    getSocket: () => socket,
+    flash: (text) => { if (combatTracker) combatTracker.flash(text); },
+    onChange: () => updateHintBar()
+});
 let dragStartPos = null;        // selected token's world position when the move began
 
 let currentTool = null;
 let currentMoveMode = 'standard';
 let toolMenuButtons = {};
+let rollLog = null;             // table log + roll requests (shared/rolllog.js), created with the socket
+let restDesk = null;            // rest requests + party rests (shared/rests.js)
+let castDesk = null;            // spells players ask to cast outside a fight (shared/castdesk.js)
 let moveSubMenuButtons = {};
 let moveSubMenu;
 let isDraggingHeight = false;
@@ -188,6 +224,10 @@ const BIOMES = {
 // World section state: the shared controls + preview map, and whether the GM
 // has staged world edits that are not applied yet.
 let campaignWorld = null, campaignMap = null;
+let atmosphere = null, skyPanel = null, skyChip = null, skyTickAt = 0; // sky + weather
+// Token vision (shared/visionfx.js): the GM sees everything unless "viewing
+// as" one token, which shows exactly that token's sight on this screen only.
+let visionFx = null, visionChip = null, visionSettings = null, viewAsId = null;
 let campaignWorldDirty = false, campaignWorldSaved = null;
 let currentBiome = 'plains';
 let hexTags = {};                   // "q,r" -> { biome } for the current map
@@ -464,6 +504,24 @@ function onDoubleClick(event) {
             enterMap(obj.userData.portalTarget);
             return;
         }
+        // Doors: double-click opens/closes, Alt + double-click locks/unlocks.
+        if (obj && obj.userData.objectType === 'wall' && socket && !buildActive()) {
+            const data = { ...obj.userData.objectData, position: obj.position };
+            const at = sceneToWorld(objHit.point);
+            const door = nearestDoor(data, at.x, at.z, 0.85);
+            if (door) {
+                const payload = { id: obj.userData.syncId, index: door.index };
+                if (event.altKey) payload.state = doorStateOf(data, door.index) === 'locked' ? null : 'locked';
+                socket.emit('toggle-door', payload);
+                return;
+            }
+        }
+        // Furniture: the selected character (else the nearest) lies down or sits.
+        if (obj && obj.userData.objectType === 'prop' && socket && PROP_POSES[(obj.userData.objectData || {}).kind]) {
+            const token = selectedObject && selectedObject.userData.characterData ? selectedObject.userData.syncId : undefined;
+            socket.emit('use-prop', { id: obj.userData.syncId, tokenId: token });
+            return;
+        }
     }
 
     // Hex layers: double-click a hex to descend.
@@ -478,13 +536,28 @@ function onDoubleClick(event) {
 // --- Socket.IO: GM auto-login + full map/character sync ---
 function initSocket() {
     socket = io();
+    login.attach(socket);
+    rollLog = createRollLog({
+        socket, isGM: () => true,
+        actor: () => (selectedObject && selectedObject.userData.syncId ? objectIdentity(selectedObject, objects).displayName : 'GM')
+    });
+    // Players ask for rests; the GM answers here (shared/rests.js).
+    restDesk = createRestDesk({ socket, isGM: () => true, notify: (text) => rollLog.notice(text) });
+    // Players ask to cast; their template shows faded while they aim it.
+    castDesk = createCastDesk({
+        socket, isGM: () => true, worldGroup, objects: () => objects, terrain: () => terrain,
+        notify: (text) => rollLog.notice(text),
+        onStrike: (summon) => abilityTargeting.begin(summon.casterId, 0, { name: summon.name, maxTargets: 1 }, 'strike', { summonId: summon.id }),
+        onFx: (entry) => queueCombatFx(entry, findObjectMesh)
+    });
 
     combatTracker = new CombatTracker({
         container: document.getElementById('combat-tracker'),
         socket, isGM: true, username: 'GM',
         onPickTarget: (id, index, item, mode) => mode === 'cast'
             ? beginSpellPick(id, index, item)
-            : beginTargetPick(id, index, item),
+            : mode === 'ability' ? beginAbilityPick(id, index, item)
+                : beginTargetPick(id, index, item),
         onFocusCombatant: (id) => {
             const object = findObjectMesh(id);
             if (!object) return;
@@ -502,24 +575,27 @@ function initSocket() {
     if (combatToggle) combatToggle.addEventListener('click', () => socket.emit('combat-start', {}));
 
     socket.on('combat-updated', (combat) => setCombat(combat));
-    socket.on('combat-log', (entry) => { if (combatTracker) combatTracker.appendLog(entry); });
-    socket.on('combat-denied', ({ reason }) => { if (combatTracker) combatTracker.flash(reason || 'Not allowed'); });
+    socket.on('combat-log', (entry) => {
+        if (combatTracker) combatTracker.appendLog(entry);
+        queueCombatFx(entry, findObjectMesh); // model animation + breath effect
+    });
+    socket.on('combat-denied', ({ reason }) => {
+        if (rollLog) rollLog.notice(reason || 'Not allowed');
+        if (combatTracker) combatTracker.flash(reason || 'Not allowed');
+    });
 
     socket.on('connect', () => {
         mapReload.onConnect();
         clearPendingStructureBatches(
             'Connection restored; building state will be reloaded.', true);
         console.log('Conectado ao servidor com ID:', socket.id);
-        // Auto-login as GM into this screen's campaign.
-        socket.emit('login', { username: 'GM', campaignId, screen: 'gm' });
-        sessionStorage.setItem('vtt_username', 'GM');
+        // Enter this screen's campaign as its GM (the server refuses anyone else).
+        socket.emit('login', login.payload({ campaignId, screen: 'gm' }));
     });
 
     socket.on('login-success', (userData) => {
         mapReload.onAuthenticated();
         console.log('GM logged in:', userData);
-        const loginOverlay = document.getElementById('login-overlay');
-        if (loginOverlay) loginOverlay.classList.add('hidden');
         // Rejoin only after application authentication. A delayed state from
         // an older/legacy pre-login path must not satisfy reconnect recovery.
         if (currentMapKey !== 'world') socket.emit('join-map', { key: currentMapKey });
@@ -535,7 +611,11 @@ function initSocket() {
         const settings = campaign.settings || {};
         // Seed + world shape drive local generation — set before the first
         // reset, and regenerate live ground only when they actually changed.
-        if (terrain && terrain.applyWorldSettings(settings) && terrainIsUnified) terrain.regenerate();
+        if (terrain && terrain.applyWorldSettings(settings) && terrainIsUnified) {
+            terrain.regenerate();
+            if (fogOverlay) fogOverlay.setAltitude(terrain.fogAltitude);
+        }
+        if (atmosphere) { atmosphere.setSeed(settings.seed); atmosphere.setSky(settings.sky); }
         const paletteChanged = previousPalette &&
             JSON.stringify(previousPalette) !== JSON.stringify(settings.biomes);
         renderBiomeSwatches();
@@ -551,10 +631,20 @@ function initSocket() {
         }
         applyCampaignContext(campaign);
         pendingSpawnLanding = true;
-        if (currentMapKey === 'world' && campaign.startKey) currentMapKey = campaign.startKey;
+        if (currentMapKey === 'world' && campaign.startKey && campaign.startKey !== 'world') {
+            // Region campaigns start below the root without going through
+            // enterMap: move the hex field (grid + pick math) to the start layer.
+            currentMapKey = campaign.startKey;
+            layerCenter = isPocket(currentMapKey) ? { x: 0, z: 0 } : pathWorldCenter(currentMapKey);
+            showLayerGrid(currentMapKey);
+            updateBreadcrumb();
+        }
         if (workspace) workspace.setCampaign(
             { id: campaign.id, name: campaign.name, owner: campaign.owner },
             { canManage: true, onSettings: () => workspace.showPanel('campaign-panel') });
+        if (rollLog) rollLog.refresh();
+        if (restDesk) restDesk.refresh();
+        if (castDesk) castDesk.refresh();
     });
 
     socket.on('campaign-updated', (campaign) => {
@@ -584,6 +674,13 @@ function initSocket() {
         renderInstanceList();
     });
 
+    // Dungeons list: every pocket map with the portals leading into it. Pushed
+    // by the server whenever a pocket or portal is created or deleted.
+    socket.on('dungeon-list', (data) => {
+        dungeons = (data && Array.isArray(data.dungeons)) ? data.dungeons : [];
+        renderDungeonList();
+    });
+
     // Homebrew races/classes feed character rules; custom monsters join the
     // GM's lazy SRD creature library.
     socket.on('load-homebrew', (hb) => {
@@ -597,6 +694,7 @@ function initSocket() {
     socket.on('map-state', (data) => {
         // Only a matching post-login state may satisfy reconnect recovery.
         if (!mapReload.acceptsMapState(data.key, currentMapKey)) return;
+        socket.emit('get-dungeons'); // Dungeons list: fresh on every map entry
         // Campaign stamp: adopt settings/name even if campaign-joined was
         // missed (late loads, room re-joins). Refill only on real changes so
         // the settings panel never clobbers mid-edit.
@@ -607,7 +705,8 @@ function initSocket() {
                     JSON.stringify(data.campaign.settings || null);
             if (!unchanged) {
                 const first = !campaignContext;
-                applyCampaignContext({ startKey: data.key, ...data.campaign });
+                // The stamp has no hall fields (description/recap/table state): keep ours.
+                applyCampaignContext({ ...(campaignContext || {}), startKey: data.key, ...data.campaign });
                 if (first) pendingSpawnLanding = true;
             }
             if (workspace) workspace.setCampaign(
@@ -673,6 +772,7 @@ function initSocket() {
                 terrain.group.visible = true;
                 styleGroundForTerrain(plane, true);
                 syncWaterControls();
+                if (fogOverlay) fogOverlay.setAltitude(terrain.fogAltitude);
                 // The Fog tool may have been selected before this state landed.
                 if (fogOverlay) fogOverlay.setVisible(fogActive());
                 if (data.worldCenter) {
@@ -735,6 +835,8 @@ function initSocket() {
         // expose terrain or vegetation until another build-panel action.
         applyBuildLevelVisibility();
         if (pendingFocus) { focusCameraOn(pendingFocus); pendingFocus = null; }
+        sentSenses.clear();
+        syncCharacterSenses();
         mapReload.onMapStateApplied();
     });
 
@@ -802,6 +904,7 @@ function initSocket() {
     socket.on('object-added', (data) => {
         if (!objects.find(o => o.userData.syncId === data.id)) {
             createObjectFromData(data.id, data);
+            syncCharacterSenses();
         }
         // Refresh the tracker's "+ add to combat" candidates.
         if (combatTracker && combatState) combatTracker.setState(combatState);
@@ -821,7 +924,8 @@ function initSocket() {
         if (!object || !patch) return;
         const type = object.userData.objectType;
         const geometryChanged = (type === 'wall' &&
-            Object.prototype.hasOwnProperty.call(patch, 'segments')) ||
+            (Object.prototype.hasOwnProperty.call(patch, 'segments') ||
+                Object.prototype.hasOwnProperty.call(patch, 'doors'))) ||
             ((type === 'floor' || type === 'roof') &&
                 Object.prototype.hasOwnProperty.call(patch, 'tiles'));
         const updated = geometryChanged
@@ -897,6 +1001,7 @@ function init() {
             workspace?.setMode(currentModeLabel());
         },
         shortcuts: [
+            { key: 'S', label: 'Select: click an object to inspect it without moving it' },
             { key: 'M', label: 'Move selected objects' },
             { key: 'R', label: 'Measure distance' },
             { key: 'L', label: 'Open the object and character library' },
@@ -919,10 +1024,38 @@ function init() {
     // Tactical terrain (heightmap + material paint + water). Hidden off-tactical.
     // The brush cursor is drawn by the terrain shader (terrain.setBrush).
     terrain = new Terrain();
+    // Figures settle onto the ground they stand on wherever the terrain is shown.
+    configureGrounding({
+        probe: (x, z) => (terrain.group.visible ? terrain.sampleHeight(x, z) : null),
+        focus: () => ({ x: controls.target.x + terrain.worldOrigin.x, z: controls.target.z + terrain.worldOrigin.z })
+    });
     terrain.group.visible = false;
     scene.add(terrain.group);
     grass = new Grass(terrain, scene);   // ground-cover, shown only at tactical zoom
     trees = new Trees(terrain, scene);   // biome-scattered low-poly trees
+    groundCover = new GroundCover(terrain, scene); // close-up biome detail
+    atmosphere = createAtmosphere({ scene, camera, renderer, dirLight }); // day/night + weather
+    skyChip = createSkyChip();
+    visionFx = createVisionFx({
+        renderer, scene, camera,
+        source: {
+            objects: () => objects,
+            origin: () => terrain.worldOrigin,
+            // Viewing as a token previews its sight even before the rule is switched on.
+            settings: () => ({ ...((campaignContext && campaignContext.settings && campaignContext.settings.vision) || {}), enabled: true, memory: false }),
+            viewer: () => (viewAsId ? (objects.find(o => o.userData.syncId === viewAsId) || null) : null),
+            sky: () => ({
+                hour: atmosphere.info.hour,
+                weather: terrainIsUnified ? atmosphere.info.weather : null,
+                pocket: !terrainIsUnified
+            }),
+            keepVisible: () => false,
+            memoryKey: () => null,
+            cameraDistance: () => camera.position.distanceTo(controls.target)
+        }
+    });
+    visionChip = createVisionChip({ onStop: () => setViewAs(null) });
+    showSightBlockers(true);   // GM-only: players never see a sight blocker's panels
 
     // Ramp gesture preview: a line from the anchor to the cursor while dragging.
     rampPreview = new THREE.Line(
@@ -953,6 +1086,12 @@ function init() {
         findMesh: findObjectMesh,
         feetToWorld: ft => (ft / FEET_PER_GRID_CELL) * GRID_CELL_SIZE
     });
+    zoneLayer = createZoneLayer({ worldGroup, objects: () => objects, terrain: () => terrain });
+    combatAim = createCombatAim({
+        worldGroup, objects: () => objects, terrain: () => terrain, getSocket: () => socket,
+        flash: (text) => { if (combatTracker) combatTracker.flash(text); },
+        onChange: () => updateHintBar()
+    });
 
     // Fog-of-war preview: a light version of the players' fog sheet, shown
     // while the Fog tool is active so the GM sees what is hidden from whom.
@@ -970,6 +1109,15 @@ function init() {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     renderer.domElement.addEventListener('dblclick', onDoubleClick); // double-click a hex to descend
+    touchBar = createTouchBar({ after: updateHintBar });
+    touchInput = attachTouchInput({
+        surface: document.getElementById('scene-container'), camera, controls,
+        handlers: {
+            tap: touchTap, claim: touchClaim, mode: updateHintBar,
+            hold: (ev) => { onContextMenu(ev); updateHintBar(); },
+            doubleTap: (ev) => { onDoubleClick(ev); updateHintBar(); }
+        }
+    });
 
     // --- Menu Button Listeners (Right) ---
     menuButtons.token = document.getElementById('btn-token');
@@ -984,6 +1132,16 @@ function init() {
     menuButtons.sphere.addEventListener('click', () => setSelectedObjectType('sphere'));
     menuButtons.cave.addEventListener('click', () => setSelectedObjectType('cave'));
     menuButtons.arch.addEventListener('click', () => setSelectedObjectType('arch'));
+    menuButtons.prop = document.getElementById('btn-prop');
+    const propSelect = document.getElementById('prop-kind');
+    const propRotButton = document.getElementById('btn-prop-rot');
+    for (const [kind, def] of Object.entries(PROP_KINDS)) propSelect.add(new Option(def.label, kind));
+    propSelect.addEventListener('change', () => { propBrush.kind = propSelect.value; });
+    propRotButton.addEventListener('click', () => {
+        propBrush.rot = (propBrush.rot + 1) % 4;
+        propRotButton.textContent = `Facing ${'SWNE'[propBrush.rot]}`;
+    });
+    menuButtons.prop.addEventListener('click', () => setSelectedObjectType('prop'));
     menuButtons['portal-new'].addEventListener('click', () => setSelectedObjectType('portal-new'));
     menuButtons['portal-link'].addEventListener('click', () => setSelectedObjectType('portal-link'));
     document.getElementById('monster-search')?.addEventListener('focus', () => { void ensureMonsterLibraryLoaded(); });
@@ -999,6 +1157,8 @@ function init() {
 
     // --- Tool Menu Listeners (Left) ---
     toolMenuButtons.library = document.getElementById('btn-tool-library');
+    toolMenuButtons.select = document.getElementById('btn-tool-select');
+    toolMenuButtons.select.addEventListener('click', () => setTool('select'));
     toolMenuButtons.move = document.getElementById('btn-tool-move');
     toolMenuButtons.ruler = document.getElementById('btn-tool-ruler');
     const openLibrary = () => {
@@ -1205,42 +1365,101 @@ function init() {
 
     startRenderLoop({
         renderer, scene, camera, controls,
+        render: () => visionFx.render(),
         onTick: () => {
             updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
             if (combatOverlays) combatOverlays.tick(); // rings/badges track their tokens
+            if (combatAim) combatAim.tick();           // the aimed template breathes
+            if (zoneLayer) zoneLayer.tick();           // lingering areas pulse and follow their caster
+            if (castDesk) castDesk.tick();             // and so do the players' waiting ones
             tickRigCharacters();                                           // character idle/walk clips
+            tickMonsterAnimations();                                       // monster rigs, combat fx, breath
+            tickGrounding(worldGroup.children);                            // feet on the slope (after the clips)
             if (!terrain) return;
             terrain.tick(performance.now() / 1000);                       // water animation
             if (terrain.group.visible) updateTerrainLOD();                 // detailed chunks vs summary
+            tickAtmosphere();                                              // sky, light, weather
+            visionFx.update();                                             // "view as token" preview
         }
     });
     // Debug handle for console/tooling inspection (visual bisection etc).
     // forceRender draws one frame even while the tab is hidden (rAF paused).
     window.__dbg = {
-        terrain, scene, camera, controls, plane, grid, renderer, worldGroup, fogMask,
-        forceRender: () => { updateTerrainLOD(); renderer.render(scene, camera); }
+        terrain, scene, camera, controls, plane, grid, renderer, worldGroup, fogMask, atmosphere, visionFx,
+        forceRender: () => { updateTerrainLOD(); visionFx.update(); visionFx.render(); },
+        enterMap, getObjects: () => objects, selectObject
     };
-    initSocket();
-    window.__dbg.socket = socket; // headless testing: emit/inspect sync events
+    // The socket opens once there is a session (stored, or typed into the modal).
+    login = setupLoginModal(() => {
+        initSocket();
+        window.__dbg.socket = socket; // headless testing: emit/inspect sync events
+    });
+}
+
+// Sky + weather (shared/atmosphere.js): runs after the LOD pass set the fog
+// range; the readout chip and GM panel refresh twice a second.
+function tickAtmosphere() {
+    if (!atmosphere) return;
+    atmosphere.update({
+        target: controls.target, dist: camera.position.distanceTo(controls.target),
+        terrain, outdoors: terrainIsUnified
+    });
+    const now = performance.now();
+    if (now - skyTickAt < 500) return;
+    skyTickAt = now;
+    if (skyChip) skyChip(atmosphere.info.label);
+    if (skyPanel) skyPanel.tick(atmosphere.info.label);
+    tickVisionChip();
+}
+
+// --- Token vision: GM "view as" + sheet senses ---
+function setViewAs(id) {
+    viewAsId = id || null;
+    if (visionFx) visionFx.refresh();
+    if (selectedObject) renderSelectionInspector({ open: false });
+}
+
+function tickVisionChip() {
+    if (!visionChip) return;
+    const viewer = viewAsId && objects.find(o => o.userData.syncId === viewAsId);
+    if (viewAsId && !viewer) viewAsId = null;       // the token left the map
+    if (!viewer) { visionChip.set(null); return; }
+    const info = visionFx.info || {};
+    visionChip.set({
+        name: `Viewing as ${objectIdentity(viewer, objects).displayName}`,
+        senses: info.senses || {}, sightFeet: info.sightFeet, canStop: true
+    });
+}
+
+// A character token sees with its sheet's senses. Its player's screen keeps
+// them current; the GM fills in tokens that have none yet (player away).
+const sentSenses = new Set();
+function syncCharacterSenses() {
+    if (!socket || !SRD) return;
+    for (const object of objects) {
+        const char = object.userData.characterData;
+        const id = object.userData.syncId;
+        if (!char || !Array.isArray(char.classes) || (object.userData.objectData || {}).senses || sentSenses.has(id)) continue;
+        sentSenses.add(id);
+        let senses = null;
+        try { senses = normalizeSenses(buildSheet(char, SRD).senses); } catch (_) { continue; }
+        if (Object.keys(senses).length) socket.emit('set-vision', { id, senses });
+    }
 }
 
 function onPointerDown(event) {
     // The left button belongs to tools; right/middle belong to the camera (OrbitControls).
     if (event.button !== 0) return;
+    cameraPress = isCameraClick(event);   // Ctrl+left pans the camera
+    if (cameraPress) return;
     // Socket.IO buffers emits while disconnected. Do not let an interaction
     // started before the authenticated reload queue a stale authoring intent.
     if (!socket?.connected || !mapReload.authenticated) return;
 
-    if (isDraggingHeight) {
-        isDraggingHeight = false;
-        if (selectedObject?.userData.syncId && socket) {
-            const position = { x: selectedObject.position.x, y: selectedObject.position.y, z: selectedObject.position.z };
-            updateObjectPositionData(selectedObject);
-            socket.emit('move-object', { id: selectedObject.userData.syncId, position });
-        }
-        deselectObject();
-        return;
-    }
+    // Combat: an aimed area is released where the template lies.
+    if (combatAim && combatAim.active) { combatAim.commit(); return; }
+
+    if (isDraggingHeight) { finishHeightDrag(); return; }
 
     // Terrain tool on a hex layer = biome painting (Alt+click clears the tag).
     if (currentTool === 'terrain' && isHexLayer()) {
@@ -1402,7 +1621,10 @@ function onPointerDown(event) {
     }
 
     castFromPointer(event, { renderer, camera, raycaster, mouse });
-    const allObjects = [...(buildCutawayState ? [] : [plane]), ...objects.filter(o => o.visible)];
+    // An object being carried rides under the cursor: it must never catch its
+    // own drop click (that used to read as "deselect" and put it back).
+    const carrying = currentTool === 'move' && currentMoveMode !== 'y-only' && !isDraggingHeight ? selectedObject : null;
+    const allObjects = [...(buildCutawayState ? [] : [plane]), ...objects.filter(o => o.visible && o !== carrying)];
     const intersects = raycaster.intersectObjects(allObjects, true);
     if (intersects.length === 0) return;
 
@@ -1413,13 +1635,20 @@ function onPointerDown(event) {
     }
     const clickedObject = objects.find(obj => obj === topLevelObject);
 
+    // Combat: an ability collecting targets takes every click until it fires.
+    if (abilityTargeting.active) {
+        const targetId = clickedObject && clickedObject.userData.syncId;
+        abilityTargeting.click(targetId && combatState && combatState.combatants[targetId] ? targetId : null);
+        return;
+    }
     // Combat: with an attack pending, this click picks the target instead.
     if (pendingAttack) {
         const targetId = clickedObject && clickedObject.userData.syncId;
         if (targetId && combatState && combatState.combatants[targetId] && socket) {
             socket.emit('combat-action', {
                 combatantId: pendingAttack.combatantId, kind: 'attack',
-                targetId, attackIndex: pendingAttack.attackIndex
+                targetId, attackIndex: pendingAttack.attackIndex,
+                ...attackPayloadOptions(combatState.combatants[pendingAttack.combatantId])
             });
         } else if (combatTracker) {
             combatTracker.flash('Attack cancelled — that was not a combatant');
@@ -1448,9 +1677,14 @@ function onPointerDown(event) {
     // move tool can still grab one when nothing else is selected (to reposition
     // a whole run/patch or Del-delete it); the build tool's erase removes them.
     const clickedType = clickedObject && clickedObject.userData.objectType;
-    const buildAsGround = isStructureType(clickedType) &&
+    const clickedCreature = !!clickedObject && (!!clickedObject.userData.characterData || clickedType === 'token');
+    // A carried creature lands on furniture and dressing too (a cot, a rug of
+    // bones): only another creature is something to pick instead.
+    const buildAsGround = (isStructureType(clickedType) &&
         (currentTool === 'add' || currentTool === 'ruler' ||
-         (currentTool === 'move' && selectedObject && selectedObject !== clickedObject));
+         (currentTool === 'move' && selectedObject && selectedObject !== clickedObject))) ||
+        (!!carrying && !!clickedObject && clickedType === 'prop' &&
+         (!!carrying.userData.characterData || carrying.userData.objectType === 'token') && !clickedCreature);
 
     if (clickedObject && !buildAsGround) {
         if (currentTool === 'move' && currentMoveMode === 'y-only') {
@@ -1471,26 +1705,7 @@ function onPointerDown(event) {
 
         switch (currentTool) {
             case 'move':
-                if (selectedObject) {
-                    const docId = selectedObject.userData.syncId;
-                    if (docId) {
-                        if (support) selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0);
-                        const finalPosition = snapToCurrentGrid(selectedObject.position);
-                        selectedObject.position.x = finalPosition.x;
-                        selectedObject.position.z = finalPosition.z;
-                        updateObjectPositionData(selectedObject);
-                        socket.emit('move-object', {
-                            id: docId,
-                            position: {
-                                x: finalPosition.x,
-                                y: selectedObject.position.y, // keep current height
-                                z: finalPosition.z
-                            }
-                        });
-                    }
-                    focusCameraOn(selectedObject.position);
-                    deselectObject();
-                }
+                dropCarried(support);
                 break;
             case 'add':
                 if (selectedObjectType) {
@@ -1509,8 +1724,50 @@ function onPointerDown(event) {
     }
 }
 
+// The height drag ends: the lifted object stays where it is.
+function finishHeightDrag() {
+    isDraggingHeight = false;
+    if (selectedObject?.userData.syncId && socket) {
+        const position = { x: selectedObject.position.x, y: selectedObject.position.y, z: selectedObject.position.z };
+        updateObjectPositionData(selectedObject);
+        socket.emit('move-object', { id: selectedObject.userData.syncId, position });
+    }
+    deselectObject();
+}
+
+// The move tool lets go of the object it carries, where it stands now.
+// `support` is the surface under the click that dropped it, if there was one.
+function dropCarried(support = null) {
+    if (!selectedObject) return;
+    const docId = selectedObject.userData.syncId;
+    if (docId) {
+        if (support) selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0);
+        const finalPosition = snapToCurrentGrid(selectedObject.position);
+        selectedObject.position.x = finalPosition.x;
+        selectedObject.position.z = finalPosition.z;
+        updateObjectPositionData(selectedObject);
+        socket.emit('move-object', {
+            id: docId,
+            position: {
+                x: finalPosition.x,
+                y: selectedObject.position.y, // keep current height
+                z: finalPosition.z
+            }
+        });
+    }
+    focusCameraOn(selectedObject.position);
+    deselectObject();
+}
+
 function onPointerMove(event) {
     ruler.trackMouse(event);
+
+    // Combat: the area template follows the cursor over the ground.
+    if (combatAim && combatAim.active) {
+        const spot = pickSupportSurface(event);
+        if (spot) combatAim.move(spot.point);
+        return;
+    }
 
     // Fog tool: keep painting along the drag.
     if (fogStroke && fogActive()) {
@@ -1580,6 +1837,7 @@ function onPointerMove(event) {
 
 function onPointerUp(event) {
     if (event.button !== 0) return;
+    if (cameraPress) { cameraPress = false; return; }
 
     // Fog stroke ends with the drag.
     if (fogStroke) { fogStroke = null; return; }
@@ -1773,6 +2031,7 @@ function onKeyDown(event) {
     // excluded above, and modified browser/OS shortcuts pass through untouched.
     if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.repeat) {
         const key = event.key.toLowerCase();
+        if (key === 's') { event.preventDefault(); setTool('select'); return; }
         if (key === 'm') { event.preventDefault(); setMoveMode('standard'); return; }
         if (key === 'r') { event.preventDefault(); setRulerMode(ruler.mode); return; }
         if (key === 'l') {
@@ -1814,8 +2073,16 @@ function onKeyDown(event) {
         commitRiver();
         return;
     }
+    if (event.key === "Enter" && abilityTargeting.active) {
+        abilityTargeting.confirm();
+        return;
+    }
     if (event.key === "Escape") {
-        if (pendingAttack) {
+        if (combatAim && combatAim.cancel()) {
+            // handled: the template is gone
+        } else if (abilityTargeting.cancel()) {
+            // handled: the ability pick is gone
+        } else if (pendingAttack) {
             pendingAttack = null;
             if (combatTracker) combatTracker.flash('Attack cancelled');
             updateHintBar();
@@ -1906,6 +2173,13 @@ function addObject(position, supportY = null) {
             halfHeight = 0;
             dataToSave = { type: 'arch' };
             break;
+        case 'prop': {
+            halfHeight = 0;
+            dataToSave = { type: 'prop', kind: propBrush.kind, rot: propBrush.rot };
+            const light = propLight(propBrush.kind);
+            if (light) dataToSave.light = light;
+            break;
+        }
         case 'portal-new': {
             // Create a pocket dungeon; its entry portal lands where the GM clicked
             // once the server replies with the new map key ('pocket-created').
@@ -1979,7 +2253,7 @@ function createObjectFromData(id, data) {
 const INSPECTOR_CONDITIONS = ['prone', 'poisoned', 'restrained', 'stunned', 'blinded', 'frightened', 'grappled', 'invisible', 'down'];
 
 function currentModeLabel() {
-    return ({ add: 'Place', move: 'Move', ruler: 'Measure', terrain: 'Terrain', build: 'Build', fog: 'Fog', view: 'Direct' })[currentTool] || 'Explore';
+    return ({ add: 'Place', select: 'Select', move: 'Move', ruler: 'Measure', terrain: 'Terrain', build: 'Build', fog: 'Fog', view: 'Direct' })[currentTool] || 'Explore';
 }
 
 function selectedTypeLabel(type) {
@@ -2092,6 +2366,7 @@ function renderSelectionInspector({ open = true } = {}) {
         ${statsHTML}
         ${monsterStatBlockHTML(monster)}
         ${detailsHTML}
+        ${isStructureType(type) ? '' : visionInspectorHTML({ ...data, type }, { viewing: viewAsId === id })}
         <div class="selection-section">
             <div class="selection-section-title"><span>Position</span><span>World coordinates</span></div>
             <form id="selection-position-form" class="selection-form">
@@ -2114,6 +2389,11 @@ function renderSelectionInspector({ open = true } = {}) {
         </div>
         ${combatHTML}`;
 
+    // Stat-block abilities and saves roll at the table (shared/rolllog.js).
+    content.querySelectorAll('[data-roll]').forEach(el => el.addEventListener('click', () => {
+        if (rollLog) rollLog.roll({ actor: identity.displayName, label: el.dataset.roll, d20: { bonus: Number(el.dataset.rollBonus) || 0 } });
+    }));
+
     content.querySelector('#selection-details-form')?.addEventListener('submit', event => {
         event.preventDefault();
         if (!socket || selectedObject !== object) return;
@@ -2121,6 +2401,11 @@ function renderSelectionInspector({ open = true } = {}) {
         const patch = { name: String(form.get('name') || '').trim() };
         if (form.has('color')) patch.color = form.get('color');
         socket.emit('update-object', { id, patch });
+    });
+
+    wireVisionInspector(content, { ...data, type }, {
+        emit: (patch) => { if (socket && selectedObject === object) socket.emit('set-vision', { id, ...patch }); },
+        onViewAs: () => setViewAs(viewAsId === id ? null : id)
     });
 
     content.querySelector('#selection-position-form')?.addEventListener('submit', event => {
@@ -2206,7 +2491,10 @@ function selectObject(object, { openInspector = true } = {}) {
 }
 
 function deselectObject({ restoreContext = true, preserveReturn = false } = {}) {
-    if (selectedObject) setObjectSelected(selectedObject, false);
+    if (selectedObject) {
+        revertUncommittedMove(selectedObject, dragStartPos);
+        setObjectSelected(selectedObject, false);
+    }
     selectedObject = null;
     dragStartPos = null;
     hideMoveTooltip();
@@ -2230,6 +2518,8 @@ function setCombat(combat) {
     combatState = combat;
     if (combatTracker) combatTracker.setState(combat);
     if (combatOverlays) combatOverlays.sync(combat);
+    if (zoneLayer) zoneLayer.sync(combat && combat.zones);
+    syncMonsterStances(combat); // 'flying' combatants take to the air
     answerStatsPending();
     const toggle = document.getElementById('btn-combat-toggle');
     if (toggle) toggle.classList.toggle('hidden', !!combat);
@@ -2242,7 +2532,8 @@ function setCombat(combat) {
         workspace.setEncounterStatus(combat ? (active ? `Round ${combat.round} · ${activeName}` : gathering || `Round ${combat.round || '—'}`) : 'Ready to start', !!combat);
         if (combat && !hadCombat) workspace.setDockExpanded(true);
     }
-    if (!combat) { pendingAttack = null; pendingSpell = null; }
+    if (!combat) { pendingAttack = null; pendingSpell = null; abilityTargeting.cancel(true); }
+    if (combatAim) { if (!combat) combatAim.cancel(true); else combatAim.refresh(); }
     if (selectedObject) renderSelectionInspector({ open: false });
     updateHintBar();
 }
@@ -2263,7 +2554,18 @@ function answerStatsPending() {
     }
 }
 
+function beginAbilityPick(combatantId, abilityIndex, ability) {
+    pendingAttack = null;
+    pendingSpell = null;
+    abilityTargeting.cancel(true);
+    // An area with a size is aimed on the map; the rest pick creatures.
+    if (combatAim && combatAim.begin(combatantId, abilityIndex, ability, 'ability', attackPayloadOptions(combatState.combatants[combatantId]))) return;
+    abilityTargeting.begin(combatantId, abilityIndex, ability);
+}
+
 function beginTargetPick(combatantId, attackIndex, attack) {
+    abilityTargeting.cancel(true);
+    if (combatAim) combatAim.cancel(true);
     pendingSpell = null;
     pendingAttack = { combatantId, attackIndex };
     if (combatTracker) combatTracker.flash(`Pick a target for ${attack.name}: click a token (Esc cancels)`);
@@ -2271,7 +2573,13 @@ function beginTargetPick(combatantId, attackIndex, attack) {
 }
 
 function beginSpellPick(combatantId, spellIndex, spell) {
+    abilityTargeting.cancel(true);
     pendingAttack = null;
+    pendingSpell = null;
+    // A spell with an area is aimed on the map; the rest pick a creature.
+    if (combatAim && combatAim.begin(combatantId, spellIndex, spell, 'cast')) return;
+    // No roll (Bless, Invisibility): pick who gets it, Enter = the caster.
+    if (spell && !spell.attackType && !spell.saveAbility) { abilityTargeting.begin(combatantId, spellIndex, spell, 'cast'); return; }
     pendingSpell = { combatantId, spellIndex };
     if (combatTracker) combatTracker.flash(`Pick a target for ${spell.name}: click a token (Esc cancels)`);
     updateHintBar();
@@ -2285,10 +2593,19 @@ function updateMoveCostTooltip(event) {
     if (!c || combatState.activeId !== c.id) return;
     const el = document.getElementById('ruler-tooltip');
     if (!el) return;
-    const feet = Math.hypot(selectedObject.position.x - dragStartPos.x,
+    const flat = Math.hypot(selectedObject.position.x - dragStartPos.x,
         selectedObject.position.z - dragStartPos.z) / GRID_CELL_SIZE * FEET_PER_GRID_CELL;
+    // What the server will charge: the ground under the line (ground.js).
+    const rules = normalizeMovement(campaignContext && campaignContext.settings && campaignContext.settings.movement);
+    const soles = selectedObject.userData.halfHeight || 0;
+    const priced = rules.terrain && terrain && flat <= 600 ? pathCost(
+        { x: dragStartPos.x, y: dragStartPos.y - soles, z: dragStartPos.z },
+        { x: selectedObject.position.x, y: selectedObject.position.y - soles, z: selectedObject.position.z },
+        terrain.costGround(), { modes: c.moveModes || [], snow: rules.snow }) : null;
+    const feet = priced ? priced.cost : flat;
+    const over = priced && feet > flat + 0.5 ? describeCost(priced) : '';
     const left = c.speedFeet + c.dashFeet - c.movementUsedFeet;
-    el.textContent = `${Math.round(feet)} ft — ${Math.max(0, Math.round(left - feet))} ft left`;
+    el.textContent = `${Math.round(flat)} ft${over ? ` (costs ${Math.round(feet)}: ${over})` : ''} — ${Math.max(0, Math.round(left - feet))} ft left`;
     el.style.color = feet > left + 0.5 ? '#ff6b6b' : '';
     el.style.display = 'block';
     el.style.left = (event.clientX + 14) + 'px';
@@ -2516,7 +2833,7 @@ function loadCharactersToMenu(characters) {
     listContainer.innerHTML = '';
 
     if (!Array.isArray(characters) || characters.length === 0) {
-        listContainer.innerHTML = '<div class="workspace-empty">No characters yet.<br><button class="workspace-primary" data-workspace-studio="/">Create a character</button></div>';
+        listContainer.innerHTML = '<div class="workspace-empty">No characters yet.<br><button class="workspace-primary" data-workspace-studio="/creator">Create a character</button></div>';
         return;
     }
 
@@ -2544,7 +2861,7 @@ function loadCharactersToMenu(characters) {
 
     const studio = document.createElement('button');
     studio.className = 'workspace-secondary';
-    studio.dataset.workspaceStudio = '/';
+    studio.dataset.workspaceStudio = '/creator';
     studio.textContent = 'Create or edit characters';
     listContainer.appendChild(studio);
 }
@@ -2644,6 +2961,61 @@ function renderInstanceList() {
 
         row.append(main, remove);
         list.appendChild(row);
+    });
+}
+
+// Dungeons list: one row per pocket map (click = enter it), then one row per
+// portal leading into it (click = jump to that portal, on whatever map it sits).
+function renderDungeonList() {
+    const list = document.getElementById('dungeon-list');
+    if (!list) return;
+    list.innerHTML = '';
+    if (!dungeons.length) {
+        list.innerHTML = '<p style="font-size: 12px; color: #999;">No dungeons yet. Use "Portal: New Dungeon" to create one.</p>';
+        return;
+    }
+    const mkRow = (title, name, loc, by, onClick) => {
+        const row = document.createElement('div');
+        row.className = 'instance-row';
+        const main = document.createElement('button');
+        main.className = 'instance-row-main';
+        main.type = 'button';
+        main.title = title;
+        const nameEl = document.createElement('div');
+        nameEl.className = 'inst-name';
+        nameEl.textContent = name;
+        const locEl = document.createElement('div');
+        locEl.className = 'inst-loc';
+        locEl.textContent = loc;
+        main.append(nameEl, locEl);
+        if (by) {
+            const byEl = document.createElement('div');
+            byEl.className = 'inst-by';
+            byEl.textContent = by;
+            main.appendChild(byEl);
+        }
+        main.addEventListener('click', onClick);
+        row.appendChild(main);
+        list.appendChild(row);
+        return row;
+    };
+    dungeons.forEach(d => {
+        const here = d.key === currentMapKey;
+        mkRow('Click: enter this dungeon', `${d.name}${here ? ' · you are here' : ''}`,
+            `${d.width}×${d.height} · ${d.key}`,
+            d.portals.length ? '' : 'No portal leads here',
+            () => {
+                if (here) return;
+                if (selectedObject) deselectObject({ restoreContext: false });
+                enterMap(d.key);
+            });
+        d.portals.forEach(p => {
+            const pos = p.position || {};
+            const row = mkRow('Click: jump to this portal', `↳ ${p.name || 'Portal'}`,
+                `${p.mapName || p.mapKey} (${Math.round(pos.x || 0)}, ${Math.round(pos.z || 0)})`,
+                '', () => gotoInstance(p));
+            row.style.marginLeft = '12px';
+        });
     });
 }
 
@@ -3471,6 +3843,7 @@ function applyBuildLevelVisibility() {
         plane.visible = false;
         if (grass) grass.hide();
         if (trees) trees.hide();
+        if (groundCover) groundCover.hide();
     } else if (!cutAwayTerrain) {
         restoreBuildCutaway();
     }
@@ -3663,6 +4036,10 @@ function fillCampaignPanel() {
     };
     setVal('campaign-name-input', campaignContext.name || '');
     setVal('campaign-desc-input', campaignContext.description || '');
+    setVal('campaign-recap-input', campaignContext.recap || '');
+    const tableClosed = campaignContext.session === 'closed';
+    document.querySelectorAll('#campaign-session [data-session]').forEach(b =>
+        b.classList.toggle('active', (b.dataset.session === 'closed') === tableClosed));
     const spawn = settings.spawn || { x: 0, z: 0 };
     setVal('campaign-spawn-x', String(spawn.x));
     setVal('campaign-spawn-z', String(spawn.z));
@@ -3681,6 +4058,12 @@ function fillCampaignPanel() {
     }
     document.querySelectorAll('#campaign-seasons [data-season]').forEach(b =>
         b.classList.toggle('active', b.dataset.season === (settings.season || 'summer')));
+    if (skyPanel) skyPanel.set(settings.sky);
+    if (visionSettings) visionSettings.set(settings.vision);
+    const movement = normalizeMovement(settings.movement);
+    document.querySelectorAll('#campaign-movement [data-movement]').forEach(field => {
+        field.checked = movement[field.dataset.movement];
+    });
     if (campaignMap) campaignMap.render();
     renderCampaignBiomeChecks();
     const styleEl = document.getElementById('campaign-style-label');
@@ -3764,12 +4147,57 @@ function wireCampaignPanel() {
         const status = document.getElementById('campaign-world-status');
         if (status) status.textContent = 'Rebuilding\u2026';
     });
+    // Campaign hall: the table state saves at once (like the season chips);
+    // the recap is posted on its own so a half-typed one never goes out.
+    const session = document.getElementById('campaign-session');
+    if (session) session.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-session]');
+        if (!button || !socket || !campaignContext) return;
+        socket.emit('update-campaign-settings', {
+            id: campaignContext.id, session: button.dataset.session
+        });
+    });
+    const recapSave = document.getElementById('campaign-recap-save');
+    if (recapSave) recapSave.addEventListener('click', () => {
+        if (!socket || !campaignContext) return;
+        socket.emit('update-campaign-settings', {
+            id: campaignContext.id,
+            recap: document.getElementById('campaign-recap-input').value
+        });
+        const status = document.getElementById('campaign-status');
+        if (status) status.textContent = 'Posting recap\u2026';
+    });
     const seasons = document.getElementById('campaign-seasons');
     if (seasons) seasons.addEventListener('click', (event) => {
         const button = event.target.closest('[data-season]');
         if (!button || !socket || !campaignContext) return;
         socket.emit('update-campaign-settings', {
             id: campaignContext.id, settings: { season: button.dataset.season }
+        });
+    });
+    // Sky & weather: every control saves at once, like the season chips.
+    const skyEl = document.getElementById('campaign-sky');
+    if (skyEl) skyPanel = createSkyPanel(skyEl, {
+        onPreview: (hour) => { if (atmosphere) atmosphere.previewHour(hour); },
+        onChange: (sky) => {
+            if (!socket || !campaignContext) return;
+            socket.emit('update-campaign-settings', { id: campaignContext.id, settings: { sky } });
+        }
+    });
+    // Token vision rules save at once too.
+    const visionEl = document.getElementById('campaign-vision');
+    if (visionEl) visionSettings = createVisionSettings(visionEl, {
+        onChange: (vision) => {
+            if (!socket || !campaignContext) return;
+            socket.emit('update-campaign-settings', { id: campaignContext.id, settings: { vision } });
+        }
+    });
+    document.querySelectorAll('#campaign-movement [data-movement]').forEach(field => {
+        field.addEventListener('change', () => {
+            if (!socket || !campaignContext) return;
+            socket.emit('update-campaign-settings', {
+                id: campaignContext.id, settings: { movement: { [field.dataset.movement]: field.checked } }
+            });
         });
     });
     const roll = document.getElementById('campaign-seed-roll');
@@ -4041,12 +4469,117 @@ function redoTerrain() {
     emitChunkPayloadBatches(Object.keys(entry.patch));
 }
 // --- Status hint bar: always tell the user what the mouse does right now ---
+// --- Touch (shared/touch.js) -------------------------------------------------
+// A finger cannot hover, so what rides under the mouse cursor (a carried
+// object, a spell's template) is put down by a tap or dragged, and the action
+// bar lets go of it; everything else a tap does is the left click. The Alt and
+// Shift variants of the authoring tools stay keyboard-only.
+const pressKey = (key) => onKeyDown({ key, target: null, preventDefault() {} });
+const mapLive = () => !!(socket?.connected && mapReload.authenticated);
+
+function touchPicking() { return !!(pendingAttack || pendingSpell || abilityTargeting.active); }
+function touchCarried() {
+    return currentTool === 'move' && currentMoveMode !== 'y-only' && !isDraggingHeight && !touchPicking() ? selectedObject : null;
+}
+// Tools whose left button is held down and dragged: brushes, lake level, ramps
+// and the build rectangles. One finger works them; two move the camera.
+function touchStrokes() {
+    if (fogActive()) return true;
+    if (terrainActive()) return terrainBrush.mode !== 'river';
+    return buildActive() && !buildBrush.buildingPickMode && !buildBrush.pickingLevel &&
+        !['erase', 'opening', 'tile'].includes(buildBrush.mode);
+}
+
+function touchTap(event) {
+    if (combatAim && combatAim.active) {
+        onPointerMove(event); // the template goes there; Cast releases it
+    } else if (touchCarried()) {
+        onPointerMove(event); // the object goes there; "Move here" drops it
+    } else {
+        if (!(currentTool === 'move' && selectedObject)) onPointerMove(event);
+        onPointerDown(event);
+        onPointerUp(event);
+    }
+    updateHintBar();
+}
+
+// What a one-finger drag starting here does, or null for a camera pan.
+function touchClaim(event) {
+    if (!mapLive()) return null;
+    if ((combatAim && combatAim.active) || isDraggingHeight) return { move: onPointerMove, end: updateHintBar };
+    if (touchStrokes()) {
+        return {
+            start: (ev) => { onPointerMove(ev); onPointerDown(ev); },
+            move: onPointerMove,
+            end: (ev) => { onPointerUp(ev); updateHintBar(); },
+            cancel: cancelTouchStroke
+        };
+    }
+    if (currentTool !== 'move' || touchPicking()) return null;
+    const object = pickSceneObject(event);
+    if (!object || !object.visible) return null;
+    if (currentMoveMode === 'y-only') {
+        // Press an object and drag: it rises and sinks with the finger.
+        return { start: (ev) => { if (!isDraggingHeight) onPointerDown(ev); }, move: onPointerMove, end: updateHintBar };
+    }
+    // Press an object and drag: it is carried, and dropped where the finger lifts.
+    return {
+        start: () => { if (selectedObject !== object) selectObject(object); },
+        move: onPointerMove,
+        end: (ev) => { onPointerMove(ev); dropCarried(); updateHintBar(); },
+        cancel: () => deselectObject()
+    };
+}
+
+// A second finger landed mid-stroke: the camera takes over. A shape being
+// dragged out is dropped; paint already laid down stays (and can be undone).
+function cancelTouchStroke() {
+    if (buildDrag) { buildDrag = null; clearBuildGhost(); return; }
+    if (rampStart) { rampStart = null; rampPreview.visible = false; return; }
+    if (lakeDrag) { terrain.setWaterData({ bodies: lakeDrag.before }); lakeDrag = null; return; }
+    onPointerUp({ button: 0 });
+}
+
+function touchActions() {
+    const cancel = { label: 'Cancel', run: () => pressKey('Escape') };
+    if (combatAim && combatAim.active) return [{ label: 'Cast', kind: 'primary', run: () => combatAim.commit() }, cancel];
+    if (abilityTargeting.active) return [{ label: 'Fire', kind: 'primary', run: () => pressKey('Enter') }, cancel];
+    if (pendingAttack || pendingSpell) return [cancel];
+    if (terrainActive()) {
+        if (riverDraft) {
+            return [...(riverDraft.points.length >= 2 ? [{ label: 'Finish river', kind: 'primary', run: commitRiver }] : []), cancel];
+        }
+        return [{ label: 'Undo', run: () => { if (mapLive()) undoTerrain(); } }, { label: 'Redo', run: () => { if (mapLive()) redoTerrain(); } }];
+    }
+    if (buildActive() && (buildBrush.buildingPickMode || buildBrush.pickingLevel)) return [cancel];
+    if (isDraggingHeight) return [{ label: 'Done', kind: 'primary', run: finishHeightDrag }, cancel];
+    const remove = { label: 'Delete', kind: 'danger', run: () => pressKey('Delete') };
+    const carried = touchCarried();
+    if (carried) {
+        const moved = dragStartPos && carried.position.distanceToSquared(dragStartPos) > 1e-6;
+        return [...(moved ? [{ label: 'Move here', kind: 'primary', run: () => dropCarried() }] : []),
+            { label: 'Put back', run: () => deselectObject() }, remove];
+    }
+    if (currentTool === 'ruler' && ruler.points.length) {
+        return [...(ruler.points.length > 1 ? [{ label: 'Finish', kind: 'primary', run: () => ruler.finalize(emitRuler) }] : []),
+            { label: 'Clear', run: () => ruler.clearInProgress() }];
+    }
+    if (selectedObject && selectedObject.userData.syncId) return [{ label: 'Deselect', run: () => deselectObject() }, remove];
+    return [];
+}
+
 function updateHintBar() {
+    const touch = !!(touchInput && touchInput.touch);
+    if (touchBar) touchBar.set(touch ? touchActions() : []);
     const bar = document.getElementById('hint-bar');
     if (!bar) return;
     const cam = 'RMB orbit · MMB pan · wheel zoom';
     let hint;
-    if (pendingAttack || pendingSpell) {
+    if (combatAim && combatAim.active) {
+        hint = `Combat · ${combatAim.hint()} · ${cam}`;
+    } else if (abilityTargeting.active) {
+        hint = `Combat · ${abilityTargeting.hint()} · ${cam}`;
+    } else if (pendingAttack || pendingSpell) {
         hint = `Combat · pick a target — LMB click a token · Esc cancel · ${cam}`;
     } else if (terrainActive()) {
         const mode = terrainBrush.mode;
@@ -4110,7 +4643,7 @@ function updateHintBar() {
     } else {
         hint = `${cam} · double-click hex/portal to travel`;
     }
-    bar.textContent = hint;
+    bar.textContent = touch ? touchHint(hint, touchStrokes() || !!(combatAim && combatAim.active) || isDraggingHeight) : hint;
 }
 // Ground height a token should rest at, for the current map.
 function groundY(x, z, halfHeight, supportY = null) {
@@ -4167,12 +4700,28 @@ function updateTerrainLOD() {
     } else {
         terrain.setLODVisible(false);
         terrain.setOceanEnabled(false);           // pockets dig below sea level dry
+        setGroundCut(plane, terrain.dugBounds()); // ...and show what was dug
         scene.fog.near = FOG_NEAR;
         scene.fog.far = FOG_FAR;
+    }
+    // Hex outlines/fills are a map annotation drawn over everything (depthTest
+    // off). Once the camera descends well inside one hex they stop meaning
+    // anything and the far edge just hangs across the horizon on top of trees
+    // and hills — fade them out with altitude relative to the hex size.
+    if (hexGridGroup || hexFillGroup) {
+        const R = tierRadius(layerDepth());
+        const k = Math.max(0, Math.min(1, (dist - R * 0.06) / (R * 0.2)));
+        hexLineMaterial.opacity = 0.4 * k;
+        if (hexGridGroup) hexGridGroup.visible = k > 0;
+        if (hexFillGroup) {
+            hexFillGroup.visible = k > 0;
+            for (const m of hexFillGroup.children) m.material.opacity = 0.25 * k;
+        }
     }
     const vegetationVisible = terrainIsUnified && !buildCutawayState;
     if (grass) grass.update(camera, controls, vegetationVisible);
     if (trees) trees.update(camera, controls, vegetationVisible);
+    if (groundCover) groundCover.update(camera, controls, vegetationVisible);
     if (fogOverlay) fogOverlay.update(fogMask, worldTarget.x, worldTarget.z, dist);
 }
 // Reflect the current water bodies in the panel (count readout).
@@ -4225,6 +4774,7 @@ loadSRD().then(srd => {
     SRD = srd;
     if (pendingHomebrew) SRD.setHomebrew(pendingHomebrew);
     answerStatsPending(); // combat may have arrived before the SRD finished loading
+    syncCharacterSenses();
 }).catch(e => console.error('SRD load failed (combat stat auto-fill disabled):', e));
 
 // Monster body-plan manifest: tokens built before it lands show their disc and
