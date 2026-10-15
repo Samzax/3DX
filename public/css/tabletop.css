@@ -548,6 +548,127 @@ body {
   color: #d0c6b2;
 }
 
+/* --- Campaign access dialog (shared/access.js): privacy + invites (lobby + GM panel) --- */
+#access-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9000;
+    padding: 20px;
+}
+
+#access-modal {
+    background: #17171d;
+    border: 1px solid var(--panel-border, #4a3f2e);
+    border-radius: 12px;
+    padding: 22px;
+    width: 100%;
+    max-width: 480px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+
+#access-modal h2 {
+    margin: 0 0 6px;
+    font-size: 20px;
+}
+
+#access-sub {
+    margin: 4px 0 12px;
+    font-size: 13px;
+    color: var(--text-dim, #a89d88);
+}
+
+.access-radio {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 10px 0;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text, #f0f0f0);
+    cursor: pointer;
+}
+
+.access-radio input {
+    margin-top: 2px;
+    flex: 0 0 auto;
+}
+
+.access-heading {
+    margin: 18px 0 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim, #a89d88);
+}
+
+#access-members {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 12px 0;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+#access-members label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 10px;
+    border: 1px solid var(--panel-border, #4a3f2e);
+    border-radius: var(--btn-radius, 6px);
+    font-size: 13px;
+    color: var(--text, #f0f0f0);
+    cursor: pointer;
+}
+
+#access-members label:hover { background: rgba(255, 255, 255, 0.05); }
+
+#access-members .access-empty {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-dim, #a89d88);
+}
+
+.access-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 14px;
+}
+
+#access-error {
+    margin-right: auto;
+    color: #ff9b9b;
+    font-size: 13px;
+}
+
+.access-btn {
+    padding: 8px 16px;
+    border: 1px solid transparent;
+    border-radius: var(--btn-radius, 6px);
+    background: var(--btn-bg, #2a2a31);
+    color: var(--text, #f0f0f0);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.access-btn:hover { background: var(--btn-bg-hover, #383841); }
+
+.access-btn.primary {
+    background: var(--accent, #a9741f);
+    color: #fff;
+}
+
+.access-btn.primary:hover { background: #c9973a; }
+
 /* --- Sky & weather (shared/skypanel.js): GM controls + the readout chip --- */
 .sky .sky-now { font-size: 12px; color: var(--text, #f0f0f0); margin: 6px 0 2px; min-height: 16px; }
 .sky .sky-row { display: block; margin: 8px 0 6px; }
@@ -712,6 +833,43 @@ body.hall-open #vision-chip { display: none; }
 .roll-private.hidden { display: none; }
 .roll-quick-error { color: #ff8f8f; font-size: 11px; }
 .roll-quick-error:empty { display: none; }
+
+/* --- Table chat (shared/chat.js): OOC + whispers, both screens --- */
+#chat-panel {
+  position: absolute; top: 112px; left: 752px; z-index: 36; width: 320px; max-width: calc(100vw - 100px);
+  display: flex; flex-direction: column; max-height: min(62vh, 560px);
+  color: var(--text, #e6dcc8); background: var(--workspace-glass, rgba(22, 17, 12, .94));
+  border: 1px solid var(--workspace-line, rgba(214, 180, 110, .2)); border-radius: 12px;
+  box-shadow: 0 14px 42px rgba(0, 0, 0, .38); backdrop-filter: blur(14px);
+}
+#chat-panel.hidden { display: none; }
+.chat-list { flex: 1; min-height: 80px; overflow-y: auto; padding: 4px 10px; overscroll-behavior: contain; }
+.chat-entry { padding: 7px 0; border-bottom: 1px solid rgba(255, 255, 255, .06); font-size: 12px; }
+.chat-entry:last-child { border-bottom: 0; }
+.chat-head { display: flex; justify-content: space-between; gap: 8px; color: #857a66; font-size: 11px; }
+.chat-who { color: #e6c377; font-weight: 700; }
+.chat-entry.is-mine .chat-who { color: #9fd0a0; }
+.chat-entry.is-whisper .chat-who { color: #c3a6e6; }
+.chat-whisper-mark { color: #857a66; font-weight: 400; }
+.chat-whisper-tag {
+  margin-left: 5px; padding: 0 5px; border: 1px solid rgba(195, 166, 230, .5); border-radius: 999px;
+  color: #c3a6e6; font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+}
+.chat-text { margin-top: 1px; color: #f3ead8; line-height: 1.4; }
+.chat-form {
+  flex: none; display: grid; grid-template-columns: auto 1fr auto; gap: 5px;
+  padding: 8px 10px 10px; border-top: 1px solid var(--workspace-line, rgba(214, 180, 110, .2));
+}
+.chat-form select, .chat-form input {
+  min-width: 0; padding: 6px 8px; color: #f3ead8; background: #14100b;
+  border: 1px solid #453b2c; border-radius: 6px; font: inherit; font-size: 12px;
+}
+.chat-form select { max-width: 110px; }
+.chat-form button {
+  padding: 6px 12px; color: #10151d; background: #e6c377; border: 0; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 12px;
+}
+.chat-error { grid-column: 1 / -1; color: #ff8f8f; font-size: 11px; }
+.chat-error:empty { display: none; }
 
 /* --- Rest desk (shared/rests.js): ask for / grant rests, both screens --- */
 #rest-desk {

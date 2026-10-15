@@ -331,6 +331,9 @@
         <div class="tp-row"><input type="text" id="campaign-name-input" maxlength="80" placeholder="Campaign name"></div>
         <div class="tp-label">Description</div>
         <div class="tp-row"><textarea id="campaign-desc-input" rows="3" maxlength="400" placeholder="What is this campaign about?"></textarea></div>
+        <div class="tp-label">Access</div>
+        <div class="tp-row"><button id="campaign-access" class="tp-chip">Privacy &amp; invites&hellip;</button></div>
+        <div class="tp-hint" id="campaign-access-hint">Public &mdash; everyone on this server can see and join.</div>
         <div class="tp-label">Table</div>
         <div class="tp-row" id="campaign-session">
             <button class="tp-chip" data-session="open">Open</button>
@@ -339,7 +342,10 @@
         <div class="tp-hint" id="campaign-session-hint">Closed holds players at the campaign briefing; opening the table brings everyone waiting into the world together.</div>
         <div class="tp-label">Recap &mdash; &ldquo;last time&rdquo;</div>
         <div class="tp-row"><textarea id="campaign-recap-input" rows="5" maxlength="1200" placeholder="What happened last session? Players read this, under the description, before they enter. Leave it empty before session one."></textarea></div>
-        <div class="tp-row"><button id="campaign-recap-save" class="tp-chip">Post recap</button></div>
+        <div class="tp-row"><button id="campaign-recap-save" class="tp-chip">Post new session</button></div>
+        <div class="tp-hint">Posting archives the previous recap into the session history below and shows this one at the campaign hall.</div>
+        <div class="tp-label">Session history</div>
+        <div id="campaign-sessions" class="campaign-sessions"><div class="tp-hint">No sessions posted yet.</div></div>
         <div class="tp-label">Style</div>
         <div class="tp-hint" id="campaign-style-label">Grand campaign (DMG ladder)</div>
         <div class="tp-label">Season</div>
@@ -361,6 +367,8 @@
         <button id="campaign-save" class="tp-send">Save campaign</button>
         <div id="campaign-status"></div>
         <div class="tp-hint">Only listed biomes can be painted. Spawn is where cameras land on first entry, and region campaigns lock the navigation lens to the hex that contains it.</div>
+        <div class="tp-row"><button id="campaign-export" class="tp-chip">Export campaign (.json)</button></div>
+        <div class="tp-hint">Downloads the whole table as one file: campaign settings and sessions, characters, journal, party treasury and XP, pools, the roll log and every map.</div>
 
         <div class="tp-section">Sky &amp; weather</div>
         <div class="tp-hint">Changes at once for the whole table. Natural weather follows the climate of wherever each screen is looking: wet country rains, cold air snows, deserts stay clear.</div>
@@ -403,6 +411,57 @@
         <div class="tp-hint">The world as staged above, north up, centered on the spawn. Click the map to stage the spawn there. Rebuild world applies it and moves the homeland under it; Save campaign moves only the spawn.</div>
         <button id="campaign-world-apply" class="tp-send tp-rebuild">Rebuild world</button>
         <div id="campaign-world-status"></div>
+        <div class="tp-section">Journal</div>
+        <div class="tp-hint">The campaign notebook: quests, NPCs, lore and handouts. Party-visible entries
+            show on every player's Journal tab; GM-only ones stay with you.</div>
+        <div id="journal-entries" class="journal-entries"><div class="tp-hint">No entries yet.</div></div>
+        <div class="tp-row">
+            <button id="journal-new" class="tp-chip">+ New entry</button>
+        </div>
+        <div id="journal-editor" class="journal-editor hidden">
+            <div class="tp-row tp-inline">
+                <input type="text" id="journal-title" maxlength="120" placeholder="Title (e.g. The sunken chapel)">
+                <select id="journal-kind">
+                    <option value="quest">Quest</option>
+                    <option value="npc">NPC</option>
+                    <option value="lore">Lore</option>
+                    <option value="handout">Handout</option>
+                </select>
+            </div>
+            <div class="tp-row"><textarea id="journal-text" rows="5" maxlength="4000" placeholder="What the party knows…"></textarea></div>
+            <div class="tp-row tp-inline">
+                <label class="tp-check"><input type="checkbox" id="journal-visible"> Visible to players</label>
+                <button id="journal-save" class="tp-chip">Save entry</button>
+                <button id="journal-cancel" class="tp-chip">Cancel</button>
+            </div>
+        </div>
+        <div id="journal-status" class="journal-status"></div>
+
+        <div class="tp-section">Party treasury</div>
+        <div class="tp-hint">Shared coin the party carries. Every player sees it on their sheet.</div>
+        <div class="tp-row tp-inline" id="treasury-row">
+            <input type="number" id="treasury-pp" min="0" max="100000000" step="1" title="Platinum">
+            <input type="number" id="treasury-gp" min="0" max="100000000" step="1" title="Gold">
+            <input type="number" id="treasury-ep" min="0" max="100000000" step="1" title="Electrum">
+            <input type="number" id="treasury-sp" min="0" max="100000000" step="1" title="Silver">
+            <input type="number" id="treasury-cp" min="0" max="100000000" step="1" title="Copper">
+        </div>
+        <div class="tp-row"><button id="treasury-save" class="tp-chip">Save treasury</button></div>
+        <div class="tp-hint">pp · gp · ep · sp · cp (left to right)</div>
+
+        <div class="tp-section">Experience</div>
+        <div class="tp-row" id="xp-mode">
+            <button class="tp-chip" data-xp-mode="milestone">Milestone</button>
+            <button class="tp-chip" data-xp-mode="xp">XP</button>
+        </div>
+        <div class="tp-hint">Milestone advances the story by level; XP mode tracks points per character on their sheet.</div>
+        <div class="tp-row tp-inline">
+            <input type="text" id="award-text" maxlength="240" placeholder="Award (e.g. The goblin cave, 700 XP)">
+            <input type="number" id="award-xp" min="0" max="100000000" step="1" title="Experience points">
+        </div>
+        <div id="award-chars" class="tp-checks"></div>
+        <div class="tp-row"><button id="award-save" class="tp-chip">Award XP</button></div>
+        <div id="xp-awards" class="journal-entries"></div>
     </div>
 
     <!-- --- Layer navigation (breadcrumb, top-center) --- -->
@@ -452,12 +511,16 @@
             <div id="character-menu-tabs">
                 <button id="char-tab-spawn" class="char-tab active">Spawn</button>
                 <button id="char-tab-instances" class="char-tab">Instances</button>
+                <button id="char-tab-party" class="char-tab">Party</button>
             </div>
             <div id="character-button-list">
                 <p style="font-size: 12px; color: #999;">No characters found. Create one in the Character Creator!</p>
             </div>
             <div id="character-instance-list" class="hidden">
                 <p style="font-size: 12px; color: #999;">No character tokens on any map yet.</p>
+            </div>
+            <div id="character-party-list" class="hidden">
+                <p style="font-size: 12px; color: #999;">No one in the party yet.</p>
             </div>
         </div>
     </div>

@@ -2546,3 +2546,352 @@ test('campaign palette gates hex painting and survives an empty request', { time
   assert.equal(painted.hex, '0,0');
   assert.equal(painted.biome, 'plains');
 });
+
+
+// Collects one payload per requested event (each with its own predicate)
+// across polls, so a batch carrying several answers loses none of them:
+// `wants` maps event name -> payload predicate.
+async function waitForAnswers(session, wants, timeoutMs = 5000) {
+  const pending = new Map(Object.entries(wants));
+  const seen = {};
+  const deadline = Date.now() + timeoutMs;
+  while (pending.size && Date.now() < deadline) {
+    for (const [name, payload] of socketEvents(await pollPackets(session))) {
+      const predicate = pending.get(name);
+      if (!predicate) continue;
+      if (predicate(payload)) { seen[name] = payload; pending.delete(name); }
+    }
+  }
+  if (pending.size) throw new Error(`timed out waiting for ${[...pending.keys()].join(', ')}`);
+  return seen;
+}
+
+test('campaign arc: session history, access payloads, and the export bundle', { timeout: 40000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-arc-sessions-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const player = await connectPolling(instance.port);
+  await emitEvent(gm, 'login', 'GM');
+  const gmBoot = await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  await emitEvent(player, 'login', { username: 'alice' });
+  const playerBoot = await waitForSocketEvents(player, ['campaign-joined', 'map-state']);
+
+  // The join brief carries visibility for everyone, the invite list only for
+  // the campaign GM.
+  assert.equal(gmBoot['campaign-joined'].visibility, 'public');
+  assert.deepEqual(gmBoot['campaign-joined'].members, []);
+  assert.equal(playerBoot['campaign-joined'].visibility, 'public');
+  assert.equal('members' in playerBoot['campaign-joined'], false);
+
+  // Posting a session archives the previous recap; the newest sits first.
+  await emitEvent(gm, 'update-campaign-settings', {
+    id: 'default', recap: 'The bridge burned.', postSession: true
+  });
+  let updated = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.equal(updated.recap, 'The bridge burned.');
+  assert.equal(updated.sessions.length, 1);
+  assert.equal(updated.sessions[0].n, 1);
+  assert.equal(updated.sessions[0].text, 'The bridge burned.');
+  assert.ok(updated.sessions[0].at > 0);
+
+  await emitEvent(gm, 'update-campaign-settings', {
+    id: 'default', recap: 'They sailed east.', postSession: true
+  });
+  updated = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.equal(updated.recap, 'They sailed east.');
+  assert.deepEqual(updated.sessions.map((s) => s.n), [2, 1]);
+
+  // A plain recap save is not a session; deleting the newest falls back to
+  // the remaining archive so the hall always has a "last time".
+  await emitEvent(gm, 'update-campaign-settings', { id: 'default', recap: 'Notes for next time.' });
+  updated = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.equal(updated.sessions.length, 2);
+  assert.equal(updated.recap, 'Notes for next time.');
+  await emitEvent(gm, 'update-campaign-settings', { id: 'default', deleteSession: 2 });
+  updated = await waitForSocketEvent(gm, 'campaign-updated');
+  assert.deepEqual(updated.sessions.map((s) => s.n), [1]);
+  assert.equal(updated.recap, 'The bridge burned.');
+
+  // A fresh join carries the same history in its brief.
+  await emitEvent(gm, 'join-campaign', { id: 'default' });
+  const rejoin = await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  assert.equal(rejoin['campaign-joined'].sessions.length, 1);
+  assert.equal(rejoin['campaign-joined'].sessions[0].n, 1);
+  assert.equal(rejoin['campaign-joined'].recap, 'The bridge burned.');
+
+  // Access: a player may not touch it; the GM's answer carries the saved
+  // state, and nobody else is told the invite list.
+  await emitEvent(player, 'set-campaign-access', { id: 'default', visibility: 'private' });
+  assert.equal(await waitForSocketEvent(player, 'error'), 'GM only');
+  await emitEvent(gm, 'set-campaign-access', { id: 'default', visibility: 'private', members: ['alice'] });
+  const access = await waitForSocketEvent(gm, 'campaign-access-saved');
+  assert.equal(access.id, 'default');
+  assert.equal(access.visibility, 'private');
+  assert.deepEqual(access.members, ['alice']);
+  // The answer went only to the asking GM; alice's own list shows she is
+  // invited without ever being shown who else is on the invite list.
+  await emitEvent(player, 'get-campaigns', null);
+  const playerList = await waitForSocketEvent(player, 'campaign-list');
+  const playerEntry = playerList.campaigns.find((campaign) => campaign.id === 'default');
+  assert.equal(playerEntry.visibility, 'private');
+  assert.equal(playerEntry.invited, true);
+  assert.equal(playerEntry.members, undefined);
+
+
+  // Invited, alice still enters the now-private campaign; her brief never
+  // carries the member list.
+  await emitEvent(player, 'join-campaign', { id: 'default' });
+  const playerJoin = await waitForSocketEvents(player, ['campaign-joined', 'map-state']);
+  assert.equal(playerJoin['campaign-joined'].visibility, 'private');
+  assert.equal('members' in playerJoin['campaign-joined'], false);
+  await emitEvent(gm, 'join-campaign', { id: 'default' });
+  const gmPrivate = await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  assert.equal(gmPrivate['campaign-joined'].visibility, 'private');
+  assert.deepEqual(gmPrivate['campaign-joined'].members, ['alice']);
+
+  // Export: only the GM may ask, and the bundle is the store's contents.
+  await emitEvent(player, 'export-campaign', { id: 'default' });
+  assert.equal(await waitForSocketEvent(player, 'error'), 'GM only');
+
+  await emitEvent(gm, 'save-character', { charData: {
+    name: 'Export Rogue', race: 'human', background: 'urchin',
+    classes: [{ class: 'rogue', level: 2 }],
+    abilities: { str: 8, dex: 16, con: 12, int: 12, wis: 10, cha: 10 },
+    hp: { current: 15 }
+  } });
+  await waitForSocketEvent(gm, 'character-saved-success');
+  await emitEvent(gm, 'add-object', { type: 'token', position: { x: 1, y: 0, z: 1 }, label: 'Export Token' });
+  await waitForSocketEvent(gm, 'object-added');
+
+  await emitEvent(gm, 'export-campaign', { id: 'default' });
+  const bundle = await waitForSocketEvent(gm, 'campaign-export');
+  assert.equal(bundle.id, 'default');
+  assert.equal(bundle.data.format, '3dx-campaign');
+  assert.equal(bundle.data.version, 1);
+  assert.ok(Number.isFinite(Date.parse(bundle.data.exportedAt)));
+  assert.equal(bundle.data.campaign.name, 'Default Campaign');
+  assert.equal(bundle.data.campaign.visibility, 'private');
+  assert.ok(Object.values(bundle.data.characters).some((char) => char.name === 'Export Rogue'));
+  assert.equal(bundle.data.journal.entries.length, 0);
+  assert.equal(typeof bundle.data.pools.chars, 'object');
+    assert.ok(Array.isArray(bundle.data.rolls));
+    assert.ok(Array.isArray(bundle.data.chat));
+  assert.ok(Object.values(bundle.data.maps).some((map) => map && map.objects &&
+    Object.values(map.objects).some((object) => object.label === 'Export Token')));
+});
+
+test('campaign arc: journal, treasury, XP awards and the identity-only party view', { timeout: 40000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-arc-journal-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const player = await connectPolling(instance.port);
+  await emitEvent(gm, 'login', 'GM');
+  await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  await emitEvent(player, 'login', { username: 'alice' });
+  await waitForSocketEvents(player, ['campaign-joined', 'map-state']);
+
+  // The journal belongs to the GM.
+  await emitEvent(player, 'save-journal-entry', { entry: { text: 'Let me in.' } });
+  assert.equal((await waitForSocketEvent(player, 'journal-denied')).error, 'GM only');
+
+  // Party-visible notes reach the table, GM-only notes never leave the GM.
+  await emitEvent(gm, 'save-journal-entry', { entry: {
+    title: 'The gem', text: 'Find the blue gem.', kind: 'quest', visible: 'party'
+  } });
+  await waitForAnswers(gm, { journal: (j) => j.entries.some((e) => e.title === 'The gem') });
+  await waitForAnswers(player, { journal: (j) => j.entries.some((e) => e.title === 'The gem') });
+
+  await emitEvent(gm, 'save-journal-entry', { entry: {
+    title: 'The duke', text: 'The duke is the villain.', kind: 'npc', visible: 'gm'
+  } });
+  await waitForAnswers(gm, { journal: (j) => j.entries.some((e) => e.title === 'The duke') });
+  const filtered = await waitForAnswers(player, {
+    journal: (j) => j.entries.length === 1 && j.entries[0].title === 'The gem'
+  });
+  assert.equal(filtered.journal.entries.some((e) => e.title === 'The duke'), false);
+
+  // The same filter holds for an explicit fetch.
+  await emitEvent(player, 'get-journal', null);
+  const fetched = await waitForAnswers(player, {
+    journal: (j) => j.entries.length === 1 && j.entries[0].title === 'The gem'
+  });
+  assert.equal(Object.keys(fetched.journal.treasury).length, 0);
+  assert.equal(fetched.journal.xp.mode, 'milestone');
+  assert.ok(Array.isArray(fetched.journal.xp.awards));
+
+  // Treasury and the XP mode are party information.
+  await emitEvent(gm, 'update-treasury', { treasury: { gp: 50, cp: 12 } });
+  await waitForAnswers(gm, { journal: (j) => j.treasury.gp === 50 });
+  const treasury = await waitForAnswers(player, { journal: (j) => j.treasury.gp === 50 });
+  assert.equal(treasury.journal.treasury.cp, 12);
+
+  await emitEvent(gm, 'set-xp-mode', { mode: 'xp' });
+  await waitForAnswers(gm, { journal: (j) => j.xp.mode === 'xp' });
+  await waitForAnswers(player, { journal: (j) => j.xp.mode === 'xp' });
+
+  // An award lands on each named sheet as char.xp and in the party log.
+  await emitEvent(gm, 'save-character', { charData: {
+    name: 'Arc Wizard', race: 'human', background: 'sage',
+    classes: [{ class: 'wizard', level: 5 }],
+    abilities: { str: 8, dex: 12, con: 14, int: 16, wis: 12, cha: 10 },
+    hp: { current: 32 }
+  } });
+  const wizard = await waitForSocketEvent(gm, 'character-saved-success');
+  await emitEvent(gm, 'award-xp', { text: 'The blue gem', xp: 300, charIds: [wizard.id] });
+  const awarded = await waitForAnswers(gm, {
+    journal: (j) => j.xp.awards.some((a) => a.xp === 300 && a.text === 'The blue gem'),
+    'character-updated': (char) => char.id === wizard.id && char.xp === 300
+  });
+  assert.deepEqual(awarded.journal.xp.awards[0].charIds, [wizard.id]);
+  assert.equal(awarded['character-updated'].xp, 300);
+  // The award is party information too.
+  const seenByPlayer = await waitForAnswers(player, {
+    journal: (j) => j.xp.awards.some((a) => a.xp === 300)
+  });
+  assert.equal(seenByPlayer.journal.xp.mode, 'xp');
+
+  // Party view: identity ONLY for every member, whoever asks.
+  await emitEvent(player, 'save-character', { charData: {
+    name: 'Lyra', race: 'elf', background: 'folk-hero',
+    classes: [{ class: 'ranger', level: 3 }],
+    abilities: { str: 12, dex: 16, con: 12, int: 10, wis: 14, cha: 8 },
+    hp: { current: 26 }
+  } });
+  const lyra = await waitForSocketEvent(player, 'character-saved-success');
+  await emitEvent(player, 'get-party', null);
+  const party = await waitForSocketEvent(player, 'party');
+  const arc = party.members.find((member) => member.name === 'Arc Wizard');
+  const mine = party.members.find((member) => member.id === lyra.id);
+  assert.ok(arc, 'the GM sheet is in the party list');
+  assert.ok(mine, 'the asking player sheet is in the party list');
+  for (const member of party.members) {
+    assert.deepEqual(Object.keys(member).sort(), ['cls', 'id', 'level', 'name', 'owner', 'race']);
+  }
+  assert.equal(arc.owner, 'GM');
+  assert.equal(arc.cls, 'wizard');
+  assert.equal(arc.level, 5);
+  assert.equal(mine.owner, 'alice');
+  assert.equal(mine.cls, 'ranger');
+  assert.equal(party.members.some((member) => 'hp' in member || 'ac' in member), false);
+});
+
+
+test('table chat: OOC delivery, private whispers, bounds and persistence', { timeout: 40000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-chat-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const alice = await connectPolling(instance.port);
+  const bob = await connectPolling(instance.port);
+  const eve = await connectPolling(instance.port);
+  for (const [session, name] of [[gm, 'GM'], [alice, 'alice'], [bob, 'bob'], [eve, 'eve']]) {
+    await emitEvent(session, 'login', name);
+    await waitForSocketEvents(session, ['campaign-joined', 'map-state']);
+  }
+
+  async function chatHistory(session) {
+    await emitEvent(session, 'get-chat', null);
+    const seen = await waitForAnswers(session, { 'chat-log': () => true });
+    return seen['chat-log'].messages;
+  }
+
+  // OOC reaches the whole table, sender included, under one id.
+  await emitEvent(alice, 'chat-send', { text: 'Anyone here?' });
+  const mine = await waitForAnswers(alice, { 'chat-message': (m) => m.from === 'alice' && !m.to });
+  assert.equal(mine['chat-message'].text, 'Anyone here?');
+  const heard = await waitForAnswers(eve, { 'chat-message': (m) => m.from === 'alice' && !m.to });
+  assert.equal(heard['chat-message'].id, mine['chat-message'].id);
+
+  // Long text is bounded, empty text is refused.
+  await emitEvent(eve, 'chat-send', { text: 'x'.repeat(600) });
+  const oversize = await waitForAnswers(eve, { 'chat-message': (m) => m.from === 'eve' });
+  assert.equal(oversize['chat-message'].text.length, 500);
+  await emitEvent(bob, 'chat-send', { text: '   ' });
+  const empty = await waitForAnswers(bob, { 'chat-denied': () => true });
+  assert.equal(empty['chat-denied'].error, 'A message needs some text');
+
+  // A second message inside the cooldown is refused and never stored.
+  await emitEvent(bob, 'chat-send', { text: 'Hey all' });
+  await emitEvent(bob, 'chat-send', { text: 'spam spam' });
+  const paced = await waitForAnswers(bob, {
+    'chat-message': (m) => m.text === 'Hey all',
+    'chat-denied': () => true
+  });
+  assert.equal(paced['chat-denied'].error, 'Slow down a moment');
+
+  // A whisper reaches its two speakers — nobody else, not even the GM.
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  await emitEvent(alice, 'chat-send', { text: 'psst, bring potions', to: 'bob' });
+  const whispered = await waitForAnswers(alice, { 'chat-message': (m) => m.to === 'bob' });
+  assert.equal(whispered['chat-message'].from, 'alice');
+  const toBob = await waitForAnswers(bob, { 'chat-message': (m) => m.to === 'bob' });
+  assert.equal(toBob['chat-message'].text, 'psst, bring potions');
+
+  // A third socket is told nothing about it live: the whisper (if it leaked)
+  // would be queued before eve's roll-log round trip completes.
+  await emitEvent(eve, 'get-roll-log', null);
+  const eveLive = [];
+  {
+    let done = false;
+    const deadline = Date.now() + 5000;
+    while (!done && Date.now() < deadline) {
+      for (const [name, payload] of socketEvents(await pollPackets(eve))) {
+        if (name === 'roll-log') { done = true; break; }
+        if (name === 'chat-message') eveLive.push(payload);
+      }
+    }
+    assert.ok(done, 'eve should get the roll-log round trip');
+  }
+  assert.equal(eveLive.some((m) => m && m.to), false, 'a whisper must not reach a third socket live');
+
+  // The history confirms it: each speaker sees their own conversation.
+  const eveHistory = await chatHistory(eve);
+  assert.equal(eveHistory.some((m) => m.to), false, 'Eve never sees a whisper');
+  assert.equal(eveHistory.some((m) => m.text === 'psst, bring potions'), false);
+  assert.equal(eveHistory.some((m) => m.text === 'spam spam'), false, 'rate-limited text is never stored');
+  assert.ok(eveHistory.some((m) => m.text === 'Anyone here?'));
+  assert.ok(eveHistory.some((m) => m.text === 'Hey all'));
+
+  const gmHistory = await chatHistory(gm);
+  assert.equal(gmHistory.some((m) => m.text === 'psst, bring potions'), false, 'the GM does not read whispers');
+  assert.ok(gmHistory.some((m) => m.text === 'Hey all'));
+
+  const aliceHistory = await chatHistory(alice);
+  assert.ok(aliceHistory.some((m) => m.to === 'bob' && m.text === 'psst, bring potions'));
+  const bobHistory = await chatHistory(bob);
+  assert.ok(bobHistory.some((m) => m.to === 'bob' && m.text === 'psst, bring potions'));
+
+  // The history outlives the server: chat.json round-trips through a restart.
+  await stopServer(instance);
+  instance = await startServer(saveDir);
+  const again = await connectPolling(instance.port);
+  await emitEvent(again, 'login', 'bob');
+  await waitForSocketEvents(again, ['campaign-joined', 'map-state']);
+  const reloaded = await chatHistory(again);
+  assert.ok(reloaded.some((m) => m.text === 'psst, bring potions' && m.to === 'bob'));
+  assert.ok(reloaded.some((m) => m.text === 'Anyone here?'));
+  assert.equal(reloaded.some((m) => m.text === 'spam spam'), false);
+});

@@ -247,6 +247,11 @@ details.spell-lvl .row-item { padding-left:10px; }
 .hall-recap { margin: 0 0 18px; padding-left: 14px; border-left: 2px solid var(--accent-warm); }
 .hall-recap p { margin: 0; font-size: 14px; line-height: 1.6; color: #d6ccb8; white-space: pre-wrap; max-height: 30vh; overflow-y: auto; }
 .hall-premise.hidden, .hall-recap.hidden { display: none; }
+#hall-sessions-block summary { color: var(--text-dim); }
+#hall-sessions-block[open] summary { margin-bottom: 6px; }
+.hall-session { margin: 2px 0; }
+.hall-session summary { cursor: pointer; font-size: 13px; color: #d6ccb8; }
+.hall-session p { font-size: 13px; margin: 4px 0 8px; }
 .hall-meta { display: flex; flex-wrap: wrap; gap: 14px 28px; margin: 4px 0 22px; }
 .hall-roster { display: flex; flex-wrap: wrap; gap: 6px; }
 .hall-roster span {

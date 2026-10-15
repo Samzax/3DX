@@ -746,6 +746,8 @@ const MAX_CAMPAIGNS = 100;
 const MAX_CAMPAIGN_NAME = 80;
 const MAX_CAMPAIGN_DESCRIPTION = 400;
 const MAX_CAMPAIGN_RECAP = 1200;
+const MAX_CAMPAIGN_SESSIONS = 200;   // archived recaps kept per campaign
+const BRIEF_SESSION_LIMIT = 20;      // newest N sent to clients (hall + GM panel)
 const MAX_CAMPAIGN_MEMBERS = 64;
 const MAX_PENDING_CAMPAIGNS_PER_USER = 3;
 const BIOME_KEYS = ['plains', 'forest', 'mountains', 'desert', 'swamp', 'coast', 'tundra', 'taiga', 'snow'];
@@ -897,17 +899,21 @@ function sanitizeCampaignRecord(raw, id) {
     members: sanitizeCampaignMembers(raw.members),
     status: raw.status === 'pending' ? 'pending' : 'active',
     recap: boundedMultilineText(raw.recap, MAX_CAMPAIGN_RECAP),
+    sessions: sanitizeCampaignSessions(raw.sessions),
     session: raw.session === 'closed' ? 'closed' : 'open'
   };
 }
 
 // What the campaign hall shows on entry: the premise (description), the GM's
-// "last time" recap, and whether the table is open. Records created before
-// the hall existed have neither field: no recap, table open.
+// "last time" recap, the archived session history (newest first, bounded),
+// and whether the table is open. Records created before the hall existed have
+// neither field: no recap, table open.
 function campaignBrief(campaign) {
   return {
     description: campaign.description || '',
     recap: campaign.recap || '',
+    sessions: (campaign.sessions || []).slice(-BRIEF_SESSION_LIMIT).reverse()
+      .map(s => ({ n: s.n, at: s.at, text: s.text })),
     session: campaign.session === 'closed' ? 'closed' : 'open'
   };
 }
@@ -923,6 +929,25 @@ function sanitizeCampaignMembers(raw) {
     members.push(name);
   }
   return members;
+}
+
+// Session history: each posted recap archives as { n, at, text }. `n` is the
+// session number (1-based, never reused); `recap` on the record stays the
+// newest text so the hall needs no extra lookup.
+function sanitizeCampaignSessions(raw) {
+  if (!Array.isArray(raw)) return [];
+  const sessions = [];
+  for (const candidate of raw.slice(-MAX_CAMPAIGN_SESSIONS)) {
+    if (!isRecord(candidate)) continue;
+    const text = boundedMultilineText(candidate.text, MAX_CAMPAIGN_RECAP);
+    if (!text) continue;
+    sessions.push({
+      n: boundedInteger(candidate.n, 1, 100000, sessions.length + 1),
+      at: boundedInteger(candidate.at, 0, 0x7fffffffffff, 0),
+      text
+    });
+  }
+  return sessions;
 }
 
 function sameUser(a, b) {
@@ -1081,7 +1106,6 @@ function campaignSettings() {
   const campaign = activeCampaign();
   return (campaign && campaign.settings) || defaultCampaignSettings();
 }
-
 
 // ===== Fog of war (U4, docs/unified-world-design.md) =====
 // Players free-roam the camera but only RECEIVE content inside regions the GM
@@ -1944,6 +1968,10 @@ function sanitizeCharacterPayload(raw) {
     const current = boundedScalarInteger(raw.hp.current, 0, 999, null);
     if (current != null) character.hp = { current };
   }
+  // Experience points (XP mode campaigns): optional, only stored when the
+  // sheet carries one. The GM's award-xp writes it too.
+  const xp = boundedScalarInteger(raw.xp, 0, 100000000, null);
+  if (xp != null) character.xp = xp;
   return character;
 }
 
@@ -2556,6 +2584,98 @@ function setRestList(list) {
   if (activeStore) activeStore.restRequests = list;
   saveRestState();
 }
+
+// --- Campaign journal (journal.json in the campaign store) ---
+// The GM's campaign-scoped notebook: quest/NPC/lore/handout notes (each
+// either party-visible or GM-only), the shared party treasury, and the XP
+// log with its mode. Players receive only party-visible entries; the
+// treasury and XP log are party information.
+const JOURNAL_FILE = 'journal.json';
+const JOURNAL_KINDS = ['quest', 'npc', 'lore', 'handout'];
+const JOURNAL_LIMIT = 200;
+const JOURNAL_TEXT_LIMIT = 4000;
+const TREASURY_COINS = ['cp', 'sp', 'ep', 'gp', 'pp'];
+function journalInt(value, min, max, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+}
+function journalDB() {
+  if (!activeStore) return null;
+  if (!activeStore.journal) {
+    const saved = loadJSON(JOURNAL_FILE, { entries: [] },
+      value => isRecord(value) && (!hasOwn(value, 'entries') || Array.isArray(value.entries)),
+      activeStore.dir);
+    const entries = [];
+    for (const raw of (Array.isArray(saved.entries) ? saved.entries : []).slice(-JOURNAL_LIMIT)) {
+      if (!isRecord(raw)) continue;
+      const text = boundedMultilineText(raw.text, JOURNAL_TEXT_LIMIT);
+      if (!text) continue;
+      entries.push({
+        id: boundedString(raw.id, 20) || crypto.randomUUID().slice(0, 8),
+        title: boundedText(raw.title, 120) || 'Untitled',
+        text,
+        kind: JOURNAL_KINDS.includes(raw.kind) ? raw.kind : 'quest',
+        visible: raw.visible === 'gm' ? 'gm' : 'party',
+        at: journalInt(raw.at, 0, 0x7fffffffffff, 0),
+        updated: journalInt(raw.updated, 0, 0x7fffffffffff, 0)
+      });
+    }
+    const coins = {};
+    const rawTreasury = isRecord(saved.treasury) ? saved.treasury : {};
+    for (const coin of TREASURY_COINS) {
+      const value = journalInt(rawTreasury[coin], 0, 100000000, 0);
+      if (value) coins[coin] = value;
+    }
+    const rawXp = isRecord(saved.xp) ? saved.xp : {};
+    const awards = [];
+    for (const raw of (Array.isArray(rawXp.awards) ? rawXp.awards : []).slice(-JOURNAL_LIMIT)) {
+      if (!isRecord(raw)) continue;
+      const text = boundedText(raw.text, 240);
+      const xp = journalInt(raw.xp, 0, 100000000, 0);
+      if (!text && !xp) continue;
+      awards.push({
+        id: boundedString(raw.id, 20) || crypto.randomUUID().slice(0, 8),
+        at: journalInt(raw.at, 0, 0x7fffffffffff, 0),
+        text: text || `${xp} XP`,
+        xp,
+        charIds: sanitizeReferenceArray(raw.charIds, 32, 80)
+      });
+    }
+    activeStore.journal = {
+      entries,
+      treasury: coins,
+      xp: { mode: rawXp.mode === 'xp' ? 'xp' : 'milestone', awards }
+    };
+  }
+  return activeStore.journal;
+}
+function saveJournal() {
+  return activeStore && saveJSON(JOURNAL_FILE, {
+    entries: activeStore.journal.entries,
+    treasury: activeStore.journal.treasury,
+    xp: activeStore.journal.xp
+  }, activeStore.dir);
+}
+// Role-scoped snapshot: journal notes filter by `visible`, treasury and the
+// XP log are party information for everyone at the table.
+function journalPayloadFor(username) {
+  const journal = journalDB();
+  if (!journal) return { entries: [], treasury: {}, xp: { mode: 'milestone', awards: [] } };
+  const gm = isCampaignGMFor(activeCampaignId(), username);
+  return {
+    entries: gm ? journal.entries : journal.entries.filter(entry => entry.visible === 'party'),
+    treasury: journal.treasury,
+    xp: journal.xp
+  };
+}
+// Push the journal to every socket of the campaign, each one role-scoped.
+function pushJournal() {
+  const campaignId = activeCampaignId();
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.campaignId !== campaignId || !sock.username) continue;
+    sock.emit('journal', journalPayloadFor(sock.username));
+  }
+}
 // The slot a combatant burns to cast a spell of `level`: an ordinary slot of
 // the level asked for (`wanted`, upcasting) or of the spell's own level, else
 // the warlock's pact slot. → the level it is cast at, or 0 when none is left.
@@ -2652,6 +2772,52 @@ function appendTableLog(entries) {
     for (const entry of entries) {
       if (tableEntryVisibleTo(sock.username, entry)) sock.emit('roll-logged', entry);
     }
+  }
+}
+
+// Table chat (chat.json per campaign): OOC talk with private whispers, kept
+// per campaign so the history outlives a refresh. A whisper is only ever
+// delivered to and shown for its two speakers — not even the GM reads it.
+const CHAT_FILE = 'chat.json';
+const CHAT_LIMIT = 200;
+const CHAT_TEXT_LIMIT = 500;
+const CHAT_GAP_MS = 400;
+function chatDB() {
+  if (!activeStore) return [];
+  if (!activeStore.chat) {
+    const saved = loadJSON(CHAT_FILE, { messages: [] },
+      (value) => isRecord(value) && Array.isArray(value.messages), activeStore.dir);
+    const messages = [];
+    for (const raw of saved.messages.slice(-CHAT_LIMIT)) {
+      if (!isRecord(raw)) continue;
+      const text = boundedText(raw.text, CHAT_TEXT_LIMIT);
+      const from = boundedText(raw.from, MAX_USERNAME_LENGTH);
+      if (!text || !from) continue;
+      const at = Number(raw.at);
+      messages.push({
+        id: boundedString(raw.id, 20) || crypto.randomUUID().slice(0, 8),
+        at: Number.isFinite(at) && at > 0 ? Math.round(at) : 0,
+        from,
+        to: boundedText(raw.to, MAX_USERNAME_LENGTH) || null,
+        text
+      });
+    }
+    activeStore.chat = messages;
+  }
+  return activeStore.chat;
+}
+function saveChat() {
+  return activeStore && saveJSON(CHAT_FILE, { messages: chatDB() });
+}
+// OOC reaches the whole table; a whisper stays between its two speakers.
+function chatEntryVisibleTo(username, entry) {
+  return !entry.to || sameUser(entry.to, username) || sameUser(entry.from, username);
+}
+function deliverChat(message) {
+  const campaignId = activeCampaignId();
+  for (const sock of io.sockets.sockets.values()) {
+    if (!sock.username || sock.campaignId !== campaignId) continue;
+    if (chatEntryVisibleTo(sock.username, message)) sock.emit('chat-message', message);
   }
 }
 
@@ -3876,7 +4042,10 @@ io.on('connection', (socket) => {
       owner: campaign.owner,
       settings,
       startKey,
-      ...campaignBrief(campaign)
+      ...campaignBrief(campaign),
+      visibility: campaign.visibility === 'private' ? 'private' : 'public',
+      // The invite list is the GM's business (access dialog on the GM screen).
+      ...(isCampaignGMFor(campaignId, socket.username) ? { members: [...campaign.members] } : {})
     });
     const store = storeFor(campaignId);
     if (store) {
@@ -4044,8 +4213,42 @@ io.on('connection', (socket) => {
     }
     // Anyone seated who just lost access goes back to the lobby.
     evictFromCampaign(id, sock => !canEnterCampaign(campaign, sock.username));
-    socket.emit('campaign-access-saved', { id });
+    // The answer carries the saved state so the open dialog's caller can
+    // refresh without a full campaign-list refetch (only the GM receives it).
+    socket.emit('campaign-access-saved', {
+      id,
+      visibility: campaign.visibility,
+      members: [...campaign.members]
+    });
     pushCampaignList();
+  });
+
+  // Export one campaign as a JSON bundle the GM downloads: the registry record,
+  // characters, journal (notes/treasury/XP), pools and rests, the table log,
+  // chat and every map's state — the same store files,
+  // grouped in one file.
+  socket.on('export-campaign', (payload) => {
+    if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
+    const id = boundedString(payload && payload.id, 40);
+    const campaign = campaignById(id);
+    if (!campaign) { socket.emit('error', 'Unknown campaign'); return; }
+    if (!isCampaignGMFor(id, socket.username)) { socket.emit('error', 'GM only'); return; }
+    const store = storeFor(id);
+    if (!store) { socket.emit('error', 'Unknown campaign'); return; }
+    const data = withStore(store, () => ({
+      format: '3dx-campaign',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      campaign: structuredClone(campaign),
+      characters: structuredClone(charactersDB),
+      journal: structuredClone(journalDB()),
+      pools: { chars: structuredClone(poolsDB()), requests: structuredClone(restList()) },
+      rolls: structuredClone(tableLog()),
+      chat: structuredClone(chatDB()),
+      maps: structuredClone(maps)
+    }));
+    console.log(`[CAMPAIGN] ${socket.username} exported "${campaign.name}" (${id})`);
+    socket.emit('campaign-export', { id, name: campaign.name, data });
   });
 
   // --- Accounts (host tab) ---
@@ -4140,11 +4343,37 @@ io.on('connection', (socket) => {
     campaign.settings = sanitizeCampaignSettings(merged);
     // Identity + hall fields ride at the top level of the payload (the GM
     // panel sends them there); `settings.name` is the older spelling.
-    const identity = { name: campaign.name, description: campaign.description, recap: campaign.recap, session: campaign.session };
+    const identity = {
+      name: campaign.name, description: campaign.description, recap: campaign.recap,
+      session: campaign.session, sessions: campaign.sessions
+    };
     const field = key => (payload[key] != null ? payload[key] : requested[key]);
     if (field('name') != null) campaign.name = boundedText(field('name'), MAX_CAMPAIGN_NAME) || campaign.name;
     if (field('description') != null) campaign.description = boundedText(field('description'), MAX_CAMPAIGN_DESCRIPTION);
-    if (payload.recap != null) campaign.recap = boundedMultilineText(payload.recap, MAX_CAMPAIGN_RECAP);
+    // "Post new session" archives the recap into the history; a plain recap
+    // save (no postSession) only rewrites the current "last time" text.
+    if (payload.postSession === true) {
+      const text = boundedMultilineText(payload.recap, MAX_CAMPAIGN_RECAP);
+      if (text) {
+        const sessions = [...(campaign.sessions || [])];
+        const n = sessions.length ? sessions[sessions.length - 1].n + 1 : 1;
+        sessions.push({ n, at: Date.now(), text });
+        while (sessions.length > MAX_CAMPAIGN_SESSIONS) sessions.shift();
+        campaign.sessions = sessions;
+        campaign.recap = text;
+      }
+    } else if (payload.recap != null) {
+      campaign.recap = boundedMultilineText(payload.recap, MAX_CAMPAIGN_RECAP);
+    }
+    if (payload.deleteSession != null) {
+      const n = boundedInteger(payload.deleteSession, 1, 100000, null);
+      if (n != null && Array.isArray(campaign.sessions)) {
+        campaign.sessions = campaign.sessions.filter(entry => entry.n !== n);
+        // The hall's "last time" always shows the newest archive.
+        campaign.recap = campaign.sessions.length
+          ? campaign.sessions[campaign.sessions.length - 1].text : '';
+      }
+    }
     if (payload.session === 'open' || payload.session === 'closed') campaign.session = payload.session;
     if (!saveCampaigns()) {
       restoreField(campaign, 'settings', previous);
@@ -5047,6 +5276,26 @@ io.on('connection', (socket) => {
     socket.emit('character-instances', { instances: characterInstancesFor(socket.username) });
   });
 
+  // Party view: the campaign's roster as identity ONLY — name, owner, race and
+  // the class/level line. No HP, AC, conditions or anything mechanical: other
+  // players' numbers stay hidden (the GM already sees them in combat).
+  onCampaign('get-party', () => {
+    if (!socket.username) return;
+    const members = Object.values(charactersDB).map((char) => {
+      const classes = Array.isArray(char.classes) ? char.classes : [];
+      const level = classes.reduce((sum, c) => sum + (Number(c && c.level) || 0), 0);
+      return {
+        id: String(char.id || ''),
+        name: String(char.name || 'Unnamed').slice(0, 120),
+        owner: String(char.owner || ''),
+        race: String(char.race || ''),
+        cls: String((classes[0] && (classes[0].class || classes[0].name)) || ''),
+        level
+      };
+    }).filter(entry => entry.id);
+    socket.emit('party', { members });
+  });
+
   // Remove a character token from the Instances tab. Unlike delete-object,
   // this accepts the token's map key so it can remove a token without first
   // navigating to that map. Players may remove only their own tokens; the GM
@@ -5824,6 +6073,162 @@ io.on('connection', (socket) => {
     tableLog().length = 0;
     saveTableLog();
     io.to(campRoom(activeCampaignId())).emit('roll-log', { entries: [] });
+  });
+
+  // --- Table chat: OOC conversation and private whispers (both screens) ---
+  function denyChat(message) {
+    socket.emit('chat-denied', { error: message });
+  }
+
+  onCampaign('get-chat', () => {
+    if (!socket.username) return;
+    socket.emit('chat-log', { messages: chatDB().filter(entry => chatEntryVisibleTo(socket.username, entry)) });
+  });
+
+  onCampaign('chat-send', (payload) => {
+    if (!socket.username) return;
+    const now = Date.now();
+    if (now - (socket.chatAt || 0) < CHAT_GAP_MS) return denyChat('Slow down a moment');
+    const text = isRecord(payload) ? boundedText(payload.text, CHAT_TEXT_LIMIT) : '';
+    if (!text) return denyChat('A message needs some text');
+    const to = isRecord(payload) ? boundedText(payload.to, MAX_USERNAME_LENGTH) : '';
+    if (to && sameUser(to, socket.username)) return denyChat('A whisper needs someone else');
+    if (to) {
+      // Target anyone seated at this table, or an account that can come to it
+      // (so an invited player can be whispered before they log in).
+      const seated = [...io.sockets.sockets.values()]
+        .some(sock => sock.campaignId === activeCampaignId() && sameUser(sock.username, to));
+      const known = auth.list().some(user => !user.disabled && sameUser(user.username, to));
+      if (!seated && !known) return denyChat('No one by that name at this table');
+    }
+    const messages = chatDB();
+    const message = { id: crypto.randomUUID().slice(0, 8), at: now, from: socket.username, to: to || null, text };
+    messages.push(message);
+    if (messages.length > CHAT_LIMIT) messages.splice(0, messages.length - CHAT_LIMIT);
+    if (!saveChat()) {
+      const last = messages.lastIndexOf(message);
+      if (last >= 0) messages.splice(last, 1);
+      return denyChat('Could not save the message');
+    }
+    socket.chatAt = now;
+    deliverChat(message);
+  });
+
+  // --- Campaign journal: GM notes, party treasury, XP log ---
+  onCampaign('get-journal', () => {
+    if (!socket.username) return;
+    socket.emit('journal', journalPayloadFor(socket.username));
+  });
+
+  function denyJournal(message) {
+    socket.emit('journal-denied', { error: message });
+  }
+
+  onCampaign('save-journal-entry', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyJournal('GM only');
+    if (!isRecord(payload) || !isRecord(payload.entry)) return denyJournal('Invalid entry');
+    const raw = payload.entry;
+    const text = boundedMultilineText(raw.text, JOURNAL_TEXT_LIMIT);
+    if (!text) return denyJournal('An entry needs some text');
+    const journal = journalDB();
+    const now = Date.now();
+    const id = boundedString(raw.id, 20);
+    const existing = id && journal.entries.find(entry => entry.id === id);
+    if (existing) {
+      existing.title = boundedText(raw.title, 120) || existing.title;
+      existing.text = text;
+      existing.kind = JOURNAL_KINDS.includes(raw.kind) ? raw.kind : existing.kind;
+      existing.visible = raw.visible === 'gm' ? 'gm' : 'party';
+      existing.updated = now;
+    } else {
+      if (journal.entries.length >= JOURNAL_LIMIT) return denyJournal('The journal is full');
+      journal.entries.push({
+        id: crypto.randomUUID().slice(0, 8),
+        title: boundedText(raw.title, 120) || 'Untitled',
+        text,
+        kind: JOURNAL_KINDS.includes(raw.kind) ? raw.kind : 'quest',
+        visible: raw.visible === 'gm' ? 'gm' : 'party',
+        at: now, updated: now
+      });
+    }
+    if (!saveJournal()) return denyJournal('Could not save the journal');
+    pushJournal();
+  });
+
+  onCampaign('delete-journal-entry', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyJournal('GM only');
+    const id = isRecord(payload) ? boundedString(payload.id, 20) : '';
+    const journal = journalDB();
+    const before = journal.entries.length;
+    journal.entries = journal.entries.filter(entry => entry.id !== id);
+    if (journal.entries.length === before) return;
+    if (!saveJournal()) return denyJournal('Could not save the journal');
+    pushJournal();
+  });
+
+  onCampaign('update-treasury', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyJournal('GM only');
+    if (!isRecord(payload) || !isRecord(payload.treasury)) return denyJournal('Invalid treasury');
+    const journal = journalDB();
+    const coins = {};
+    for (const coin of TREASURY_COINS) {
+      const value = journalInt(payload.treasury[coin], 0, 100000000, 0);
+      if (value) coins[coin] = value;
+    }
+    journal.treasury = coins;
+    if (!saveJournal()) return denyJournal('Could not save the treasury');
+    pushJournal();
+  });
+
+  onCampaign('set-xp-mode', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyJournal('GM only');
+    const mode = isRecord(payload) && payload.mode === 'xp' ? 'xp' : 'milestone';
+    const journal = journalDB();
+    if (journal.xp.mode === mode) return;
+    journal.xp.mode = mode;
+    if (!saveJournal()) return denyJournal('Could not save the XP mode');
+    pushJournal();
+  });
+
+  // GM awards XP (or a milestone note) to named characters: the log entry is
+  // party information, the points land on each sheet as `char.xp`.
+  onCampaign('award-xp', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyJournal('GM only');
+    if (!isRecord(payload)) return denyJournal('Invalid award');
+    const text = boundedText(payload.text, 240);
+    const xp = journalInt(payload.xp, 0, 100000000, 0);
+    if (!text && !xp) return denyJournal('An award needs a name or points');
+    const journal = journalDB();
+    if (journal.xp.awards.length >= JOURNAL_LIMIT) return denyJournal('The XP log is full');
+    const charIds = sanitizeReferenceArray(payload.charIds, 32, 80)
+      .filter(id => hasOwn(charactersDB, id));
+    journal.xp.awards.push({
+      id: crypto.randomUUID().slice(0, 8), at: Date.now(),
+      text: text || `${xp} XP`, xp, charIds
+    });
+    if (!saveJournal()) return denyJournal('Could not save the XP log');
+    const changed = [];
+    if (xp) {
+      for (const id of charIds) {
+        const char = ownValue(charactersDB, id);
+        if (!char) continue;
+        char.xp = Math.min(100000000, (Number.isFinite(char.xp) ? char.xp : 0) + xp);
+        changed.push(char);
+      }
+      if (changed.length && !saveCharacters()) {
+        for (const char of changed) delete char.xp;
+        journal.xp.awards.pop();
+        saveJournal();
+        return denyJournal('Could not save the character sheets');
+      }
+    }
+    pushJournal();
+    for (const char of changed) emitCharacterChange('character-updated', char, char.owner);
   });
 
   // Pools and rests. Everyone at the table sees what is spent and who asked

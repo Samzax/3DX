@@ -105,28 +105,7 @@
         </section>
     </main>
 
-    <!-- Privacy + invites for one campaign (its GM) -->
-    <div id="access-overlay" class="hidden">
-        <div id="access-modal" role="dialog" aria-modal="true" aria-labelledby="access-title">
-            <h2 id="access-title">Campaign access</h2>
-            <p id="access-sub" class="lobby-sub"></p>
-            <label class="wizard-radio">
-                <input type="radio" name="access-visibility" value="private" />
-                <span><strong>Private</strong> &mdash; only players you invite can see and join it.</span>
-            </label>
-            <label class="wizard-radio">
-                <input type="radio" name="access-visibility" value="public" />
-                <span><strong>Public</strong> &mdash; everyone on this server can see and join it.</span>
-            </label>
-            <h3 class="access-heading">Invited players</h3>
-            <div id="access-members" class="wizard-party"></div>
-            <div class="lobby-modal-actions">
-                <div id="access-error" class="hidden"></div>
-                <button id="access-cancel" class="lobby-secondary">Cancel</button>
-                <button id="access-save" class="lobby-primary">Save</button>
-            </div>
-        </div>
-    </div>
+    <!-- The privacy + invites dialog (shared/access.js) builds its own DOM. -->
 
     <!-- Enter as player: pick which of your characters you are playing -->
     <div id="party-overlay" class="hidden">

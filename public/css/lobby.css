@@ -491,49 +491,6 @@ body.lobby-page a.workspace-top-button {
     border-style: dashed;
 }
 
-/* --- Access modal --- */
-
-#access-overlay {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.72);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 9000;
-    padding: 20px;
-}
-
-#access-modal {
-    background: #17171d;
-    border: 1px solid var(--panel-border, #4a3f2e);
-    border-radius: 12px;
-    padding: 22px;
-    width: 100%;
-    max-width: 480px;
-    max-height: 90vh;
-    overflow-y: auto;
-    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
-}
-
-#access-modal h2 {
-    margin: 0 0 6px;
-    font-size: 20px;
-}
-
-.access-heading {
-    margin: 18px 0 0;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-dim, #a89d88);
-}
-
-#access-error {
-    margin-right: auto;
-    color: #ff9b9b;
-    font-size: 13px;
-}
-
 /* --- Host tab --- */
 
 .host-create {

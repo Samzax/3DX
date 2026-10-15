@@ -82,7 +82,7 @@ function defaultChar() {
       skin:'', eyeColor:'brown', traits:[], look:null },
     equipment:{ armor:null, shield:false, weapons:[], items:[] },
     spells:[],
-    feats:[], expertise:[], languages:[], choices:{}, notes:'',
+    feats:[], expertise:[], languages:[], choices:{}, notes:'', xp:0,
     asi:{}, personality:{ traits:'', ideals:'', bonds:'', flaws:'', specialty:'' }
   };
 }
@@ -164,6 +164,7 @@ function tabIdentity() {
       <div class="row"><label class="fld">Subrace</label><select id="f-subrace" ${subraces.length?'':'disabled'}>
         <option value="">${subraces.length?'— none —':'(no subraces)'}</option>${opt(subraces, char.subrace)}</select></div>
     </div>
+    <div class="row"><label class="fld">Experience points</label><input type="number" id="f-xp" min="0" max="100000000" value="${Number.isFinite(char.xp)?char.xp:0}"/></div>
     ${racialChoiceUI}
     <div class="info"><strong>${esc(race?race.name:'')}</strong> — speed ${esc(race?race.speed:'?')} ft, size ${esc(race?race.size:'')}. Ability bonuses: ${esc(bonusText)}.
       <div style="margin-top:6px;">${race && race.traits ? race.traits.map(t=>esc(t.name)).join(' · ') : ''}</div></div>
@@ -838,6 +839,10 @@ function wireTab() {
 
   if (activeTab === 'identity') {
     $('f-name').oninput = e => { char.name = e.target.value; };
+    $('f-xp').oninput = e => {
+      const n = Math.floor(Number(e.target.value));
+      char.xp = Number.isFinite(n) ? Math.max(0, Math.min(100000000, n)) : 0;
+    };
     $('f-race').onchange = e => { char.race = e.target.value; char.subrace=null; char.racialChoice=[]; char.racialSpread=null; applyRaceLook(char.race); refresh(); };
     $('f-subrace').onchange = e => { char.subrace = e.target.value || null; refresh(); };
     b.querySelectorAll('.rc').forEach(cb => cb.onchange = () => {
@@ -1105,6 +1110,7 @@ function buildSaveObject() {
     feats: [...char.feats], expertise: [...char.expertise], languages: [...char.languages],
     choices: Object.fromEntries(Object.entries(char.choices).map(([k, v]) => [k, [...v]])),
     notes: char.notes || '',
+    ...(Number.isFinite(char.xp) ? { xp: char.xp } : {}),
     asi: { ...char.asi }, personality: { ...char.personality },
     ...(char.hp ? { hp: { current: char.hp.current } } : {}),
     // back-compat for existing token renderers
@@ -1132,6 +1138,7 @@ function loadIntoBuilder(c) {
   char.choices = (c.choices && typeof c.choices === 'object' && !Array.isArray(c.choices))
     ? Object.fromEntries(Object.entries(c.choices).filter(([, v]) => Array.isArray(v)).map(([k, v]) => [k, [...v]])) : {};
   char.notes = typeof c.notes === 'string' ? c.notes : '';
+  char.xp = Number.isFinite(c.xp) ? Math.max(0, Math.min(100000000, Math.floor(c.xp))) : 0;
   char.asi = {};
   if (c.asi && typeof c.asi === 'object') for (const a of ABILITIES) { const n = Math.max(0, Math.min(12, Math.floor(+c.asi[a] || 0))); if (n) char.asi[a] = n; }
   for (const [key] of PERSONALITY_FIELDS) char.personality[key] = (c.personality && typeof c.personality[key] === 'string') ? c.personality[key].slice(0, 600) : '';

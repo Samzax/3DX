@@ -261,9 +261,11 @@
 #campaign-panel .tp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; margin: 4px 0 2px; }
 #campaign-panel .tp-inline { display: flex; gap: 6px; align-items: stretch; }
 #campaign-panel .tp-inline input { flex: 1 1 auto; min-width: 0; }
+#campaign-panel .tp-inline select { flex: 0 0 auto; width: auto; }
 #campaign-panel input[type=text],
 #campaign-panel input[type=number],
-#campaign-panel textarea {
+#campaign-panel textarea,
+#campaign-panel select {
   width: 100%; background: #1a150f; color: var(--text);
   border: 1px solid var(--panel-border); border-radius: var(--btn-radius);
   font-size: 12px; padding: 5px 7px; font-family: inherit;
@@ -284,6 +286,31 @@
 #campaign-panel .tp-section { margin: 18px 0 4px; padding-top: 14px; border-top: 1px solid var(--panel-border); font-size: 15px; font-weight: 700; color: var(--text); }
 #campaign-panel .tp-check-wide { margin-top: 10px; }
 #campaign-panel .tp-rebuild { background: #b4532a; color: #fff; }
+/* Session history list (post new session archives the recap here). */
+#campaign-sessions { display: flex; flex-direction: column; gap: 4px; max-height: 240px; overflow-y: auto; }
+#campaign-panel .campaign-session-item {
+  border: 1px solid var(--panel-border); border-radius: var(--btn-radius);
+  padding: 4px 8px; font-size: 12px; color: #d6ccb8; background: #1a150f;
+}
+#campaign-panel .campaign-session-item summary { cursor: pointer; color: var(--text); }
+#campaign-panel .campaign-session-text { white-space: pre-wrap; margin: 6px 0; color: #d6ccb8; line-height: 1.4; }
+/* Journal entries, treasury, XP log. */
+#campaign-panel .journal-entries { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; margin: 6px 0; }
+#campaign-panel .journal-item {
+  border: 1px solid var(--panel-border); border-radius: var(--btn-radius);
+  padding: 4px 8px; font-size: 12px; color: #d6ccb8; background: #1a150f;
+}
+#campaign-panel .journal-item summary { cursor: pointer; color: var(--text); display: flex; gap: 6px; align-items: center; }
+#campaign-panel .journal-item .journal-tag {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text-dim); border: 1px solid var(--panel-border); border-radius: 8px; padding: 0 6px;
+}
+#campaign-panel .journal-item .journal-body { white-space: pre-wrap; margin: 6px 0; line-height: 1.4; }
+#campaign-panel .journal-item .journal-actions { display: flex; gap: 6px; }
+#campaign-panel .journal-editor { border: 1px solid var(--accent-warm); border-radius: var(--btn-radius); padding: 8px; margin: 6px 0; display: flex; flex-direction: column; gap: 6px; }
+#campaign-panel .journal-editor.hidden { display: none; }
+#campaign-panel .journal-status { min-height: 14px; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+#campaign-panel #treasury-row input { text-align: center; }
 #terrain-panel .tp-reset { width: 100%; margin-top: 10px; padding: 7px; background: #5d2f2f; color: var(--text); border: none; border-radius: var(--btn-radius); cursor: pointer; font-size: 13px; }
 #terrain-panel .tp-reset:hover { background: #733a3a; }
 
@@ -311,3 +338,4 @@
 }
 #prop-menu #btn-prop-rot { cursor: pointer; }
 #prop-menu .menu-button { grid-column: 1 / -1; margin-bottom: 0; }
+

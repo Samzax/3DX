@@ -40,6 +40,7 @@ import { createSkyChip } from '../shared/skypanel.js';
 import { nearestDoor, normalizeSenses } from '../shared/vision.js';
 import { buildBarriers, walkable, PROP_POSES } from '../shared/passage.js';
 import { createRollLog } from '../shared/rolllog.js';
+import { createChat } from '../shared/chat.js';
 import { createRestDesk } from '../shared/rests.js';
 import { createCastDesk } from '../shared/castdesk.js';
 import { spellDetailHTML, spellCastRequest, spellMechanics, spellLevelLabel } from '../shared/spellinfo.js';
@@ -62,6 +63,8 @@ function inPlayingParty(char) {
 // camera landing reads it whenever a map-state arrives.
 let campaignContext = null;
 let pendingSpawnLanding = false;   // first unified landing after (re)join uses settings.spawn
+// Journal snapshot from the server (party-visible entries only) + treasury + XP.
+let journalState = { entries: [], treasury: {}, xp: { mode: 'milestone', awards: [] } };
 
 // Adopt campaign settings: seed + world shape drive local generation (reset
 // picks them up automatically; without a reset, regenerate live ground only).
@@ -101,6 +104,18 @@ function renderHall() {
     text('hall-recap', recap);
     document.getElementById('hall-premise').classList.toggle('hidden', !premise);
     document.getElementById('hall-recap-block').classList.toggle('hidden', !recap);
+    // Session history: everything older than the newest recap (that one is
+    // already "Last time"), newest first.
+    const history = (Array.isArray(campaignContext.sessions) ? campaignContext.sessions : []).slice(1);
+    const sessionsBlock = document.getElementById('hall-sessions-block');
+    const sessionsBox = document.getElementById('hall-sessions');
+    if (sessionsBlock && sessionsBox) {
+        sessionsBlock.classList.toggle('hidden', !history.length);
+        sessionsBox.innerHTML = history.map(entry => {
+            const date = entry.at ? new Date(entry.at).toLocaleDateString() : '';
+            return `<details class="hall-session"><summary>Session ${escHtml(entry.n)}${date ? ` · ${escHtml(date)}` : ''}</summary><p>${escHtml(entry.text)}</p></details>`;
+        }).join('');
+    }
     const seen = new Set();
     document.getElementById('hall-roster').innerHTML = hallRoster
         .filter(p => p && p.username && !seen.has(p.username) && seen.add(p.username))
@@ -240,6 +255,7 @@ const abilityTargeting = new AbilityTargeting({
     onChange: () => updatePlayerHintBar()
 });
 let rollLog = null;             // table log + roll requests (shared/rolllog.js), created with the socket
+let chat = null;                // OOC table chat + whispers (shared/chat.js)
 const openSpells = new Set();   // spell cards left open in the Spells panel
 let restDesk = null;            // spent slots/pools + rest requests (shared/rests.js)
 let castDesk = null;            // casting outside a fight: aim, ask the GM (shared/castdesk.js)
@@ -261,6 +277,7 @@ let isDraggingHeight = false;
 
 let placeCharacter = null; // character being placed (place tool armed via the right menu)
 let characterInstances = []; // my placed tokens across all maps (Instances tab), server-pushed
+let partyMembers = [];       // campaign roster: identity only (Party tab)
 let pendingFocus = null;     // world position to jump to once the next map-state lands
 let seekOwnToken = false;    // first entry: land where the player's character stands
 let pendingViewPose = null;  // GM-directed camera pose to apply after a relocate join
@@ -467,6 +484,7 @@ function init() {
     // --- Character menu tabs (right): Spawn | Instances ---
     document.getElementById('char-tab-spawn').addEventListener('click', () => setCharacterTab('spawn'));
     document.getElementById('char-tab-instances').addEventListener('click', () => setCharacterTab('instances'));
+    document.getElementById('char-tab-party').addEventListener('click', () => setCharacterTab('party'));
 
     // --- HUD panel logic ---
     const hudOverlay = document.getElementById('hud-panel-overlay');
@@ -1344,13 +1362,52 @@ function syncCharacterMenuActive() {
     });
 }
 
-// --- Character menu tabs: Spawn (place tokens) | Instances (where they are) ---
+// --- Character menu tabs: Spawn (place tokens) | Instances (where they are) |
+// Party (who is in this campaign — identity only, no numbers) ---
 function setCharacterTab(tab) {
     document.getElementById('char-tab-spawn').classList.toggle('active', tab === 'spawn');
     document.getElementById('char-tab-instances').classList.toggle('active', tab === 'instances');
+    document.getElementById('char-tab-party').classList.toggle('active', tab === 'party');
     document.getElementById('character-button-list').classList.toggle('hidden', tab !== 'spawn');
     document.getElementById('character-instance-list').classList.toggle('hidden', tab !== 'instances');
+    document.getElementById('character-party-list').classList.toggle('hidden', tab !== 'party');
     if (tab === 'instances' && socket) socket.emit('get-character-instances'); // fresh on open
+    if (tab === 'party' && socket) socket.emit('get-party');                   // fresh on open
+}
+
+// The party roster: names, owners and the class/level line — deliberately
+// identity-only (HP/AC/conditions of other characters stay hidden from players).
+function renderPartyList() {
+    const list = document.getElementById('character-party-list');
+    if (!list) return;
+    if (!partyMembers.length) {
+        list.innerHTML = '<p style="font-size: 12px; color: #999;">No one in the party yet.</p>';
+        return;
+    }
+    list.innerHTML = '';
+    const classNameOf = (index) => {
+        const cls = (typeof SRD !== 'undefined' && SRD) ? SRD.get('classes', index) : null;
+        return cls ? cls.name : String(index || '').replace(/^\w/, c => c.toUpperCase());
+    };
+    partyMembers.forEach(member => {
+        const row = document.createElement('div');
+        row.className = 'instance-row';
+        const main = document.createElement('div');
+        main.className = 'instance-row-main';
+        const name = document.createElement('div');
+        name.className = 'inst-name';
+        name.textContent = member.name || 'Unnamed';
+        const line = document.createElement('div');
+        line.className = 'inst-loc';
+        line.textContent = [member.race ? String(member.race).replace(/^\w/, c => c.toUpperCase()) : '',
+            member.cls ? `${classNameOf(member.cls)} ${member.level || 1}` : ''].filter(Boolean).join(' · ') || '—';
+        const by = document.createElement('div');
+        by.className = 'inst-by';
+        by.textContent = `Played by ${member.owner || 'unknown'}`;
+        main.append(name, line, by);
+        row.appendChild(main);
+        list.appendChild(row);
+    });
 }
 
 // Tactical paths share the '@world' room server-side; mirror that routing so
@@ -1878,6 +1935,36 @@ function setCurrentHP(char, value, maxHP) {
     if (socket) socket.emit('update-hp', { id: char.id, current: v });
 }
 
+// The player's Journal tab: party-visible campaign notes, the shared treasury
+// and the XP log — all read-only (the GM authors them from the campaign panel).
+function renderJournalPanel() {
+    const box = document.getElementById('journal-content');
+    if (!box) return;
+    const kindTags = { quest: 'Quest', npc: 'NPC', lore: 'Lore', handout: 'Handout' };
+    const coins = ['pp', 'gp', 'ep', 'sp', 'cp'].filter(c => journalState.treasury[c])
+        .map(c => `${journalState.treasury[c]} ${c}`).join(' · ');
+    const entries = journalState.entries.length
+        ? journalState.entries.map(entry => {
+            const tag = kindTags[entry.kind] || 'Quest';
+            return `<details class="spell-lvl"><summary><b>${escHtml(entry.title)}</b> <span class="muted">${escHtml(tag)}</span></summary>
+                <div class="muted" style="white-space:pre-wrap; margin-top:4px;">${escHtml(entry.text)}</div></details>`;
+        }).join('')
+        : `<p class="muted">Nothing in the journal yet.</p>`;
+    const awards = journalState.xp.awards.length
+        ? journalState.xp.awards.slice().reverse().map(award => {
+            const date = award.at ? new Date(award.at).toLocaleDateString() : '';
+            return `<div class="row-item"><span>${escHtml(award.text)}${date ? ` <span class="muted">${escHtml(date)}</span>` : ''}</span><b>${award.xp ? `+${award.xp} XP` : ''}</b></div>`;
+        }).join('')
+        : '<p class="muted">No XP awarded yet.</p>';
+    box.innerHTML = `
+        <h4>Notes</h4>
+        ${entries}
+        <h4>Treasury</h4>
+        <div class="row-item"><span>Party coin</span><b>${coins ? escHtml(coins) : '—'}</b></div>
+        <h4>Experience ${journalState.xp.mode === 'xp' ? '' : '<span class="muted">(milestone)</span>'}</h4>
+        ${awards}`;
+}
+
 function renderHUD() {
     const cc = document.getElementById('char-content');
     const ic = document.getElementById('inv-content');
@@ -2017,6 +2104,13 @@ function bindRollables(root, char) {
 function sheetDetailsHTML(char, d) {
     const line = (label, value) => value ? `<div class="row-item"><span>${label}</span><b>${escHtml(value)}</b></div>` : '';
     const speeds = Object.entries(d.speeds || {}).map(([mode, feet]) => `${mode} ${feet} ft`).join(', ');
+    // Party treasury + this character's XP (campaign journal state).
+    const coins = ['pp', 'gp', 'ep', 'sp', 'cp'].filter(c => journalState.treasury[c])
+        .map(c => `${journalState.treasury[c]} ${c}`).join(' · ');
+    const party = [
+        line('Treasury', coins),
+        Number.isFinite(char.xp) ? line('XP', String(char.xp)) : ''
+    ].join('');
     const traits = [
         line('Senses', Object.keys(d.senses || {}).length ? describeSenses(d.senses) : ''),
         line('Other speeds', speeds),
@@ -2029,7 +2123,7 @@ function sheetDetailsHTML(char, d) {
         `<details class="spell-lvl"><summary>${escHtml(f.name)} <span class="muted">${escHtml(f.sourceLabel || '')}</span></summary><div class="muted" style="white-space:pre-wrap;">${escHtml(f.desc || 'No description.')}</div></details>`
     ).join('') || '<p class="muted">No features.</p>';
     const notes = char.notes ? `<h4>Notes</h4><div class="muted" style="white-space:pre-wrap;">${escHtml(char.notes)}</div>` : '';
-    return `${traits ? '<h4>Traits</h4>' + traits : ''}<h4>Features</h4>${features}${notes}`;
+    return `${traits ? '<h4>Traits</h4>' + traits : ''}${party ? '<h4>Party</h4>' + party : ''}<h4>Features</h4>${features}${notes}`;
 }
 
 function renderInvPanel(char, d) {
@@ -2427,6 +2521,7 @@ function initSocket() {
         socket, isGM: () => false,
         actor: () => (activeChar() && activeChar().name) || myUsername || ''
     });
+    chat = createChat({ socket, username: () => myUsername });
     castDesk = createCastDesk({
         socket, isGM: () => false, username: () => myUsername,
         worldGroup, objects: () => objects, terrain: () => terrain,
@@ -2498,8 +2593,11 @@ function initSocket() {
         if (workspace) workspace.setCampaign({ id: campaign.id, name: campaign.name, owner: campaign.owner });
         syncHall();
         if (rollLog) rollLog.refresh();
+        if (chat) chat.refresh();
         if (restDesk) restDesk.refresh();
         if (castDesk) castDesk.refresh();
+        socket.emit('get-journal');
+        socket.emit('get-party');
     });
 
     socket.on('campaign-updated', (campaign) => {
@@ -2516,6 +2614,22 @@ function initSocket() {
     });
 
     socket.on('campaign-deleted', () => { location.replace('/lobby'); });
+
+    // Journal snapshot (server already filtered to party-visible entries).
+    socket.on('journal', (data) => {
+        if (!data || typeof data !== 'object') return;
+        journalState = {
+            entries: Array.isArray(data.entries) ? data.entries : [],
+            treasury: (data.treasury && typeof data.treasury === 'object') ? data.treasury : {},
+            xp: (data.xp && typeof data.xp === 'object') ? data.xp : { mode: 'milestone', awards: [] }
+        };
+        if (!Array.isArray(journalState.xp.awards)) journalState.xp.awards = [];
+        renderJournalPanel();
+        renderHUD(); // treasury + XP line on the sheet
+    });
+    socket.on('journal-denied', ({ error } = {}) => {
+        if (typeof notify === 'function' && error) notify(error);
+    });
 
     // --- Character data for the HUD ---
     socket.on('load-user-characters', (chars) => {
@@ -2540,6 +2654,12 @@ function initSocket() {
         }
         renderInstanceList();
         landOnOwnToken();
+    });
+
+    // Party tab: the campaign roster (identity only — the server sends no numbers).
+    socket.on('party', (data) => {
+        partyMembers = (data && Array.isArray(data.members)) ? data.members : [];
+        renderPartyList();
     });
 
     socket.on('load-homebrew', (hb) => {

@@ -48,11 +48,13 @@ import { createTabletopWorkspace } from '../shared/workspace.js';
 import { ObjectNameplates, objectIdentity, setObjectSelected, updateObjectPresentation, updateObjectPositionData, revertUncommittedMove } from '../shared/object-ui.js';
 import { AuthenticatedMapReload } from '../shared/sync-state.js';
 import { readCampaignId } from '../shared/campaigns.js';
-import { setupLoginModal } from '../shared/login.js';
+import { setupLoginModal, storedUsername } from '../shared/login.js';
 import { PROP_POSES } from '../shared/passage.js';
 import { createRollLog } from '../shared/rolllog.js';
+import { createChat } from '../shared/chat.js';
 import { createRestDesk } from '../shared/rests.js';
 import { createCastDesk } from '../shared/castdesk.js';
+import { createAccessDialog } from '../shared/access.js';
 
 // Tabletop screens always enter through the lobby with ?campaign=<id>.
 const campaignId = readCampaignId();
@@ -160,6 +162,7 @@ let monsterCatalogState = 'idle';
 let monsterCatalogPromise = null;
 let allCharacters = [];         // GM sees every character (stat-fill fallback)
 let characterInstances = [];    // every placed character token across all maps (Instances tab)
+let partyMembers = [];          // campaign roster: identity only (Party tab)
 let dungeons = [];              // every pocket map + its entry portals (Dungeons list)
 let pendingFocus = null;       // world position to land on once the next map-state arrives
 let combatState = null;
@@ -180,7 +183,8 @@ let dragStartPos = null;        // selected token's world position when the move
 let currentTool = null;
 let currentMoveMode = 'standard';
 let toolMenuButtons = {};
-let rollLog = null;             // table log + roll requests (shared/rolllog.js), created with the socket
+let rollLog = null;            // table log + roll requests (shared/rolllog.js), created with the socket
+let chat = null;               // OOC table chat + whispers (shared/chat.js)
 let restDesk = null;            // rest requests + party rests (shared/rests.js)
 let castDesk = null;            // spells players ask to cast outside a fight (shared/castdesk.js)
 let moveSubMenuButtons = {};
@@ -204,6 +208,7 @@ const mapReload = new AuthenticatedMapReload();
 // Campaign context (campaign-joined + map-state stamps). Module scope: the
 // breadcrumb, region gating and camera landing all read it.
 let campaignContext = null;
+let accessDialog = null;              // privacy + invites (shared/access.js)
 let pendingSpawnLanding = false;    // first unified landing after (re)join uses settings.spawn
 let hexGridGroup = null;
 let boundsRect = null;              // pocket boundary rectangle
@@ -229,6 +234,9 @@ let atmosphere = null, skyPanel = null, skyChip = null, skyTickAt = 0; // sky + 
 // as" one token, which shows exactly that token's sight on this screen only.
 let visionFx = null, visionChip = null, visionSettings = null, viewAsId = null;
 let campaignWorldDirty = false, campaignWorldSaved = null;
+// Journal + treasury + XP (server pushes the role-scoped snapshot on 'journal').
+let journalState = { entries: [], treasury: {}, xp: { mode: 'milestone', awards: [] } };
+let journalEditingId = null;
 let currentBiome = 'plains';
 let hexTags = {};                   // "q,r" -> { biome } for the current map
 let hexTree = {};                   // all layers' tags (feeds the terrain generator)
@@ -534,6 +542,7 @@ function onDoubleClick(event) {
 }
 
 // --- Socket.IO: GM auto-login + full map/character sync ---
+
 function initSocket() {
     socket = io();
     login.attach(socket);
@@ -541,6 +550,8 @@ function initSocket() {
         socket, isGM: () => true,
         actor: () => (selectedObject && selectedObject.userData.syncId ? objectIdentity(selectedObject, objects).displayName : 'GM')
     });
+    chat = createChat({ socket, username: () => storedUsername() });
+
     // Players ask for rests; the GM answers here (shared/rests.js).
     restDesk = createRestDesk({ socket, isGM: () => true, notify: (text) => rollLog.notice(text) });
     // Players ask to cast; their template shows faded while they aim it.
@@ -549,6 +560,34 @@ function initSocket() {
         notify: (text) => rollLog.notice(text),
         onStrike: (summon) => abilityTargeting.begin(summon.casterId, 0, { name: summon.name, maxTargets: 1 }, 'strike', { summonId: summon.id }),
         onFx: (entry) => queueCombatFx(entry, findObjectMesh)
+    });
+    // Privacy + invites for this campaign (same dialog the lobby cards open).
+    accessDialog = createAccessDialog({
+        getSocket: () => socket,
+        onSaved: (payload) => {
+            if (campaignContext && payload && payload.id === campaignContext.id) {
+                campaignContext.visibility = payload.visibility;
+                campaignContext.members = payload.members;
+            }
+            fillCampaignPanel();
+            const status = document.getElementById('campaign-status');
+            if (status) status.textContent = 'Access saved.';
+        }
+    });
+    // The GM's campaign export arrives as one JSON bundle -> file download.
+    socket.on('campaign-export', ({ id, name, data } = {}) => {
+        if (!data || id !== campaignId) return;
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${String(name || 'campaign').replace(/[^\w.-]+/g, '_').slice(0, 60) || 'campaign'}-export.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+        const status = document.getElementById('campaign-status');
+        if (status) status.textContent = 'Campaign exported.';
     });
 
     combatTracker = new CombatTracker({
@@ -643,8 +682,11 @@ function initSocket() {
             { id: campaign.id, name: campaign.name, owner: campaign.owner },
             { canManage: true, onSettings: () => workspace.showPanel('campaign-panel') });
         if (rollLog) rollLog.refresh();
+        if (chat) chat.refresh();
         if (restDesk) restDesk.refresh();
         if (castDesk) castDesk.refresh();
+        socket.emit('get-journal');
+        socket.emit('get-party');
     });
 
     socket.on('campaign-updated', (campaign) => {
@@ -657,10 +699,27 @@ function initSocket() {
 
     socket.on('campaign-deleted', () => { location.replace('/lobby'); });
 
+    // Journal / treasury / XP snapshot (role-scoped: the GM sees every entry).
+    socket.on('journal', (data) => {
+        if (!data || typeof data !== 'object') return;
+        journalState = {
+            entries: Array.isArray(data.entries) ? data.entries : [],
+            treasury: (data.treasury && typeof data.treasury === 'object') ? data.treasury : {},
+            xp: (data.xp && typeof data.xp === 'object') ? data.xp : { mode: 'milestone', awards: [] }
+        };
+        if (!Array.isArray(journalState.xp.awards)) journalState.xp.awards = [];
+        renderJournal();
+    });
+    socket.on('journal-denied', ({ error } = {}) => {
+        const status = document.getElementById('journal-status');
+        if (status) status.textContent = error || 'Refused.';
+    });
+
     socket.on('load-user-characters', (characters) => {
         allCharacters = Array.isArray(characters) ? characters : [];
         loadCharactersToMenu(characters);
         answerStatsPending(); // combat may be waiting on character stats
+        renderJournal();      // award-XP checkbox roster
     });
 
     socket.on('character-updated', () => {
@@ -672,6 +731,13 @@ function initSocket() {
     socket.on('character-instances', (data) => {
         characterInstances = (data && Array.isArray(data.instances)) ? data.instances : [];
         renderInstanceList();
+    });
+
+    // Party tab: the campaign roster, identity only (the GM gets no HP/AC from
+    // this either — those live in combat and the character editor).
+    socket.on('party', (data) => {
+        partyMembers = (data && Array.isArray(data.members)) ? data.members : [];
+        renderPartyList();
     });
 
     // Dungeons list: every pocket map with the portals leading into it. Pushed
@@ -1154,6 +1220,7 @@ function init() {
     // Characters section tabs: Spawn (place a character) | Instances (placed tokens).
     document.getElementById('char-tab-spawn').addEventListener('click', () => setCharacterTab('spawn'));
     document.getElementById('char-tab-instances').addEventListener('click', () => setCharacterTab('instances'));
+    document.getElementById('char-tab-party').addEventListener('click', () => setCharacterTab('party'));
 
     // --- Tool Menu Listeners (Left) ---
     toolMenuButtons.library = document.getElementById('btn-tool-library');
@@ -2866,13 +2933,50 @@ function loadCharactersToMenu(characters) {
     listContainer.appendChild(studio);
 }
 
-// --- Characters section tabs: Spawn (place a character) | Instances ---
+// --- Characters section tabs: Spawn (place a character) | Instances | Party ---
 function setCharacterTab(tab) {
     document.getElementById('char-tab-spawn').classList.toggle('active', tab === 'spawn');
     document.getElementById('char-tab-instances').classList.toggle('active', tab === 'instances');
+    document.getElementById('char-tab-party').classList.toggle('active', tab === 'party');
     document.getElementById('character-button-list').classList.toggle('hidden', tab !== 'spawn');
     document.getElementById('character-instance-list').classList.toggle('hidden', tab !== 'instances');
+    document.getElementById('character-party-list').classList.toggle('hidden', tab !== 'party');
     if (tab === 'instances' && socket) socket.emit('get-character-instances'); // fresh on open
+    if (tab === 'party' && socket) socket.emit('get-party');                   // fresh on open
+}
+
+// The party roster: names, owners and the class/level line — identity only.
+function renderPartyList() {
+    const list = document.getElementById('character-party-list');
+    if (!list) return;
+    if (!partyMembers.length) {
+        list.innerHTML = '<p style="font-size: 12px; color: #999;">No one in the party yet.</p>';
+        return;
+    }
+    list.innerHTML = '';
+    const classNameOf = (index) => {
+        const cls = (typeof SRD !== 'undefined' && SRD) ? SRD.get('classes', index) : null;
+        return cls ? cls.name : String(index || '').replace(/^\w/, c => c.toUpperCase());
+    };
+    partyMembers.forEach(member => {
+        const row = document.createElement('div');
+        row.className = 'instance-row';
+        const main = document.createElement('div');
+        main.className = 'instance-row-main';
+        const name = document.createElement('div');
+        name.className = 'inst-name';
+        name.textContent = member.name || 'Unnamed';
+        const line = document.createElement('div');
+        line.className = 'inst-loc';
+        line.textContent = [member.race ? String(member.race).replace(/^\w/, c => c.toUpperCase()) : '',
+            member.cls ? `${classNameOf(member.cls)} ${member.level || 1}` : ''].filter(Boolean).join(' · ') || '—';
+        const by = document.createElement('div');
+        by.className = 'inst-by';
+        by.textContent = `Played by ${member.owner || 'unknown'}`;
+        main.append(name, line, by);
+        row.appendChild(main);
+        list.appendChild(row);
+    });
 }
 
 // Tactical path of the province containing a world position (inverse of
@@ -4026,6 +4130,83 @@ function renderCampaignBiomeChecks() {
     ).join('');
 }
 
+// Session history (newest first): "Session N · date" with the full recap
+// folded open, and a delete that asks first. The server sends the newest 20.
+function renderCampaignSessions() {
+    const box = document.getElementById('campaign-sessions');
+    if (!box || !campaignContext) return;
+    const sessions = Array.isArray(campaignContext.sessions) ? campaignContext.sessions : [];
+    if (!sessions.length) {
+        box.innerHTML = '<div class="tp-hint">No sessions posted yet.</div>';
+        return;
+    }
+    box.innerHTML = sessions.map(entry => {
+        const date = entry.at ? new Date(entry.at).toLocaleDateString() : '';
+        return `<details class="campaign-session-item">
+            <summary>Session ${escHtml(entry.n)}${date ? ` · ${escHtml(date)}` : ''}</summary>
+            <div class="campaign-session-text">${escHtml(entry.text)}</div>
+            <button type="button" class="tp-chip" data-del-session="${escHtml(entry.n)}">Delete</button>
+        </details>`;
+    }).join('');
+}
+
+// --- Journal / treasury / XP panel ---
+const JOURNAL_KIND_LABELS = { quest: 'Quest', npc: 'NPC', lore: 'Lore', handout: 'Handout' };
+
+function renderJournal() {
+    // Entries list.
+    const box = document.getElementById('journal-entries');
+    if (box) {
+        const shown = journalState.entries;
+        box.innerHTML = shown.length ? shown.map(entry => {
+            const tag = JOURNAL_KIND_LABELS[entry.kind] || 'Quest';
+            const who = entry.visible === 'gm' ? 'GM only' : 'Party';
+            const date = entry.at ? new Date(entry.at).toLocaleDateString() : '';
+            return `<details class="journal-item" data-entry="${escHtml(entry.id)}">
+                <summary><span class="journal-tag">${escHtml(tag)}</span> ${escHtml(entry.title)}
+                    <span class="journal-tag">${escHtml(who)}</span>${date ? ` <span class="journal-tag">${escHtml(date)}</span>` : ''}</summary>
+                <div class="journal-body">${escHtml(entry.text)}</div>
+                <div class="journal-actions">
+                    <button type="button" class="tp-chip" data-journal-edit="${escHtml(entry.id)}">Edit</button>
+                    <button type="button" class="tp-chip" data-journal-del="${escHtml(entry.id)}">Delete</button>
+                </div>
+            </details>`;
+        }).join('') : `<div class="tp-hint">No entries yet.</div>`;
+    }
+    // Treasury inputs (never clobber what the GM is typing).
+    for (const coin of ['pp', 'gp', 'ep', 'sp', 'cp']) {
+        const input = document.getElementById(`treasury-${coin}`);
+        if (input && document.activeElement !== input) {
+            input.value = String(journalState.treasury[coin] || 0);
+        }
+    }
+    // XP mode chips.
+    document.querySelectorAll('#xp-mode [data-xp-mode]').forEach(button =>
+        button.classList.toggle('active', button.dataset.xpMode === (journalState.xp.mode || 'milestone')));
+    // Award character checkboxes (every character of the campaign — the GM has them all).
+    const charsBox = document.getElementById('award-chars');
+    const rosterKey = allCharacters.map(char => char.id).join('|');
+    if (charsBox && charsBox.dataset.roster !== rosterKey) {
+        charsBox.dataset.roster = rosterKey;
+        const checked = new Set([...charsBox.querySelectorAll('input:checked')].map(input => input.value));
+        charsBox.innerHTML = allCharacters.map(char =>
+            `<label class="tp-check"><input type="checkbox" value="${escHtml(char.id)}"${checked.has(char.id) ? ' checked' : ''}> ${escHtml(char.name || 'Unnamed')}</label>`
+        ).join('') || '<div class="tp-hint">No characters yet.</div>';
+    }
+    // XP log.
+    const awardsBox = document.getElementById('xp-awards');
+    if (awardsBox) {
+        const awards = journalState.xp.awards.slice().reverse();
+        awardsBox.innerHTML = awards.length ? awards.map(award => {
+            const date = award.at ? new Date(award.at).toLocaleDateString() : '';
+            return `<div class="journal-item"><summary style="display:flex; gap:6px;">
+                <span class="journal-tag">${award.xp ? `+${escHtml(award.xp)} XP` : 'Milestone'}</span>
+                ${escHtml(award.text)}${date ? ` <span class="journal-tag">${escHtml(date)}</span>` : ''}
+            </summary></div>`;
+        }).join('') : '<div class="tp-hint">No awards yet.</div>';
+    }
+}
+
 function fillCampaignPanel() {
     if (!campaignContext) return;
     const settings = campaignContext.settings || {};
@@ -4037,6 +4218,7 @@ function fillCampaignPanel() {
     setVal('campaign-name-input', campaignContext.name || '');
     setVal('campaign-desc-input', campaignContext.description || '');
     setVal('campaign-recap-input', campaignContext.recap || '');
+    renderCampaignSessions();
     const tableClosed = campaignContext.session === 'closed';
     document.querySelectorAll('#campaign-session [data-session]').forEach(b =>
         b.classList.toggle('active', (b.dataset.session === 'closed') === tableClosed));
@@ -4069,6 +4251,12 @@ function fillCampaignPanel() {
     const styleEl = document.getElementById('campaign-style-label');
     if (styleEl) styleEl.textContent = settings.mapStyle === 'region'
         ? 'Single region' : 'Grand campaign (DMG ladder)';
+    const accessHint = document.getElementById('campaign-access-hint');
+    if (accessHint) accessHint.textContent = campaignContext.visibility === 'private'
+        ? `Private \u2014 ${campaignContext.members && campaignContext.members.length
+            ? `${campaignContext.members.length} invited player${campaignContext.members.length === 1 ? '' : 's'}.`
+            : 'nobody invited yet; nobody but you can see it.'}`
+        : 'Public \u2014 everyone on this server can see and join.';
     const status = document.getElementById('campaign-status');
     if (status && status.textContent === 'Saving\u2026') status.textContent = 'Saved.';
 }
@@ -4101,6 +4289,17 @@ function stagedWorldSettings() {
 }
 
 function wireCampaignPanel() {
+    const access = document.getElementById('campaign-access');
+    if (access) access.addEventListener('click', () => {
+        if (accessDialog && campaignContext) accessDialog.open(campaignContext);
+    });
+    const exportBtn = document.getElementById('campaign-export');
+    if (exportBtn) exportBtn.addEventListener('click', () => {
+        if (!socket || !campaignContext) return;
+        socket.emit('export-campaign', { id: campaignContext.id });
+        const status = document.getElementById('campaign-status');
+        if (status) status.textContent = 'Exporting\u2026';
+    });
     const markWorldDirty = () => { campaignWorldDirty = true; campaignMap.render(); };
     campaignWorld = createWorldSettings(document.getElementById('campaign-world'), { onChange: markWorldDirty });
     campaignMap = createWorldMap(document.getElementById('campaign-map'), {
@@ -4162,11 +4361,108 @@ function wireCampaignPanel() {
         if (!socket || !campaignContext) return;
         socket.emit('update-campaign-settings', {
             id: campaignContext.id,
-            recap: document.getElementById('campaign-recap-input').value
+            recap: document.getElementById('campaign-recap-input').value,
+            postSession: true
         });
         const status = document.getElementById('campaign-status');
-        if (status) status.textContent = 'Posting recap\u2026';
+        if (status) status.textContent = 'Posting session\u2026';
     });
+    const sessions = document.getElementById('campaign-sessions');
+    if (sessions) sessions.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-del-session]');
+        if (!button || !socket || !campaignContext) return;
+        if (!window.confirm(`Delete session ${button.dataset.delSession} from the history?`)) return;
+        socket.emit('update-campaign-settings', {
+            id: campaignContext.id, deleteSession: Number(button.dataset.delSession)
+        });
+    });
+
+    // --- Journal / treasury / XP ---
+    const journalStatus = (text) => {
+        const status = document.getElementById('journal-status');
+        if (status) status.textContent = text || '';
+    };
+    const openJournalEditor = (entry) => {
+        const editor = document.getElementById('journal-editor');
+        if (!editor) return;
+        journalEditingId = entry ? entry.id : null;
+        document.getElementById('journal-title').value = entry ? entry.title : '';
+        document.getElementById('journal-text').value = entry ? entry.text : '';
+        document.getElementById('journal-kind').value = entry ? (entry.kind || 'quest') : 'quest';
+        document.getElementById('journal-visible').checked = entry ? entry.visible === 'party' : true;
+        editor.classList.remove('hidden');
+        document.getElementById('journal-title').focus();
+    };
+    const journalNew = document.getElementById('journal-new');
+    if (journalNew) journalNew.addEventListener('click', () => openJournalEditor(null));
+    const journalCancel = document.getElementById('journal-cancel');
+    if (journalCancel) journalCancel.addEventListener('click', () => {
+        document.getElementById('journal-editor').classList.add('hidden');
+        journalEditingId = null;
+        journalStatus('');
+    });
+    const journalSave = document.getElementById('journal-save');
+    if (journalSave) journalSave.addEventListener('click', () => {
+        if (!socket) return;
+        socket.emit('save-journal-entry', {
+            entry: {
+                id: journalEditingId,
+                title: document.getElementById('journal-title').value.trim(),
+                text: document.getElementById('journal-text').value,
+                kind: document.getElementById('journal-kind').value,
+                visible: document.getElementById('journal-visible').checked ? 'party' : 'gm'
+            }
+        });
+        document.getElementById('journal-editor').classList.add('hidden');
+        journalEditingId = null;
+        journalStatus('Saving\u2026');
+    });
+    const journalEntries = document.getElementById('journal-entries');
+    if (journalEntries) journalEntries.addEventListener('click', (event) => {
+        const edit = event.target.closest('[data-journal-edit]');
+        const del = event.target.closest('[data-journal-del]');
+        if (!socket) return;
+        if (edit) {
+            const entry = journalState.entries.find(e => e.id === edit.dataset.journalEdit);
+            if (entry) openJournalEditor(entry);
+        } else if (del) {
+            const entry = journalState.entries.find(e => e.id === del.dataset.journalDel);
+            if (entry && window.confirm(`Delete "${entry.title}" from the journal?`)) {
+                socket.emit('delete-journal-entry', { id: entry.id });
+                journalStatus('Deleting…');
+            }
+        }
+    });
+
+    const treasurySave = document.getElementById('treasury-save');
+    if (treasurySave) treasurySave.addEventListener('click', () => {
+        if (!socket) return;
+        const treasury = {};
+        for (const coin of ['pp', 'gp', 'ep', 'sp', 'cp']) {
+            treasury[coin] = Math.max(0, Math.round(Number(document.getElementById(`treasury-${coin}`).value) || 0));
+        }
+        socket.emit('update-treasury', { treasury });
+        journalStatus('Saving treasury\u2026');
+    });
+    const xpMode = document.getElementById('xp-mode');
+    if (xpMode) xpMode.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-xp-mode]');
+        if (!button || !socket) return;
+        socket.emit('set-xp-mode', { mode: button.dataset.xpMode });
+    });
+    const awardSave = document.getElementById('award-save');
+    if (awardSave) awardSave.addEventListener('click', () => {
+        if (!socket) return;
+        const text = document.getElementById('award-text').value.trim();
+        const xp = Math.max(0, Math.round(Number(document.getElementById('award-xp').value) || 0));
+        const charIds = [...document.querySelectorAll('#award-chars input:checked')].map(input => input.value);
+        if (!text && !xp) { journalStatus('An award needs a name or points.'); return; }
+        socket.emit('award-xp', { text, xp, charIds });
+        document.getElementById('award-text').value = '';
+        document.getElementById('award-xp').value = '';
+        journalStatus('Awarding\u2026');
+    });
+
     const seasons = document.getElementById('campaign-seasons');
     if (seasons) seasons.addEventListener('click', (event) => {
         const button = event.target.closest('[data-season]');

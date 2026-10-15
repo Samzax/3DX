@@ -7,6 +7,7 @@ import { escHtml, pagePath, campaignStyleLabel } from '../shared/campaigns.js';
 import { WORLD_PRESETS } from '../shared/worldgen.js';
 import { createWorldSettings } from '../shared/worldsettings.js';
 import { createWorldMap } from '../shared/worldmap.js';
+import { createAccessDialog } from '../shared/access.js';
 
 const BIOME_OPTIONS = [
     { key: 'plains', label: 'Plains' },
@@ -38,12 +39,9 @@ const wizard = {
 
 let isHost = false;          // the host account: sees everything, approves requests
 let users = [];              // account directory (host: admin detail; others: names)
-let accessCampaignId = null;
 
 const mainEl = document.getElementById('lobby-main');
 const toastEl = document.getElementById('lobby-toast');
-const accessOverlay = document.getElementById('access-overlay');
-const accessError = document.getElementById('access-error');
 const newCampaignButton = document.getElementById('btn-new-campaign');
 const userLabel = document.getElementById('lobby-user');
 const wizardOverlay = document.getElementById('wizard-overlay');
@@ -66,6 +64,13 @@ function toast(message, isError = false) {
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => toastEl.classList.add('hidden'), 6000);
 }
+
+// Privacy + invites: one shared dialog (shared/access.js); it binds its own
+// socket listeners the first time it opens.
+const accessDialog = createAccessDialog({
+    getSocket: () => socket,
+    onSaved: () => toast('Campaign access saved.')
+});
 
 // --- Tabs ---
 
@@ -160,7 +165,9 @@ function renderCampaigns() {
     setCount('invited-count', invited.length);
     setCount('host-count', requests.length);
     newCampaignButton.disabled = false;
-    if (accessCampaignId && !list.some(campaign => campaign.id === accessCampaignId)) closeAccess();
+    if (accessDialog.isOpen() && !list.some(campaign => campaign.id === accessDialog.openId())) {
+        accessDialog.close();
+    }
 }
 
 mainEl.addEventListener('click', (event) => {
@@ -177,7 +184,7 @@ mainEl.addEventListener('click', (event) => {
     } else if (action === 'enter-player') {
         openPartyPicker(card, campaignId, button.dataset.characters);
     } else if (action === 'access') {
-        openAccess(campaign);
+        accessDialog.open(campaign, users);
     } else if (action === 'approve') {
         button.disabled = true;
         socket.emit('review-campaign', { id: campaignId, approve: true });
@@ -194,48 +201,7 @@ mainEl.addEventListener('click', (event) => {
     }
 });
 
-// --- Campaign access: privacy + invites (campaign GM) ---
-
-function openAccess(campaign) {
-    if (!campaign) return;
-    accessCampaignId = campaign.id;
-    showError(accessError, '');
-    document.getElementById('access-sub').textContent = campaign.name;
-    const visibility = campaign.visibility === 'private' ? 'private' : 'public';
-    accessOverlay.querySelector(`input[name="access-visibility"][value="${visibility}"]`).checked = true;
-    const invited = new Set((campaign.members || []).map(name => name.toLowerCase()));
-    const candidates = users.filter(user => !user.disabled &&
-        user.username.toLowerCase() !== String(campaign.owner).toLowerCase());
-    document.getElementById('access-members').innerHTML = candidates.length
-        ? candidates.map(user => `
-            <label>
-                <input type="checkbox" name="access-member" value="${escHtml(user.username)}"
-                    ${invited.has(user.username.toLowerCase()) ? 'checked' : ''} />
-                <span>${escHtml(user.username)}</span>
-            </label>`).join('')
-        : '<p class="lobby-sub">No other players on this server yet.</p>';
-    accessOverlay.classList.remove('hidden');
-}
-
-function closeAccess() {
-    accessCampaignId = null;
-    accessOverlay.classList.add('hidden');
-}
-
-document.getElementById('access-cancel').addEventListener('click', closeAccess);
-accessOverlay.addEventListener('click', (event) => {
-    if (event.target === accessOverlay) closeAccess();
-});
-document.getElementById('access-save').addEventListener('click', () => {
-    if (!accessCampaignId) return;
-    const visibility = accessOverlay.querySelector('input[name="access-visibility"]:checked');
-    socket.emit('set-campaign-access', {
-        id: accessCampaignId,
-        visibility: visibility ? visibility.value : undefined,
-        members: [...accessOverlay.querySelectorAll('input[name="access-member"]:checked')]
-            .map(input => input.value)
-    });
-});
+// --- Campaign access: privacy + invites — owned by shared/access.js ---
 
 // --- Host tab: accounts ---
 
@@ -641,10 +607,7 @@ const login = setupLoginModal(() => {
         renderUsers();
     });
 
-    socket.on('campaign-access-saved', () => {
-        closeAccess();
-        toast('Campaign access saved.');
-    });
+    // campaign-access-saved is handled by shared/access.js (close + toast).
 
     socket.on('admin-done', (payload) => {
         if (payload && payload.action === 'create') {
@@ -668,10 +631,11 @@ const login = setupLoginModal(() => {
     });
 
     socket.on('error', (message) => {
+        // The access dialog shows its own refusals while it is open.
+        if (accessDialog.isOpen()) return;
         const open = (overlay) => overlay && !overlay.classList.contains('hidden');
         const target = open(wizardOverlay) ? wizardError
-            : open(partyOverlay) ? partyError
-            : open(accessOverlay) ? accessError : null;
+            : open(partyOverlay) ? partyError : null;
         if (target) showError(target, String(message));
         else toast(String(message), true);
         // A refused action leaves its button disabled; redraw from server truth.

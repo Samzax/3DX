@@ -13,6 +13,44 @@ Design docs: `docs/unified-world-design.md`,
 work are uncommitted.
 
 Built and working (newest first):
+- **Table chat with whispers (phase 2 of the 3-phase plan)**: per-campaign
+  `chat.json` (last 200 messages) behind `chat-send { text, to? }` (500-char
+  bound, one message per 400ms per socket) → `chat-message`. OOC reaches every
+  socket seated in the campaign; a whisper goes only to its two speakers —
+  delivery AND the `get-chat` history are filtered per socket, so neither the
+  GM nor a third player ever sees one. Whisper targets: anyone seated at the
+  table or an account that can enter the campaign; refusals answer
+  `chat-denied { error }` (never `error`). `shared/chat.js` adds a "Chat"
+  top-bar button with an unread badge and the `#chat-panel` on both screens
+  (history, Everyone/whisper picker, 500-char form; `refresh()` on campaign
+  join), styles in `tabletop.css`. The campaign export bundle now carries
+  `data.chat`. Covered by a new `server-persistence.test.cjs` case (OOC
+  delivery, bounds, cooldown, whisper privacy live + in history, restart
+  persistence). Browser eyeball pending.
+- **Campaign arc — session history, journal, party view, access and export
+  (phase 1 of the 3-phase plan)**: `update-campaign-settings` accepts
+  `postSession` (archives the previous recap into `campaign.sessions`, newest
+  first, capped at 200) and `deleteSession`; `campaignBrief` ships the last 20
+  to both screens (the GM panel's Session history list with delete, the player
+  hall's session list). A per-campaign `journal.json` store backs the GM
+  Journal panel (quests/NPCs/lore/handouts, party or GM-only visible), the
+  party treasury coins and the XP mode/awards (`set-xp-mode`, `award-xp`
+  increments `char.xp`, persisted and pushed as `character-updated`); events
+  are `get-journal`/`save-journal-entry`/`delete-journal-entry`/
+  `update-treasury` → role-scoped `journal` push (players see party entries,
+  treasury and XP always), refusals via `journal-denied`. The player HUD
+  gained a **Journal** panel (notes/treasury/XP read-only) and both screens'
+  character menu gained a **Party** tab (`get-party` → `party`, identity only:
+  id/name/owner/race/class/level — never HP/AC). The privacy+invites dialog is
+  now `shared/access.js` (one module for the lobby card button and the GM
+  panel's Access row; builds its own DOM, styles in `tabletop.css`);
+  `campaign-joined` carries `visibility` (+ `members` for the GM) and
+  `campaign-access-saved` answers with the saved state. `export-campaign`
+  (GM) answers `campaign-export` with a JSON bundle (registry record,
+  characters, journal, pools/rests, roll log, maps) that the GM panel's
+  Export button downloads. Creator Identity tab gained an XP field. Covered by
+  two new `tests/server-persistence.test.cjs` cases (session/access/export +
+  journal/treasury/XP/party).
 - **3D models for all 334 SRD monsters**: tokens no longer render as colored
   discs. `public/assets/monsters/manifest.json` maps every SRD index to a
   procedural body plan (15 plans in `monster-generators.js`: ape, quadruped,
