@@ -13,6 +13,33 @@ Design docs: `docs/unified-world-design.md`,
 work are uncommitted.
 
 Built and working (newest first):
+- **Table utilities — dice macros, roll-log upgrades, GM bookmarks, encounter
+  library, reference browser, journal filter (phase 3 of the 3-phase plan)**:
+  personal dice macros behind `get-macros`/`save-macro`/`delete-macro`
+  (`macros.json`, last 50 per user; refusals `macro-denied { error }`; the
+  stored request carries no advantage mode — the roll log's toggle applies at
+  replay), saved from the roll-log's ★ button into a chip row next to the free
+  dice form; the log panel gained a filter box and a GM-only hover ✕ per entry
+  (`delete-roll-log-entry` → the asker's own filtered `roll-log` re-pushed).
+  GM bookmarks (`bookmarks.json`, 40; `save-bookmark { name, mapKey, pose }` /
+  `delete-bookmark`, refusals `bookmark-denied`) live in a "Bookmarks" top-bar
+  panel on `/gm`: the pose is the camera's world-coord `pos`+`look`, and a
+  jump to another map waits for that map's `map-state`, then snaps the floating
+  origin under the destination. GM encounter library (`encounters.json`, 25;
+  `save-encounter { name, members: [{ index, count }] }` with count clamped
+  1..12 per row and ≤40 tokens; refusals `encounter-denied`) in the Add Object
+  panel: stage monster rows from the existing SRD/homebrew catalog, save the
+  group, and "Place" lays the tokens out in rows of four around the camera's
+  ground focus as ordinary `add-object` payloads. `shared/reference.js` adds a
+  "Reference" overlay to both screens — SRD spells/monsters/items, search and
+  detail cards (`spellDetailHTML`, `monsterStatBlockHTML`, a small item card);
+  monsters lazy-load, the GM's homebrew monsters join the list, and stat-block
+  saves/checks still roll through `rollLog.roll`. Both journal panels (GM
+  campaign panel, player HUD) gained a filter box (`journal-search`). Bookmark
+  and encounter stores ride the campaign export bundle. Both delivery loops
+  push only to the campaign's GM sockets — two new `server-persistence.test.cjs`
+  cases cover GM-only refusals, restart persistence and that a player socket
+  never receives either list. Browser eyeball pending.
 - **Table chat with whispers (phase 2 of the 3-phase plan)**: per-campaign
   `chat.json` (last 200 messages) behind `chat-send { text, to? }` (500-char
   bound, one message per 400ms per socket) → `chat-message`. OOC reaches every
@@ -324,6 +351,11 @@ this order. 1 (look pass) is *paused partway*, 2 (grass+trees) is *done*:
    Interiors can still use pocket maps.
 
 ## Next steps, in priority order
+**The 3-phase campaign plan (approved):** phases 1 (campaign arc: sessions,
+journal/treasury/XP, party view, access dialog, export), 2 (table chat with
+whispers) and 3 (utilities: dice macros, roll-log upgrades, reference browser,
+GM bookmarks, encounter library, journal filter) are all done — each still
+needs a browser eyeball.
 1. ~~Combat mode~~ — v1 done (see above). Possible v2 dials: opportunity
    attacks/reactions, advantage/disadvantage from conditions, death saves,
    multi-target/AoE, and bonus actions. Spell attacks, saving throws and slot

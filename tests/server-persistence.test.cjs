@@ -2895,3 +2895,242 @@ test('table chat: OOC delivery, private whispers, bounds and persistence', { tim
   assert.ok(reloaded.some((m) => m.text === 'Anyone here?'));
   assert.equal(reloaded.some((m) => m.text === 'spam spam'), false);
 });
+
+
+test('dice macros stay personal and the GM can drop a single log entry', { timeout: 40000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-macros-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const alice = await connectPolling(instance.port);
+  const eve = await connectPolling(instance.port);
+  for (const [session, name] of [[gm, 'GM'], [alice, 'alice'], [eve, 'eve']]) {
+    await emitEvent(session, 'login', name);
+    await waitForSocketEvents(session, ['campaign-joined', 'map-state']);
+  }
+  async function macroList(session) {
+    await emitEvent(session, 'get-macros', null);
+    const seen = await waitForAnswers(session, { macros: () => true });
+    return seen.macros.macros;
+  }
+
+  // A macro without dice is refused; the cooldown only counts saved macros.
+  await emitEvent(alice, 'save-macro', { macro: { name: 'Nonsense' } });
+  const noDice = await waitForAnswers(alice, { 'macro-denied': () => true });
+  assert.equal(noDice['macro-denied'].error, 'A macro needs dice, like d20+5 or 2d6');
+
+  // Saving works and answers the owner with their own list.
+  await emitEvent(alice, 'save-macro', { macro: { name: 'Stealth', label: 'Stealth', d20: { bonus: 7 } } });
+  const mine = await waitForAnswers(alice, { macros: () => true });
+  assert.equal(mine.macros.macros.length, 1);
+  assert.equal(mine.macros.macros[0].name, 'Stealth');
+  assert.equal(mine.macros.macros[0].owner, 'alice');
+  assert.equal(typeof mine.macros.macros[0].id, 'string');
+
+  // Another player's list never shows it, and a save inside the cooldown is refused.
+  await emitEvent(eve, 'save-macro', { macro: { name: 'Frostbolt', label: 'Frostbolt', dice: [{ expr: '2d8', type: 'cold' }] } });
+  await emitEvent(eve, 'save-macro', { macro: { name: 'Haste', d20: { bonus: 1 } } });
+  const evew = await waitForAnswers(eve, { macros: () => true, 'macro-denied': () => true });
+  assert.equal(evew.macros.macros.length, 1);
+  assert.equal(evew.macros.macros[0].name, 'Frostbolt');
+  assert.equal(evew['macro-denied'].error, 'Slow down a moment');
+  assert.deepEqual(await macroList(alice), mine.macros.macros, 'a second socket keeps the same list');
+  assert.deepEqual(await macroList(gm), [], 'the GM sees no one else\'s macros');
+  assert.equal((await macroList(eve)).some((macro) => macro.name === 'Stealth'), false);
+
+  // Two table rolls; the GM drops one single entry for everyone.
+  await emitEvent(alice, 'roll', { label: 'Arcana', d20: { bonus: 3 } });
+  await waitForAnswers(alice, { 'roll-logged': (entry) => entry.user === 'alice' });
+  await emitEvent(eve, 'roll', { label: 'Perception', d20: { bonus: 4 } });
+  await waitForAnswers(eve, { 'roll-logged': (entry) => entry.user === 'eve' });
+  await emitEvent(gm, 'get-roll-log', null);
+  const before = await waitForAnswers(gm, { 'roll-log': (data) => data.entries.length === 2 });
+  const eveEntry = before['roll-log'].entries.find((entry) => entry.user === 'eve');
+  const aliceEntry = before['roll-log'].entries.find((entry) => entry.user === 'alice');
+  assert.ok(eveEntry && aliceEntry);
+
+  await emitEvent(gm, 'delete-roll-log-entry', { id: eveEntry.id });
+  const gmAfter = await waitForAnswers(gm, { 'roll-log': (data) => data.entries.length === 1 });
+  assert.equal(gmAfter['roll-log'].entries[0].id, aliceEntry.id);
+  const aliceAfter = await waitForAnswers(alice, { 'roll-log': (data) => data.entries.length === 1 });
+  assert.equal(aliceAfter['roll-log'].entries[0].id, aliceEntry.id);
+
+  // Only the GM may delete.
+  await emitEvent(alice, 'delete-roll-log-entry', { id: aliceEntry.id });
+  const denied = await waitForAnswers(alice, { 'combat-denied': () => true });
+  assert.equal(denied['combat-denied'].reason, 'GM only');
+
+  // Macros outlive the server.
+  await stopServer(instance);
+  instance = await startServer(saveDir);
+  const again = await connectPolling(instance.port);
+  await emitEvent(again, 'login', 'alice');
+  await waitForSocketEvents(again, ['campaign-joined', 'map-state']);
+  const reloaded = await macroList(again);
+  assert.equal(reloaded.length, 1);
+  assert.equal(reloaded[0].name, 'Stealth');
+  assert.equal(reloaded[0].d20.bonus, 7);
+});
+
+
+test('GM bookmarks are GM-only, keep their pose and survive a restart', { timeout: 40000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-bookmarks-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const alice = await connectPolling(instance.port);
+  await emitEvent(gm, 'login', 'GM');
+  await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  await emitEvent(alice, 'login', 'alice');
+  await waitForSocketEvents(alice, ['campaign-joined', 'map-state']);
+
+  // A player may neither read nor write bookmarks, and never receives the list.
+  await emitEvent(alice, 'get-bookmarks', null);
+  const refused = await waitForAnswers(alice, { 'bookmark-denied': () => true });
+  assert.equal(refused['bookmark-denied'].error, 'GM only');
+  await emitEvent(alice, 'save-bookmark', { name: 'Sneaky', mapKey: 'world', pose: { pos: { x: 0, y: 1, z: 0 }, look: { x: 0, y: 0, z: 0 } } });
+  const deniedWrite = await waitForAnswers(alice, { 'bookmark-denied': () => true });
+  assert.equal(deniedWrite['bookmark-denied'].error, 'GM only');
+
+  // The GM saves a spot with its pose; the push carries it to GM sockets only.
+  await emitEvent(gm, 'save-bookmark', {
+    name: 'Camp on the ridge', mapKey: 'world/0,0',
+    pose: { pos: { x: 120.5, y: 42, z: -80.25 }, look: { x: 118, y: 0.5, z: -77 } }
+  });
+  const saved = await waitForAnswers(gm, { bookmarks: (data) => data.bookmarks.length === 1 });
+  const mark = saved.bookmarks.bookmarks[0];
+  assert.equal(mark.name, 'Camp on the ridge');
+  assert.equal(mark.mapKey, 'world/0,0');
+  assert.deepEqual(mark.pose, { pos: { x: 120.5, y: 42, z: -80.25 }, look: { x: 118, y: 0.5, z: -77 } });
+
+  // A bookmark without a view is refused.
+  await emitEvent(gm, 'save-bookmark', { name: 'Nothing', mapKey: 'world', pose: null });
+  const badPose = await waitForAnswers(gm, { 'bookmark-denied': () => true });
+  assert.equal(badPose['bookmark-denied'].error, 'A bookmark needs a name and a view to remember');
+
+  // The player socket never sees a 'bookmarks' event: reading the queue up to
+  // the roll-log round trip (which the server answers last) must turn up none.
+  await emitEvent(alice, 'get-roll-log', null);
+  const aliceSeen = [];
+  {
+    let done = false;
+    const deadline = Date.now() + 4000;
+    while (!done && Date.now() < deadline) {
+      for (const [name, payload] of socketEvents(await pollPackets(alice))) {
+        if (name === 'roll-log') { done = true; break; }
+        aliceSeen.push(name);
+      }
+    }
+    assert.ok(done, 'alice should get the roll-log round trip');
+  }
+  assert.equal(aliceSeen.includes('bookmarks'), false, 'a player must never receive the bookmark list');
+
+  // The GM deletes one; the list round-trips through a restart.
+  await emitEvent(gm, 'save-bookmark', { name: 'Second spot', mapKey: 'pocket/abcd1234', pose: { pos: { x: 1, y: 2, z: 3 }, look: { x: 4, y: 5, z: 6 } } });
+  const two = await waitForAnswers(gm, { bookmarks: (data) => data.bookmarks.length === 2 });
+  const second = two.bookmarks.bookmarks.find((entry) => entry.name === 'Second spot');
+  await emitEvent(gm, 'delete-bookmark', { id: second.id });
+  const one = await waitForAnswers(gm, { bookmarks: (data) => data.bookmarks.length === 1 });
+  assert.equal(one.bookmarks.bookmarks[0].id, mark.id);
+
+  await stopServer(instance);
+  instance = await startServer(saveDir);
+  const again = await connectPolling(instance.port);
+  await emitEvent(again, 'login', 'GM');
+  await waitForSocketEvents(again, ['campaign-joined', 'map-state']);
+  await emitEvent(again, 'get-bookmarks', null);
+  const reloaded = await waitForAnswers(again, { bookmarks: () => true });
+  assert.equal(reloaded.bookmarks.bookmarks.length, 1);
+  assert.deepEqual(reloaded.bookmarks.bookmarks[0].pose, mark.pose);
+});
+
+
+test('GM encounter library is GM-only, keeps member groups and survives a restart', { timeout: 40000 }, async (t) => {
+  const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-encounters-'));
+  const saveDir = path.join(fixtureDir, 'saves');
+  fs.mkdirSync(saveDir, { recursive: true });
+  let instance;
+  t.after(async () => {
+    await stopServer(instance);
+    fs.rmSync(fixtureDir, { recursive: true, force: true });
+  });
+
+  instance = await startServer(saveDir);
+  const gm = await connectPolling(instance.port);
+  const alice = await connectPolling(instance.port);
+  await emitEvent(gm, 'login', 'GM');
+  await waitForSocketEvents(gm, ['campaign-joined', 'map-state']);
+  await emitEvent(alice, 'login', 'alice');
+  await waitForSocketEvents(alice, ['campaign-joined', 'map-state']);
+
+  // A player may neither read nor write the library, and never receives it.
+  await emitEvent(alice, 'get-encounters', null);
+  const refused = await waitForAnswers(alice, { 'encounter-denied': () => true });
+  assert.equal(refused['encounter-denied'].error, 'GM only');
+  await emitEvent(alice, 'save-encounter', { name: 'Nope', members: [{ index: 'orc', count: 1 }] });
+  const deniedWrite = await waitForAnswers(alice, { 'encounter-denied': () => true });
+  assert.equal(deniedWrite['encounter-denied'].error, 'GM only');
+
+  // The GM saves a group; the push carries it to GM sockets only.
+  await emitEvent(gm, 'save-encounter', { name: 'Orc ambush', members: [{ index: 'orc', count: 3 }, { index: 'wolf', count: 2 }] });
+  const saved = await waitForAnswers(gm, { encounters: (data) => data.encounters.length === 1 });
+  assert.deepEqual(saved.encounters.encounters[0].members, [{ index: 'orc', count: 3 }, { index: 'wolf', count: 2 }]);
+  assert.equal(saved.encounters.encounters[0].name, 'Orc ambush');
+
+  // A group with no monsters is refused.
+  await emitEvent(gm, 'save-encounter', { name: 'Empty', members: [] });
+  const bad = await waitForAnswers(gm, { 'encounter-denied': () => true });
+  assert.equal(bad['encounter-denied'].error, 'An encounter needs a name and at least one monster');
+
+  // The player socket never sees an 'encounters' event: read its queue up to
+  // the roll-log round trip the server answers last.
+  await emitEvent(alice, 'get-roll-log', null);
+  const aliceSeen = [];
+  {
+    let done = false;
+    const deadline = Date.now() + 4000;
+    while (!done && Date.now() < deadline) {
+      for (const [name] of socketEvents(await pollPackets(alice))) {
+        if (name === 'roll-log') { done = true; break; }
+        aliceSeen.push(name);
+      }
+    }
+    assert.ok(done, 'alice should get the roll-log round trip');
+  }
+  assert.equal(aliceSeen.includes('encounters'), false, 'a player must never receive the encounter library');
+
+  // Counts are clamped server-side: 12 per row, nothing outside 1..12.
+  await emitEvent(gm, 'save-encounter', { name: 'Clamped', members: [{ index: 'goblin', count: 99 }, { index: '', count: 2 }] });
+  const clamped = await waitForAnswers(gm, { encounters: (data) => data.encounters.length === 2 });
+  assert.deepEqual(clamped.encounters.encounters.find((entry) => entry.name === 'Clamped').members, [{ index: 'goblin', count: 12 }]);
+
+  // The library round-trips through a restart, then the GM deletes one.
+  await stopServer(instance);
+  instance = await startServer(saveDir);
+  const again = await connectPolling(instance.port);
+  await emitEvent(again, 'login', 'GM');
+  await waitForSocketEvents(again, ['campaign-joined', 'map-state']);
+  await emitEvent(again, 'get-encounters', null);
+  const reloaded = await waitForAnswers(again, { encounters: () => true });
+  assert.equal(reloaded.encounters.encounters.length, 2);
+  const orc = reloaded.encounters.encounters.find((entry) => entry.name === 'Orc ambush');
+  assert.ok(orc, 'the saved encounter should survive the restart');
+  assert.deepEqual(orc.members, [{ index: 'orc', count: 3 }, { index: 'wolf', count: 2 }]);
+  await emitEvent(again, 'delete-encounter', { id: orc.id });
+  const afterDelete = await waitForAnswers(again, { encounters: (data) => data.encounters.length === 1 });
+  assert.equal(afterDelete.encounters.encounters[0].name, 'Clamped');
+});

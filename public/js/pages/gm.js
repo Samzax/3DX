@@ -52,6 +52,7 @@ import { setupLoginModal, storedUsername } from '../shared/login.js';
 import { PROP_POSES } from '../shared/passage.js';
 import { createRollLog } from '../shared/rolllog.js';
 import { createChat } from '../shared/chat.js';
+import { createReferencePanel } from '../shared/reference.js';
 import { createRestDesk } from '../shared/rests.js';
 import { createCastDesk } from '../shared/castdesk.js';
 import { createAccessDialog } from '../shared/access.js';
@@ -185,6 +186,7 @@ let currentMoveMode = 'standard';
 let toolMenuButtons = {};
 let rollLog = null;            // table log + roll requests (shared/rolllog.js), created with the socket
 let chat = null;               // OOC table chat + whispers (shared/chat.js)
+let reference = null;          // SRD browser overlay (shared/reference.js)
 let restDesk = null;            // rest requests + party rests (shared/rests.js)
 let castDesk = null;            // spells players ask to cast outside a fight (shared/castdesk.js)
 let moveSubMenuButtons = {};
@@ -209,6 +211,11 @@ const mapReload = new AuthenticatedMapReload();
 // breadcrumb, region gating and camera landing all read it.
 let campaignContext = null;
 let accessDialog = null;              // privacy + invites (shared/access.js)
+let bookmarks = [];                   // saved camera spots (get-bookmarks)
+let pendingBookmarkPose = null;       // a jump whose map-state has not landed yet
+let bookmarkPanelEl = null;           // the Bookmarks panel (built in initSocket)
+let encounters = [];                  // saved monster groups (get-encounters)
+let encounterBuild = [];              // rows staged in the encounter builder
 let pendingSpawnLanding = false;    // first unified landing after (re)join uses settings.spawn
 let hexGridGroup = null;
 let boundsRect = null;              // pocket boundary rectangle
@@ -236,6 +243,7 @@ let visionFx = null, visionChip = null, visionSettings = null, viewAsId = null;
 let campaignWorldDirty = false, campaignWorldSaved = null;
 // Journal + treasury + XP (server pushes the role-scoped snapshot on 'journal').
 let journalState = { entries: [], treasury: {}, xp: { mode: 'milestone', awards: [] } };
+let journalQuery = '';                 // filter box above the entries list (gm.html)
 let journalEditingId = null;
 let currentBiome = 'plains';
 let hexTags = {};                   // "q,r" -> { biome } for the current map
@@ -542,6 +550,127 @@ function onDoubleClick(event) {
 }
 
 // --- Socket.IO: GM auto-login + full map/character sync ---
+// --- GM bookmarks: named camera spots (server keeps bookmarks.json) ---
+function bookmarkPose() {
+    const o = terrain.worldOrigin;
+    return {
+        pos: { x: camera.position.x + o.x, y: camera.position.y, z: camera.position.z + o.z },
+        look: { x: controls.target.x + o.x, y: controls.target.y, z: controls.target.z + o.z }
+    };
+}
+function applyBookmarkPose(pose) {
+    // Snap: a bookmark jump is a jump, not a fly — re-seat the floating origin
+    // under the destination so scene coords start near zero (mirrors the
+    // player screen's snap branch of applyViewPose).
+    const o = terrainIsUnified ? setWorldOriginAt({ terrain, worldGroup }, pose.look.x, pose.look.z) : terrain.worldOrigin;
+    camera.position.set(pose.pos.x - o.x, pose.pos.y, pose.pos.z - o.z);
+    controls.target.set(pose.look.x - o.x, pose.look.y, pose.look.z - o.z);
+}
+function jumpToBookmark(mark) {
+    if (!mark || !mark.pose || !mark.mapKey) return;
+    if (mark.mapKey !== currentMapKey) {
+        if (outsideRegion(mark.mapKey)) { showBookmarkError('That map is outside this region'); return; }
+        pendingBookmarkPose = mark.pose;
+        enterMap(mark.mapKey); // map-state lands the camera, then the pose wins
+        return;
+    }
+    applyBookmarkPose(mark.pose);
+}
+function showBookmarkError(message) {
+    const box = bookmarkPanelEl && bookmarkPanelEl.querySelector('.bookmark-error');
+    if (box) box.textContent = message;
+}
+function renderBookmarks() {
+    const list = bookmarkPanelEl && bookmarkPanelEl.querySelector('.bookmark-list');
+    if (!list) return;
+    list.innerHTML = bookmarks.length
+        ? bookmarks.map(mark => `<div class="bookmark-row">
+            <button type="button" class="bookmark-go" data-bookmark-id="${escHtml(mark.id)}" title="Jump to ${escHtml(mark.name)}">${escHtml(mark.name)}</button>
+            <span class="bookmark-where">${escHtml(mark.mapKey)}</span>
+            <button type="button" class="bookmark-del" data-bookmark-del="${escHtml(mark.id)}" title="Forget this bookmark">&times;</button></div>`).join('')
+        : '<p class="roll-empty">No bookmarks yet. Fly somewhere worth returning to, then "Save this view".</p>';
+}
+
+// --- GM encounter library: saved monster groups dropped on the map around the view ---
+function encounterCatalog() {
+    return [...customMonsters, ...srdMonsters].filter(monster => monster && monster.name);
+}
+function setEncounterStatus(message) {
+    const status = document.getElementById('encounter-status');
+    if (status) status.textContent = message;
+}
+function fillEncounterSpecies() {
+    const select = document.getElementById('encounter-species');
+    if (!select) return;
+    const previous = select.value;
+    const monsters = encounterCatalog()
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)) || String(a.index).localeCompare(String(b.index)));
+    select.innerHTML = '<option value="">Pick a monster…</option>' + monsters.map(monster =>
+        `<option value="${escHtml(monster.index || monster.name)}">${escHtml(monster.name)}</option>`).join('');
+    if (previous && monsters.some(monster => (monster.index || monster.name) === previous)) select.value = previous;
+}
+function renderEncounterBuild() {
+    const list = document.getElementById('encounter-tokens');
+    if (!list) return;
+    list.innerHTML = encounterBuild.length
+        ? encounterBuild.map((row, i) => `<div class="encounter-token-row">
+            <span>${escHtml(row.name)} &times;${row.count}</span>
+            <button type="button" class="encounter-token-del" data-encounter-token-del="${i}" title="Remove">&times;</button></div>`).join('')
+        : '';
+}
+function renderEncounterLibrary() {
+    fillEncounterSpecies();
+    const list = document.getElementById('encounter-list');
+    if (!list) return;
+    list.innerHTML = encounters.length
+        ? encounters.map(mark => `<div class="encounter-row">
+            <span class="encounter-name" title="${escHtml(mark.name)}">${escHtml(mark.name)}</span>
+            <span class="encounter-where">${mark.members.map(member => `${member.count}&times;`).join('')}…</span>
+            <button type="button" class="encounter-place" data-encounter-place="${escHtml(mark.id)}" title="Place around the camera">Place</button>
+            <button type="button" class="encounter-del" data-encounter-del="${escHtml(mark.id)}" title="Forget this encounter">&times;</button></div>`).join('')
+        : '<p class="encounter-empty">No saved encounters yet. Build one below, then "Save".</p>';
+}
+async function ensureEncounterCatalog() {
+    if (!srdMonsters.length && monsterCatalogState !== 'ready') await ensureMonsterLibraryLoaded();
+    fillEncounterSpecies();
+    return encounterCatalog();
+}
+async function placeEncounter(mark) {
+    if (!mark || !Array.isArray(mark.members) || !mark.members.length) return;
+    setEncounterStatus('');
+    const catalog = await ensureEncounterCatalog();
+    const tokens = [];
+    for (const member of mark.members) {
+        const monster = catalog.find(known => String(known.index || known.name) === String(member.index));
+        if (!monster) continue;
+        const snap = monsterTokenSnapshot(monster);
+        if (!snap) continue;
+        for (let i = 0; i < member.count; i++) tokens.push({ monster, snap });
+    }
+    if (!tokens.length) { setEncounterStatus('None of those monsters could be found.'); return; }
+    // Rows of four around the camera's ground focus, world coordinates like any
+    // other place (ground-pick hits are scene space — sceneToWorld first).
+    const center = sceneToWorld(controls.target);
+    const cols = 4, step = 1.6;
+    const rows = Math.ceil(tokens.length / cols);
+    for (let i = 0; i < tokens.length; i++) {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = Math.round((center.x + (col - (cols - 1) / 2) * step) * 100) / 100;
+        const z = Math.round((center.z + (row - (rows - 1) / 2) * step) * 100) / 100;
+        const dataToSave = {
+            type: 'token',
+            name: tokens[i].snap.name,
+            color: monsterColor(tokens[i].snap),
+            monsterData: tokens[i].snap,
+            position: { x, y: groundY(x, z, 0.1, null), z }
+        };
+        const variant = monsterAppearanceVariant(tokens[i].monster, monsterVariantChoices.get(String(tokens[i].monster.index || '')));
+        if (variant) dataToSave.monsterVariant = variant;
+        socket.emit('add-object', dataToSave);
+    }
+    setEncounterStatus(`Placed ${tokens.length} token${tokens.length === 1 ? '' : 's'}.`);
+}
 
 function initSocket() {
     socket = io();
@@ -551,7 +680,111 @@ function initSocket() {
         actor: () => (selectedObject && selectedObject.userData.syncId ? objectIdentity(selectedObject, objects).displayName : 'GM')
     });
     chat = createChat({ socket, username: () => storedUsername() });
+    reference = createReferencePanel({
+        roll: (request) => rollLog && rollLog.roll(request),
+        getActor: () => storedUsername() || 'GM',
+        getExtraMonsters: () => customMonsters
+    });
 
+    // Bookmarks: a "Bookmarks" top-bar button + panel (GM-only authoring).
+    const bookmarkButton = document.createElement('button');
+    bookmarkButton.id = 'btn-workspace-bookmarks';
+    bookmarkButton.className = 'workspace-top-button';
+    bookmarkButton.title = 'Saved views: jump back to a place on any map';
+    bookmarkButton.setAttribute('aria-expanded', 'false');
+    bookmarkButton.innerHTML = 'Bookmarks';
+    const topActions = document.querySelector('#workspace-topbar .workspace-actions');
+    const helpButton = document.getElementById('btn-workspace-help');
+    if (topActions) topActions.insertBefore(bookmarkButton, helpButton && helpButton.parentNode === topActions ? helpButton : null);
+    bookmarkPanelEl = document.createElement('section');
+    bookmarkPanelEl.id = 'bookmark-panel';
+    bookmarkPanelEl.className = 'hidden';
+    bookmarkPanelEl.setAttribute('aria-label', 'GM bookmarks');
+    bookmarkPanelEl.innerHTML = `
+        <div class="roll-log-bar"><span>Bookmarks</span>
+            <button type="button" class="roll-log-close" aria-label="Close bookmarks">&times;</button></div>
+        <div class="bookmark-list"></div>
+        <div class="bookmark-foot">
+            <button type="button" class="bookmark-save">Save this view</button>
+            <span class="bookmark-error" role="alert"></span>
+        </div>`;
+    document.body.append(bookmarkPanelEl);
+    const bookmarksOpen = () => !bookmarkPanelEl.classList.contains('hidden');
+    const setBookmarksOpen = (open) => {
+        bookmarkPanelEl.classList.toggle('hidden', !open);
+        bookmarkButton.setAttribute('aria-expanded', String(open));
+        if (open) { showBookmarkError(''); renderBookmarks(); }
+    };
+    bookmarkButton.addEventListener('click', () => setBookmarksOpen(!bookmarksOpen()));
+    bookmarkPanelEl.querySelector('.roll-log-close').addEventListener('click', () => setBookmarksOpen(false));
+    bookmarkPanelEl.querySelector('.bookmark-save').addEventListener('click', () => {
+        const name = prompt('Bookmark name?', currentMapKey);
+        if (!name || !name.trim()) return;
+        showBookmarkError('');
+        socket.emit('save-bookmark', { name: name.trim(), mapKey: currentMapKey, pose: bookmarkPose() });
+    });
+    bookmarkPanelEl.querySelector('.bookmark-list').addEventListener('click', (event) => {
+        const del = event.target.closest('[data-bookmark-del]');
+        if (del) {
+            if (confirm('Forget this bookmark?')) socket.emit('delete-bookmark', { id: del.dataset.bookmarkDel });
+            return;
+        }
+        const go = event.target.closest('[data-bookmark-id]');
+        const mark = go && bookmarks.find(known => known.id === go.dataset.bookmarkId);
+        if (mark) { setBookmarksOpen(false); jumpToBookmark(mark); }
+    });
+    socket.on('bookmarks', (data) => {
+        bookmarks = Array.isArray(data && data.bookmarks) ? data.bookmarks : [];
+        renderBookmarks();
+    });
+    socket.on('bookmark-denied', (data) => showBookmarkError((data && data.error) || 'That bookmark did not save.'));
+
+    // Encounter library: staged rows in the Add Object panel, saved groups below.
+    const encounterAdd = document.getElementById('encounter-add');
+    const encounterSave = document.getElementById('encounter-save');
+    const encounterList = document.getElementById('encounter-list');
+    const encounterTokensList = document.getElementById('encounter-tokens');
+    encounterAdd && encounterAdd.addEventListener('click', () => {
+        const select = document.getElementById('encounter-species');
+        const index = select && select.value;
+        if (!index) { setEncounterStatus('Pick a monster first.'); return; }
+        const count = Math.min(12, Math.max(1, Math.round(Number(document.getElementById('encounter-count')?.value) || 1)));
+        const option = select.selectedOptions[0];
+        encounterBuild.push({ index, name: (option && option.textContent) || index, count });
+        renderEncounterBuild();
+        setEncounterStatus('');
+    });
+    encounterSave && encounterSave.addEventListener('click', () => {
+        const name = (document.getElementById('encounter-name')?.value || '').trim();
+        if (!name) { setEncounterStatus('Give the encounter a name.'); return; }
+        if (!encounterBuild.length) { setEncounterStatus('Add at least one monster.'); return; }
+        setEncounterStatus('');
+        socket.emit('save-encounter', { name, members: encounterBuild.map(row => ({ index: row.index, count: row.count })) });
+        encounterBuild = [];
+        renderEncounterBuild();
+        document.getElementById('encounter-name').value = '';
+    });
+    encounterTokensList && encounterTokensList.addEventListener('click', (event) => {
+        const del = event.target.closest('[data-encounter-token-del]');
+        if (!del) return;
+        encounterBuild.splice(Number(del.dataset.encounterTokenDel) || 0, 1);
+        renderEncounterBuild();
+    });
+    encounterList && encounterList.addEventListener('click', (event) => {
+        const del = event.target.closest('[data-encounter-del]');
+        if (del) {
+            if (confirm('Forget this encounter?')) socket.emit('delete-encounter', { id: del.dataset.encounterDel });
+            return;
+        }
+        const place = event.target.closest('[data-encounter-place]');
+        const mark = place && encounters.find(known => known.id === place.dataset.encounterPlace);
+        if (mark) void placeEncounter(mark);
+    });
+    socket.on('encounters', (data) => {
+        encounters = Array.isArray(data && data.encounters) ? data.encounters : [];
+        renderEncounterLibrary();
+    });
+    socket.on('encounter-denied', (data) => setEncounterStatus((data && data.error) || 'That encounter did not save.'));
     // Players ask for rests; the GM answers here (shared/rests.js).
     restDesk = createRestDesk({ socket, isGM: () => true, notify: (text) => rollLog.notice(text) });
     // Players ask to cast; their template shows faded while they aim it.
@@ -683,6 +916,8 @@ function initSocket() {
             { canManage: true, onSettings: () => workspace.showPanel('campaign-panel') });
         if (rollLog) rollLog.refresh();
         if (chat) chat.refresh();
+        socket.emit('get-bookmarks');
+        socket.emit('get-encounters');
         if (restDesk) restDesk.refresh();
         if (castDesk) castDesk.refresh();
         socket.emit('get-journal');
@@ -752,6 +987,7 @@ function initSocket() {
     socket.on('load-homebrew', (hb) => {
         pendingHomebrew = hb;
         customMonsters = hb && Array.isArray(hb.monsters) ? hb.monsters : [];
+        fillEncounterSpecies();
         renderMonsterLibrary();
         if (SRD) { SRD.setHomebrew(hb); answerStatsPending(); }
     });
@@ -900,6 +1136,7 @@ function initSocket() {
         // retained storey isolation last so reconnecting in a basement cannot
         // expose terrain or vegetation until another build-panel action.
         applyBuildLevelVisibility();
+        if (pendingBookmarkPose) { applyBookmarkPose(pendingBookmarkPose); pendingBookmarkPose = null; }
         if (pendingFocus) { focusCameraOn(pendingFocus); pendingFocus = null; }
         sentSenses.clear();
         syncCharacterSenses();
@@ -2788,12 +3025,14 @@ function ensureMonsterLibraryLoaded() {
         srdMonsters = Array.isArray(monsters) ? monsters : [];
         monsterCatalogState = 'ready';
         renderMonsterLibrary();
+        fillEncounterSpecies();
         return srdMonsters;
     }).catch(error => {
         monsterCatalogState = 'error';
         monsterLoadError = error?.message || 'load failed';
         monsterCatalogPromise = null;
         renderMonsterLibrary();
+        fillEncounterSpecies();
         console.error('SRD monster load failed:', error);
         return [];
     });
@@ -4164,10 +4403,16 @@ function renderCampaignSessions() {
 const JOURNAL_KIND_LABELS = { quest: 'Quest', npc: 'NPC', lore: 'Lore', handout: 'Handout' };
 
 function renderJournal() {
-    // Entries list.
+    // Entries list (filtered by the box above it when one is typed in).
     const box = document.getElementById('journal-entries');
     if (box) {
-        const shown = journalState.entries;
+        const query = journalQuery.toLowerCase();
+        const shown = query
+            ? journalState.entries.filter(entry => [
+                entry.title, entry.text, JOURNAL_KIND_LABELS[entry.kind],
+                entry.visible === 'gm' ? 'GM only' : 'Party'
+            ].filter(Boolean).join(' ').toLowerCase().includes(query))
+            : journalState.entries;
         box.innerHTML = shown.length ? shown.map(entry => {
             const tag = JOURNAL_KIND_LABELS[entry.kind] || 'Quest';
             const who = entry.visible === 'gm' ? 'GM only' : 'Party';
@@ -4181,7 +4426,7 @@ function renderJournal() {
                     <button type="button" class="tp-chip" data-journal-del="${escHtml(entry.id)}">Delete</button>
                 </div>
             </details>`;
-        }).join('') : `<div class="tp-hint">No entries yet.</div>`;
+        }).join('') : `<div class="tp-hint">${query ? 'No entries match that filter.' : 'No entries yet.'}</div>`;
     }
     // Treasury inputs (never clobber what the GM is typing).
     for (const coin of ['pp', 'gp', 'ep', 'sp', 'cp']) {
@@ -4443,7 +4688,11 @@ function wireCampaignPanel() {
             }
         }
     });
-
+    const journalSearch = document.getElementById('journal-search');
+    if (journalSearch) journalSearch.addEventListener('input', () => {
+        journalQuery = journalSearch.value.trim();
+        renderJournal();
+    });
     const treasurySave = document.getElementById('treasury-save');
     if (treasurySave) treasurySave.addEventListener('click', () => {
         if (!socket) return;

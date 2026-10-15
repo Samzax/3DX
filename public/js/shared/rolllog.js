@@ -24,11 +24,13 @@ function parseQuickRoll(text) {
     return null;
 }
 
-export function entryHTML(entry) {
+export function entryHTML(entry, canDelete = false) {
     const e = entry && typeof entry === 'object' ? entry : {};
     const time = e.ts ? new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    const del = canDelete && e.id
+        ? `<button type="button" class="roll-entry-del" title="Remove this entry for everyone" data-entry-id="${escHtml(e.id)}">&times;</button>` : '';
     if (e.kind === 'combat') {
-        return `<div class="roll-entry is-combat"><div class="roll-head"><span class="roll-actor">⚔ Combat${e.round ? ` · round ${escHtml(e.round)}` : ''}</span><span class="roll-time">${escHtml(time)}</span></div>
+        return `<div class="roll-entry is-combat"><div class="roll-head"><span class="roll-actor">⚔ Combat${e.round ? ` · round ${escHtml(e.round)}` : ''}</span><span class="roll-time">${escHtml(time)}${del}</span></div>
             <div class="roll-note">${escHtml(e.text)}</div></div>`;
     }
     const d20 = e.d20;
@@ -48,7 +50,7 @@ export function entryHTML(entry) {
     }
     const who = e.user && e.user !== e.actor ? ` <span class="roll-user">${escHtml(e.user)}</span>` : '';
     return `<div class="roll-entry${e.gmOnly ? ' is-private' : ''}">
-        <div class="roll-head"><span class="roll-actor">${escHtml(e.actor || e.user || '')}${who}</span><span class="roll-time">${e.gmOnly ? '🔒 ' : ''}${escHtml(time)}</span></div>
+        <div class="roll-head"><span class="roll-actor">${escHtml(e.actor || e.user || '')}${who}</span><span class="roll-time">${e.gmOnly ? '🔒 ' : ''}${escHtml(time)}${del}</span></div>
         <div class="roll-label">${escHtml(e.label || 'Roll')}</div>${result}
         ${e.note ? `<div class="roll-note">${escHtml(e.note)}</div>` : ''}</div>`;
 }
@@ -56,7 +58,9 @@ export function entryHTML(entry) {
 // socket: the page's socket · isGM(): boolean · actor(): default name on free rolls
 export function createRollLog({ socket, isGM = () => false, actor = () => '' }) {
     let entries = [];
+    let macros = [];
     let mode = '';
+    let query = '';
     let unread = 0;
     let toastTimer = 0;
 
@@ -76,16 +80,19 @@ export function createRollLog({ socket, isGM = () => false, actor = () => '' }) 
     panel.setAttribute('aria-label', 'Table log');
     panel.innerHTML = `
         <div class="roll-log-bar"><span>Table log</span>
-            <span><button type="button" class="roll-log-clear hidden" title="Erase the whole log for everyone">Clear</button>
+            <span><input type="search" class="roll-log-filter" placeholder="Filter…" maxlength="40" aria-label="Filter the log">
+            <button type="button" class="roll-log-clear hidden" title="Erase the whole log for everyone">Clear</button>
             <button type="button" class="roll-log-close" aria-label="Close the table log">&times;</button></span></div>
         <div class="roll-log-list" aria-live="polite"></div>
         <form class="roll-log-quick">
+            <div class="roll-macros hidden" aria-label="Saved rolls"></div>
             <div class="roll-modes">${MODES.map(([value, label]) =>
                 `<button type="button" data-roll-mode="${value}"${value === '' ? ' class="active"' : ''}>${label}</button>`).join('')}</div>
             <div class="roll-quick-row">
                 <input name="expr" autocomplete="off" maxlength="40" placeholder="d20+5 · 2d6+3" aria-label="Dice to roll">
                 <input name="label" autocomplete="off" maxlength="60" placeholder="what for" aria-label="What the roll is for">
                 <button type="submit">Roll</button>
+                <button type="button" class="roll-save-macro" title="Save these dice as a reusable macro">&#9733;</button>
             </div>
             <label class="roll-private hidden"><input type="checkbox" name="gmOnly"> Only the GM sees it</label>
             <div class="roll-quick-error" role="alert"></div>
@@ -99,15 +106,30 @@ export function createRollLog({ socket, isGM = () => false, actor = () => '' }) 
     const badge = button.querySelector('.roll-badge');
     const form = panel.querySelector('.roll-log-quick');
     const error = panel.querySelector('.roll-quick-error');
+    const macroRow = panel.querySelector('.roll-macros');
     const isOpen = () => !panel.classList.contains('hidden');
+    const matches = (entry) => {
+        if (!query) return true;
+        const haystack = [entry.actor, entry.user, entry.label, entry.note, entry.text].join(' ').toLowerCase();
+        return haystack.includes(query);
+    };
 
     function render() {
-        list.innerHTML = entries.length
-            ? entries.map(entryHTML).join('')
-            : '<p class="roll-empty">Nothing rolled yet. Click an ability, a save or a skill on a character sheet, cast a spell, or type dice below.</p>';
+        const visible = entries.filter(matches);
+        list.innerHTML = visible.length
+            ? visible.map(entry => entryHTML(entry, isGM())).join('')
+            : `<p class="roll-empty">${entries.length
+                ? 'Nothing matches that filter.'
+                : 'Nothing rolled yet. Click an ability, a save or a skill on a character sheet, cast a spell, or type dice below.'}</p>`;
         list.scrollTop = list.scrollHeight;
         panel.querySelector('.roll-log-clear').classList.toggle('hidden', !isGM() || !entries.length);
         panel.querySelector('.roll-private').classList.toggle('hidden', !isGM());
+        renderMacros();
+    }
+    function renderMacros() {
+        macroRow.classList.toggle('hidden', !macros.length);
+        macroRow.innerHTML = macros.map(macro => `<span class="roll-macro" title="${escHtml(macro.label)}">
+            <button type="button" data-macro-id="${escHtml(macro.id)}">${escHtml(macro.name)}</button><button type="button" class="roll-macro-del" data-macro-del="${escHtml(macro.id)}" title="Forget this macro">&times;</button></span>`).join('');
     }
     function setUnread(n) {
         unread = n;
@@ -132,10 +154,30 @@ export function createRollLog({ socket, isGM = () => false, actor = () => '' }) 
         if (confirm('Erase the table log for everyone?')) socket.emit('clear-roll-log');
     });
     toast.addEventListener('click', () => setOpen(true));
+    panel.querySelector('.roll-log-filter').addEventListener('input', (event) => {
+        query = event.target.value.trim().toLowerCase();
+        render();
+    });
     panel.querySelectorAll('[data-roll-mode]').forEach(option => option.addEventListener('click', () => {
         mode = option.dataset.rollMode;
         panel.querySelectorAll('[data-roll-mode]').forEach(other => other.classList.toggle('active', other === option));
     }));
+    // Chips: the body rerolls, the cross forgets the macro.
+    macroRow.addEventListener('click', (event) => {
+        const del = event.target.closest('[data-macro-del]');
+        if (del) {
+            if (confirm('Forget this macro?')) socket.emit('delete-macro', { id: del.dataset.macroDel });
+            return;
+        }
+        const chip = event.target.closest('[data-macro-id]');
+        const macro = chip && macros.find(known => known.id === chip.dataset.macroId);
+        if (macro) roll({ d20: macro.d20, dice: macro.dice, label: macro.label, note: macro.note, dc: macro.dc, gmOnly: macro.gmOnly });
+    });
+    // The GM can drop any single entry; everyone else just watches.
+    list.addEventListener('click', (event) => {
+        const del = event.target.closest('[data-entry-id]');
+        if (del) socket.emit('delete-roll-log-entry', { id: del.dataset.entryId });
+    });
     form.addEventListener('submit', (event) => {
         event.preventDefault();
         const parsed = parseQuickRoll(form.expr.value);
@@ -143,21 +185,34 @@ export function createRollLog({ socket, isGM = () => false, actor = () => '' }) 
         error.textContent = '';
         roll({ ...parsed, label: form.label.value.trim() || form.expr.value.trim(), gmOnly: form.gmOnly.checked });
     });
+    panel.querySelector('.roll-save-macro').addEventListener('click', () => {
+        const parsed = parseQuickRoll(form.expr.value);
+        if (!parsed) { error.textContent = 'Write dice like d20+5, 2d6+3 or 1d8+1d6.'; return; }
+        const label = form.label.value.trim() || form.expr.value.trim();
+        const name = prompt('Name this macro?', label);
+        if (!name) return;
+        error.textContent = '';
+        socket.emit('save-macro', { macro: { name: name.trim(), label, ...parsed } });
+    });
 
     socket.on('roll-log', (data) => {
         entries = Array.isArray(data && data.entries) ? data.entries : [];
         setUnread(0);
         render();
     });
+    socket.on('macros', (data) => {
+        macros = Array.isArray(data && data.macros) ? data.macros : [];
+        renderMacros();
+    });
+    socket.on('macro-denied', (data) => {
+        error.textContent = (data && data.error) || 'That macro did not save.';
+    });
     socket.on('roll-logged', (entry) => {
         if (!entry || entries.some(known => known.id === entry.id && known.kind === entry.kind)) return;
         entries.push(entry);
         if (entries.length > 400) entries.splice(0, entries.length - 400);
         if (isOpen()) {
-            list.querySelector('.roll-empty')?.remove();
-            list.insertAdjacentHTML('beforeend', entryHTML(entry));
-            list.scrollTop = list.scrollHeight;
-            panel.querySelector('.roll-log-clear').classList.toggle('hidden', !isGM());
+            render(); // the filter may hide it anyway
         } else {
             setUnread(unread + 1);
             if (entry.kind !== 'combat') showToast(entryHTML(entry), 6000);  // the tracker already shows combat
@@ -180,7 +235,7 @@ export function createRollLog({ socket, isGM = () => false, actor = () => '' }) 
 
     return {
         roll,
-        refresh: () => socket.emit('get-roll-log'),
+        refresh: () => { socket.emit('get-roll-log'); socket.emit('get-macros'); },
         toggle: () => setOpen(!isOpen()),
         // Chosen in the panel: '', 'adv' or 'dis' — sheets roll with it too.
         get mode() { return mode; },

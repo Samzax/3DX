@@ -794,6 +794,16 @@ body.hall-open #vision-chip { display: none; }
 }
 .roll-log-bar button { color: #9ba4b2; background: transparent; border: 0; border-radius: 6px; cursor: pointer; font-size: 12px; padding: 2px 7px; }
 .roll-log-bar button:hover { color: #fff; background: rgba(255, 255, 255, .09); }
+.roll-log-filter {
+  width: 92px; padding: 3px 7px; color: #f3ead8; background: #14100b;
+  border: 1px solid #453b2c; border-radius: 6px; font: inherit; font-size: 11px;
+}
+.roll-entry-del {
+  display: none; margin-left: 6px; color: #9ba4b2; background: transparent; border: 0;
+  border-radius: 6px; cursor: pointer; font-size: 13px; line-height: 1;
+}
+.roll-entry:hover .roll-entry-del { display: inline-block; }
+.roll-entry-del:hover { color: #ff8f8f; background: rgba(255, 255, 255, .09); }
 .roll-log-close { font-size: 18px !important; line-height: 1; }
 .roll-log-list { flex: 1; min-height: 80px; overflow-y: auto; padding: 4px 10px; overscroll-behavior: contain; }
 .roll-empty { margin: 14px 4px; color: #857a66; font-size: 12px; line-height: 1.5; }
@@ -821,7 +831,7 @@ body.hall-open #vision-chip { display: none; }
   border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-size: 11px;
 }
 .roll-modes button.active { color: #fff; background: rgba(201, 151, 58, .3); border-color: rgba(230, 195, 119, .4); }
-.roll-quick-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 5px; }
+.roll-quick-row { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 5px; }
 .roll-quick-row input {
   min-width: 0; padding: 6px 8px; color: #f3ead8; background: #14100b;
   border: 1px solid #453b2c; border-radius: 6px; font: inherit; font-size: 12px;
@@ -829,6 +839,19 @@ body.hall-open #vision-chip { display: none; }
 .roll-quick-row button {
   padding: 6px 12px; color: #10151d; background: #e6c377; border: 0; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 12px;
 }
+.roll-save-macro { color: #a89d88 !important; background: rgba(255, 255, 255, .05) !important; padding: 6px 9px !important; }
+.roll-save-macro:hover { color: #e6c377 !important; background: rgba(255, 255, 255, .1) !important; }
+.roll-macros { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.roll-macros.hidden { display: none; }
+.roll-macro { display: inline-flex; align-items: center; border: 1px solid rgba(230, 195, 119, .35); border-radius: 999px; overflow: hidden; }
+.roll-macro > button {
+  padding: 3px 8px; color: #e6c377; background: rgba(255, 255, 255, .04); border: 0; cursor: pointer; font-size: 11px;
+}
+.roll-macro > button:hover { color: #10151d; background: #e6c377; }
+.roll-macro .roll-macro-del {
+  padding: 3px 6px; color: #9ba4b2; border-left: 1px solid rgba(230, 195, 119, .35); font-size: 12px; line-height: 1;
+}
+.roll-macro .roll-macro-del:hover { color: #ff8f8f; background: rgba(255, 255, 255, .08); }
 .roll-private { display: block; margin-top: 6px; color: #a89d88; font-size: 11px; }
 .roll-private.hidden { display: none; }
 .roll-quick-error { color: #ff8f8f; font-size: 11px; }
@@ -972,3 +995,76 @@ body:not(.touch-input) #touch-bar, body.hall-open #touch-bar { display: none; }
 #touch-bar button:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 #touch-bar button.primary { background: #c9973a; border-color: #e6c377; color: #1a130a; }
 #touch-bar button.danger { margin-left: 10px; background: transparent; border-color: #8a3b32; color: #ff9c8f; }
+
+/* --- Reference browser (shared/reference.js): SRD spells/monsters/items on both screens --- */
+#reference-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, .45);
+}
+#reference-overlay.hidden { display: none; }
+.reference-shell {
+  display: flex;
+  flex-direction: column;
+  width: min(880px, calc(100vw - 48px));
+  height: min(640px, calc(100vh - 64px));
+  overflow: hidden;
+  background: rgba(22, 17, 12, .97);
+  border: 1px solid var(--workspace-line, rgba(214, 180, 110, .28));
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, .5);
+  backdrop-filter: blur(14px);
+}
+.reference-tabs { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-bottom: 1px solid rgba(214, 180, 110, .2); }
+.reference-tab {
+  padding: 5px 12px; color: #cbc1a8; background: rgba(255, 255, 255, .05);
+  border: 1px solid transparent; border-radius: 999px; cursor: pointer; font: inherit; font-size: 12px;
+}
+.reference-tab.active { color: #10151d; background: #e6c377; font-weight: 700; }
+.reference-search {
+  flex: 1; min-width: 0; margin-left: auto; padding: 6px 9px; color: #f3ead8;
+  background: rgba(0, 0, 0, .3); border: 1px solid rgba(214, 180, 110, .22);
+  border-radius: 6px; font: inherit; font-size: 12px;
+}
+.reference-body { display: grid; grid-template-columns: minmax(220px, 38%) minmax(0, 1fr); min-height: 0; flex: 1; }
+.reference-list {
+  display: flex; flex-direction: column; gap: 3px; padding: 8px;
+  overflow-y: auto; overscroll-behavior: contain;
+  border-right: 1px solid rgba(214, 180, 110, .18);
+}
+.reference-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 6px 8px; text-align: left; color: #f3ead8; background: rgba(255, 255, 255, .04);
+  border: 1px solid transparent; border-radius: 6px; cursor: pointer; font: inherit;
+}
+.reference-row span { min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.reference-row small { flex: none; color: #857a66; font-size: 10px; white-space: nowrap; }
+.reference-row:hover { background: rgba(255, 255, 255, .09); }
+.reference-row.active { background: rgba(230, 195, 119, .16); border-color: rgba(230, 195, 119, .4); }
+.reference-detail { min-width: 0; padding: 12px 14px; overflow-y: auto; overscroll-behavior: contain; }
+.reference-hint { margin: 0; color: #857a66; font-size: 12px; }
+.reference-retry {
+  margin-left: 6px; padding: 2px 8px; color: #10151d; background: #e6c377;
+  border: 0; border-radius: 5px; cursor: pointer; font-weight: 700; font-size: 11px;
+}
+@media (max-width: 760px) {
+  .reference-body { grid-template-columns: 1fr; }
+  .reference-list { max-height: 42%; border-right: 0; border-bottom: 1px solid rgba(214, 180, 110, .18); }
+}
+
+/* Journal filter box (gm.html #journal-search / player.html #journal-search) */
+.journal-search {
+  width: 100%;
+  margin: 0 0 6px;
+  padding: 5px 9px;
+  color: #f3ead8;
+  background: rgba(0, 0, 0, .3);
+  border: 1px solid rgba(214, 180, 110, .22);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12px;
+}

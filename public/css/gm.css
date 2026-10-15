@@ -339,3 +339,55 @@
 #prop-menu #btn-prop-rot { cursor: pointer; }
 #prop-menu .menu-button { grid-column: 1 / -1; margin-bottom: 0; }
 
+/* --- GM bookmarks (gm.js): saved camera spots on this campaign's maps --- */
+#bookmark-panel {
+  position: absolute; top: 112px; left: 1084px; z-index: 36; width: 300px; max-width: calc(100vw - 100px);
+  display: flex; flex-direction: column; max-height: min(62vh, 560px);
+  color: var(--text, #e6dcc8); background: var(--workspace-glass, rgba(22, 17, 12, .94));
+  border: 1px solid var(--workspace-line, rgba(214, 180, 110, .2)); border-radius: 12px;
+  box-shadow: 0 14px 42px rgba(0, 0, 0, .38); backdrop-filter: blur(14px); font-size: 12px;
+}
+#bookmark-panel.hidden { display: none; }
+.bookmark-list { overflow-y: auto; padding: 4px 10px; overscroll-behavior: contain; }
+.bookmark-row { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid rgba(255, 255, 255, .06); }
+.bookmark-row:last-child { border-bottom: 0; }
+.bookmark-go {
+  flex: 1; min-width: 0; padding: 5px 8px; text-align: left; color: #f3ead8; background: rgba(255, 255, 255, .05);
+  border: 1px solid transparent; border-radius: 6px; cursor: pointer; font: inherit; font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bookmark-go:hover { color: #10151d; background: #e6c377; }
+.bookmark-where { flex: none; max-width: 108px; color: #857a66; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bookmark-del { color: #9ba4b2; background: transparent; border: 0; border-radius: 6px; cursor: pointer; font-size: 14px; }
+.bookmark-del:hover { color: #ff8f8f; background: rgba(255, 255, 255, .09); }
+.bookmark-foot { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-top: 1px solid var(--workspace-line, rgba(214, 180, 110, .2)); }
+.bookmark-save { padding: 6px 10px; color: #10151d; background: #e6c377; border: 0; border-radius: 6px; cursor: pointer; font-weight: 700; font-size: 12px; }
+.bookmark-error { color: #ff8f8f; font-size: 11px; }
+.bookmark-error:empty { display: none; }
+
+/* --- GM encounter library (gm.js): saved monster groups in the Add Object panel --- */
+#encounter-menu-container { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; padding-top: 10px; border-top: 1px solid rgba(214, 180, 110, .18); }
+#encounter-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; overscroll-behavior: contain; }
+.encounter-empty { margin: 0; color: #857a66; font-size: 11px; }
+.encounter-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; background: rgba(255, 255, 255, .04); border: 1px solid rgba(255, 255, 255, .07); border-radius: 6px; }
+.encounter-name { flex: 1; min-width: 0; font-size: 12px; color: #f3ead8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.encounter-where { flex: none; color: #857a66; font-size: 10px; }
+.encounter-place { padding: 3px 8px; color: #10151d; background: #e6c377; border: 0; border-radius: 5px; cursor: pointer; font-weight: 700; font-size: 11px; }
+.encounter-place:hover { background: #f3d68f; }
+.encounter-del { color: #9ba4b2; background: transparent; border: 0; border-radius: 5px; cursor: pointer; font-size: 13px; }
+.encounter-del:hover { color: #ff8f8f; background: rgba(255, 255, 255, .09); }
+.encounter-builder { display: flex; flex-direction: column; gap: 6px; }
+.encounter-builder select,
+.encounter-builder input {
+  width: 100%; padding: 5px 7px; color: #f3ead8; background: rgba(0, 0, 0, .3);
+  border: 1px solid rgba(214, 180, 110, .22); border-radius: 6px; font: inherit; font-size: 12px;
+}
+.encounter-input-row { display: flex; gap: 6px; align-items: center; }
+.encounter-input-row input { flex: 1; min-width: 0; }
+.encounter-input-row .menu-button { flex: none; padding: 5px 10px; }
+#encounter-tokens { display: flex; flex-direction: column; gap: 3px; }
+.encounter-token-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 3px 7px; font-size: 11px; color: #cbc1a8; background: rgba(255, 255, 255, .03); border-radius: 5px; }
+.encounter-token-del { color: #9ba4b2; background: transparent; border: 0; cursor: pointer; font-size: 12px; }
+.encounter-token-del:hover { color: #ff8f8f; }
+#encounter-status { margin: 0; min-height: 14px; color: #ff8f8f; font-size: 11px; }
+#encounter-status:empty { display: none; }

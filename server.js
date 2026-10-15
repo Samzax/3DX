@@ -1107,6 +1107,7 @@ function campaignSettings() {
   return (campaign && campaign.settings) || defaultCampaignSettings();
 }
 
+
 // ===== Fog of war (U4, docs/unified-world-design.md) =====
 // Players free-roam the camera but only RECEIVE content inside regions the GM
 // has revealed. The mask is a set of hexes on a GLOBAL province-pitch lattice
@@ -2821,6 +2822,149 @@ function deliverChat(message) {
   }
 }
 
+// Dice macros (macros.json): a personal saved roll per campaign — a UI
+// shortcut, not table state, so a list only ever reaches its owner's sockets.
+const MACROS_FILE = 'macros.json';
+const MACROS_LIMIT = 50;
+function sanitizeMacro(raw) {
+  if (!isRecord(raw)) return null;
+  const roll = {};
+  if (isRecord(raw.d20)) roll.d20 = { bonus: boundedInteger(raw.d20.bonus, -50, 50, 0) };
+  if (Array.isArray(raw.dice)) {
+    const dice = raw.dice.slice(0, 4).filter(isRecord)
+      .map(part => ({ expr: boundedString(part.expr, 40), type: boundedString(part.type, 24) }))
+      .filter(part => part.expr);
+    if (dice.length) roll.dice = dice;
+  }
+  if (!roll.d20 && !roll.dice) return null;
+  const dc = boundedInteger(raw.dc, 0, 99, 0);
+  const note = boundedString(raw.note, 240);
+  const name = boundedString(raw.name, 40) || 'Roll';
+  return {
+    id: boundedString(raw.id, 20) || crypto.randomUUID().slice(0, 8),
+    name,
+    label: boundedString(raw.label, 120) || name,
+    owner: boundedText(raw.owner, MAX_USERNAME_LENGTH),
+    ...(note ? { note } : {}),
+    ...(dc ? { dc } : {}),
+    ...(raw.gmOnly === true ? { gmOnly: true } : {}),
+    ...roll
+  };
+}
+function macrosDB() {
+  if (!activeStore) return [];
+  if (!activeStore.macros) {
+    const saved = loadJSON(MACROS_FILE, { macros: [] },
+      (value) => isRecord(value) && Array.isArray(value.macros), activeStore.dir);
+    activeStore.macros = saved.macros.slice(-MACROS_LIMIT).map(sanitizeMacro).filter(Boolean);
+  }
+  return activeStore.macros;
+}
+function saveMacros() {
+  return activeStore && saveJSON(MACROS_FILE, { macros: macrosDB() });
+}
+function deliverMacros(username) {
+  const campaignId = activeCampaignId();
+  const payload = { macros: macrosDB().filter(macro => sameUser(macro.owner, username)) };
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.campaignId === campaignId && sameUser(sock.username, username)) sock.emit('macros', payload);
+  }
+}
+
+// GM bookmarks (bookmarks.json): named camera spots over this campaign's
+// maps — a GM-only authoring aid, so only GM sockets ever receive the list.
+const BOOKMARKS_FILE = 'bookmarks.json';
+const BOOKMARKS_LIMIT = 40;
+function bookmarkCoord(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+function sanitizePose(raw) {
+  if (!isRecord(raw) || !isRecord(raw.pos) || !isRecord(raw.look)) return null;
+  const nums = ['x', 'y', 'z'].map(key => [bookmarkCoord(raw.pos[key]), bookmarkCoord(raw.look[key])]);
+  if (nums.some(([pos, look]) => pos == null || look == null)) return null;
+  return {
+    pos: { x: nums[0][0], y: nums[1][0], z: nums[2][0] },
+    look: { x: nums[0][1], y: nums[1][1], z: nums[2][1] }
+  };
+}
+function bookmarksDB() {
+  if (!activeStore) return [];
+  if (!activeStore.bookmarks) {
+    const saved = loadJSON(BOOKMARKS_FILE, { bookmarks: [] },
+      (value) => isRecord(value) && Array.isArray(value.bookmarks), activeStore.dir);
+    const bookmarks = [];
+    for (const raw of saved.bookmarks.slice(-BOOKMARKS_LIMIT)) {
+      if (!isRecord(raw)) continue;
+      const pose = sanitizePose(raw.pose);
+      const name = boundedText(raw.name, 40);
+      const mapKey = boundedString(raw.mapKey, 80);
+      if (!pose || !name || !mapKey) continue;
+      bookmarks.push({ id: boundedString(raw.id, 20) || crypto.randomUUID().slice(0, 8), name, mapKey, pose });
+    }
+    activeStore.bookmarks = bookmarks;
+  }
+  return activeStore.bookmarks;
+}
+function saveBookmarks() {
+  return activeStore && saveJSON(BOOKMARKS_FILE, { bookmarks: bookmarksDB() });
+}
+function deliverBookmarks() {
+  const campaignId = activeCampaignId();
+  const payload = { bookmarks: bookmarksDB() };
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.campaignId === campaignId && sock.username && isCampaignGMFor(campaignId, sock.username)) sock.emit('bookmarks', payload);
+  }
+}
+
+// --- GM encounter library: saved groups of monsters to drop on the map ---
+const ENCOUNTERS_FILE = 'encounters.json';
+const ENCOUNTERS_LIMIT = 25;
+const ENCOUNTER_ROW_MAX = 12;
+const ENCOUNTER_TOKENS_MAX = 40;
+function sanitizeEncounter(raw) {
+  if (!isRecord(raw)) return null;
+  const name = boundedText(raw.name, 40);
+  if (!name) return null;
+  const members = [];
+  let tokens = 0;
+  for (const entry of (Array.isArray(raw.members) ? raw.members : [])) {
+    if (!isRecord(entry)) continue;
+    const index = boundedString(entry.index, 80);
+    const count = boundedInteger(entry.count, 1, 12, 1);
+    if (!index || tokens + count > ENCOUNTER_TOKENS_MAX) continue;
+    members.push({ index, count });
+    tokens += count;
+    if (members.length >= ENCOUNTER_ROW_MAX) break;
+  }
+  if (!members.length) return null;
+  return { id: boundedString(raw.id, 20) || crypto.randomUUID().slice(0, 8), name, members };
+}
+function encountersDB() {
+  if (!activeStore) return [];
+  if (!activeStore.encounters) {
+    const saved = loadJSON(ENCOUNTERS_FILE, { encounters: [] },
+      (value) => isRecord(value) && Array.isArray(value.encounters), activeStore.dir);
+    const encounters = [];
+    for (const raw of saved.encounters.slice(-ENCOUNTERS_LIMIT)) {
+      const encounter = sanitizeEncounter(raw);
+      if (encounter) encounters.push(encounter);
+    }
+    activeStore.encounters = encounters;
+  }
+  return activeStore.encounters;
+}
+function saveEncounters() {
+  return activeStore && saveJSON(ENCOUNTERS_FILE, { encounters: encountersDB() });
+}
+function deliverEncounters() {
+  const campaignId = activeCampaignId();
+  const payload = { encounters: encountersDB() };
+  for (const sock of io.sockets.sockets.values()) {
+    if (sock.campaignId === campaignId && sock.username && isCampaignGMFor(campaignId, sock.username)) sock.emit('encounters', payload);
+  }
+}
+
 // "2d6+1d4+3" → { expr, rolls, total }, or null when it is not a dice expression.
 function rollExpression(raw) {
   const text = String(raw == null ? '' : raw).replace(/\s+/g, '').toLowerCase();
@@ -4225,7 +4369,7 @@ io.on('connection', (socket) => {
 
   // Export one campaign as a JSON bundle the GM downloads: the registry record,
   // characters, journal (notes/treasury/XP), pools and rests, the table log,
-  // chat and every map's state — the same store files,
+  // chat, bookmarks, encounters and every map's state — the same store files,
   // grouped in one file.
   socket.on('export-campaign', (payload) => {
     if (!socket.username) { socket.emit('error', 'Not logged in'); return; }
@@ -4245,6 +4389,8 @@ io.on('connection', (socket) => {
       pools: { chars: structuredClone(poolsDB()), requests: structuredClone(restList()) },
       rolls: structuredClone(tableLog()),
       chat: structuredClone(chatDB()),
+      bookmarks: structuredClone(bookmarksDB()),
+      encounters: structuredClone(encountersDB()),
       maps: structuredClone(maps)
     }));
     console.log(`[CAMPAIGN] ${socket.username} exported "${campaign.name}" (${id})`);
@@ -6075,6 +6221,151 @@ io.on('connection', (socket) => {
     tableLog().length = 0;
     saveTableLog();
     io.to(campRoom(activeCampaignId())).emit('roll-log', { entries: [] });
+  });
+
+  onCampaign('delete-roll-log-entry', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return combatDeny('GM only');
+    const id = isRecord(payload) ? boundedString(payload.id, 20) : '';
+    const log = tableLog();
+    const kept = log.filter(entry => entry.id !== id);
+    if (kept.length === log.length) return;
+    activeStore.rolls = kept;
+    if (!saveTableLog()) { activeStore.rolls = log; return combatDeny('Could not save the log'); }
+    // Everyone gets their own filtered view of the shortened log.
+    const campaignId = activeCampaignId();
+    for (const sock of io.sockets.sockets.values()) {
+      if (!sock.username || sock.campaignId !== campaignId) continue;
+      sock.emit('roll-log', { entries: tableLog().filter(entry => tableEntryVisibleTo(sock.username, entry)) });
+    }
+  });
+
+  // --- Dice macros: a personal saved roll per campaign ---
+  function denyMacro(message) {
+    socket.emit('macro-denied', { error: message });
+  }
+
+  onCampaign('get-macros', () => {
+    if (!socket.username) return;
+    socket.emit('macros', { macros: macrosDB().filter(macro => sameUser(macro.owner, socket.username)) });
+  });
+
+  onCampaign('save-macro', (payload) => {
+    if (!socket.username) return;
+    const now = Date.now();
+    if (now - (socket.macroAt || 0) < 500) return denyMacro('Slow down a moment');
+    const macro = sanitizeMacro(isRecord(payload) ? payload.macro : {});
+    if (!macro) return denyMacro('A macro needs dice, like d20+5 or 2d6');
+    macro.owner = socket.username;
+    const macros = macrosDB();
+    const existing = macros.find(known => known.id === macro.id && sameUser(known.owner, socket.username));
+    if (existing) {
+      const owner = existing.owner;
+      Object.assign(existing, macro, { owner });
+    } else {
+      if (macros.length >= MACROS_LIMIT) return denyMacro('Your macro list is full (50)');
+      macros.push(macro);
+    }
+    if (!saveMacros()) return denyMacro('Could not save the macro');
+    socket.macroAt = now;
+    deliverMacros(socket.username);
+  });
+
+  onCampaign('delete-macro', (payload) => {
+    if (!socket.username) return;
+    const id = isRecord(payload) ? boundedString(payload.id, 20) : '';
+    const macros = macrosDB();
+    const kept = macros.filter(macro => !(macro.id === id && sameUser(macro.owner, socket.username)));
+    if (kept.length === macros.length) return;
+    activeStore.macros = kept;
+    if (!saveMacros()) { activeStore.macros = macros; return denyMacro('Could not save the macros'); }
+    deliverMacros(socket.username);
+  });
+
+  // --- GM bookmarks: named camera spots on this campaign's maps ---
+  function denyBookmark(message) {
+    socket.emit('bookmark-denied', { error: message });
+  }
+
+  onCampaign('get-bookmarks', () => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyBookmark('GM only');
+    socket.emit('bookmarks', { bookmarks: bookmarksDB() });
+  });
+
+  onCampaign('save-bookmark', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyBookmark('GM only');
+    const name = isRecord(payload) ? boundedText(payload.name, 40) : '';
+    const mapKey = isRecord(payload) ? boundedString(payload.mapKey, 80) : '';
+    const pose = isRecord(payload) ? sanitizePose(payload.pose) : null;
+    if (!name || !mapKey || !pose) return denyBookmark('A bookmark needs a name and a view to remember');
+    const bookmarks = bookmarksDB();
+    const id = isRecord(payload) ? boundedString(payload.id, 20) : '';
+    const existing = id && bookmarks.find(bookmark => bookmark.id === id);
+    if (existing) {
+      existing.name = name;
+      existing.mapKey = mapKey;
+      existing.pose = pose;
+    } else {
+      if (bookmarks.length >= BOOKMARKS_LIMIT) return denyBookmark('The bookmark list is full (40)');
+      bookmarks.push({ id: crypto.randomUUID().slice(0, 8), name, mapKey, pose });
+    }
+    if (!saveBookmarks()) return denyBookmark('Could not save the bookmark');
+    deliverBookmarks();
+  });
+
+  onCampaign('delete-bookmark', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyBookmark('GM only');
+    const id = isRecord(payload) ? boundedString(payload.id, 20) : '';
+    const bookmarks = bookmarksDB();
+    const kept = bookmarks.filter(bookmark => bookmark.id !== id);
+    if (kept.length === bookmarks.length) return;
+    activeStore.bookmarks = kept;
+    if (!saveBookmarks()) { activeStore.bookmarks = bookmarks; return denyBookmark('Could not save the bookmarks'); }
+    deliverBookmarks();
+  });
+
+  // --- GM encounter library: saved monster groups (gm.js places them) ---
+  function denyEncounter(message) {
+    socket.emit('encounter-denied', { error: message });
+  }
+
+  onCampaign('get-encounters', () => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyEncounter('GM only');
+    socket.emit('encounters', { encounters: encountersDB() });
+  });
+
+  onCampaign('save-encounter', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyEncounter('GM only');
+    const encounter = sanitizeEncounter(payload);
+    if (!encounter) return denyEncounter('An encounter needs a name and at least one monster');
+    const encounters = encountersDB();
+    const existing = encounters.find(entry => entry.id === encounter.id);
+    if (existing) {
+      existing.name = encounter.name;
+      existing.members = encounter.members;
+    } else {
+      if (encounters.length >= ENCOUNTERS_LIMIT) return denyEncounter('The encounter library is full (25)');
+      encounters.push(encounter);
+    }
+    if (!saveEncounters()) return denyEncounter('Could not save the encounter');
+    deliverEncounters();
+  });
+
+  onCampaign('delete-encounter', (payload) => {
+    if (!socket.username) return;
+    if (!isCampaignGM(socket.username)) return denyEncounter('GM only');
+    const id = isRecord(payload) ? boundedString(payload.id, 20) : '';
+    const encounters = encountersDB();
+    const kept = encounters.filter(entry => entry.id !== id);
+    if (kept.length === encounters.length) return;
+    activeStore.encounters = kept;
+    if (!saveEncounters()) { activeStore.encounters = encounters; return denyEncounter('Could not save the encounters'); }
+    deliverEncounters();
   });
 
   // --- Table chat: OOC conversation and private whispers (both screens) ---

@@ -41,6 +41,7 @@ import { nearestDoor, normalizeSenses } from '../shared/vision.js';
 import { buildBarriers, walkable, PROP_POSES } from '../shared/passage.js';
 import { createRollLog } from '../shared/rolllog.js';
 import { createChat } from '../shared/chat.js';
+import { createReferencePanel } from '../shared/reference.js';
 import { createRestDesk } from '../shared/rests.js';
 import { createCastDesk } from '../shared/castdesk.js';
 import { spellDetailHTML, spellCastRequest, spellMechanics, spellLevelLabel } from '../shared/spellinfo.js';
@@ -65,6 +66,7 @@ let campaignContext = null;
 let pendingSpawnLanding = false;   // first unified landing after (re)join uses settings.spawn
 // Journal snapshot from the server (party-visible entries only) + treasury + XP.
 let journalState = { entries: [], treasury: {}, xp: { mode: 'milestone', awards: [] } };
+let journalQuery = '';                  // filter box above the notes (player.html)
 
 // Adopt campaign settings: seed + world shape drive local generation (reset
 // picks them up automatically; without a reset, regenerate live ground only).
@@ -256,6 +258,7 @@ const abilityTargeting = new AbilityTargeting({
 });
 let rollLog = null;             // table log + roll requests (shared/rolllog.js), created with the socket
 let chat = null;                // OOC table chat + whispers (shared/chat.js)
+let reference = null;           // SRD browser overlay (shared/reference.js)
 const openSpells = new Set();   // spell cards left open in the Spells panel
 let restDesk = null;            // spent slots/pools + rest requests (shared/rests.js)
 let castDesk = null;            // casting outside a fight: aim, ask the GM (shared/castdesk.js)
@@ -521,6 +524,14 @@ function init() {
     hudButtons.forEach(button => button.addEventListener('click', () => showCharacterPanel(button.dataset.panel)));
     const topCharacters = document.getElementById('btn-workspace-characters');
     if (topCharacters) topCharacters.addEventListener('click', () => showCharacterPanel('character-menu'));
+
+    // Journal filter: re-render the notes under the box (the box itself is
+    // static markup, so it keeps focus while the list rebuilds).
+    const journalSearch = document.getElementById('journal-search');
+    if (journalSearch) journalSearch.addEventListener('input', () => {
+        journalQuery = journalSearch.value.trim();
+        renderJournalPanel();
+    });
 
     closeAllPanels = function () {
         if (workspace) workspace.closeInspector();
@@ -1992,12 +2003,17 @@ function renderJournalPanel() {
     const coins = ['pp', 'gp', 'ep', 'sp', 'cp'].filter(c => journalState.treasury[c])
         .map(c => `${journalState.treasury[c]} ${c}`).join(' · ');
     const entries = journalState.entries.length
-        ? journalState.entries.map(entry => {
+        ? journalState.entries.filter(entry => {
+            if (!journalQuery) return true;
+            const query = journalQuery.toLowerCase();
+            return [entry.title, entry.text, kindTags[entry.kind]].filter(Boolean)
+                .join(' ').toLowerCase().includes(query);
+        }).map(entry => {
             const tag = kindTags[entry.kind] || 'Quest';
             return `<details class="spell-lvl"><summary><b>${escHtml(entry.title)}</b> <span class="muted">${escHtml(tag)}</span></summary>
                 <div class="muted" style="white-space:pre-wrap; margin-top:4px;">${escHtml(entry.text)}</div></details>`;
         }).join('')
-        : `<p class="muted">Nothing in the journal yet.</p>`;
+        : `<p class="muted">${journalQuery ? 'No notes match that filter.' : 'Nothing in the journal yet.'}</p>`;
     const awards = journalState.xp.awards.length
         ? journalState.xp.awards.slice().reverse().map(award => {
             const date = award.at ? new Date(award.at).toLocaleDateString() : '';
@@ -2570,6 +2586,10 @@ function initSocket() {
         actor: () => (activeChar() && activeChar().name) || myUsername || ''
     });
     chat = createChat({ socket, username: () => myUsername });
+    reference = createReferencePanel({
+        roll: (request) => rollLog && rollLog.roll(request),
+        getActor: () => myUsername
+    });
     castDesk = createCastDesk({
         socket, isGM: () => false, username: () => myUsername,
         worldGroup, objects: () => objects, terrain: () => terrain,

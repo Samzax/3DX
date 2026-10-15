@@ -414,6 +414,7 @@
         <div class="tp-section">Journal</div>
         <div class="tp-hint">The campaign notebook: quests, NPCs, lore and handouts. Party-visible entries
             show on every player's Journal tab; GM-only ones stay with you.</div>
+        <input type="search" id="journal-search" class="journal-search" placeholder="Filter entries…" autocomplete="off" aria-label="Filter journal entries">
         <div id="journal-entries" class="journal-entries"><div class="tp-hint">No entries yet.</div></div>
         <div class="tp-row">
             <button id="journal-new" class="tp-chip">+ New entry</button>
@@ -504,6 +505,24 @@
             <div id="monster-button-list"></div>
             <button class="workspace-secondary monster-create" data-workspace-studio="/homebrew" data-workspace-studio-title="Homebrew Studio">Create a custom monster</button>
             <a class="monster-license" href="/data/srd/ATTRIBUTION.md" target="_blank" rel="license">SRD 5.1 · CC-BY-4.0</a>
+        </div>
+
+        <div id="encounter-menu-container">
+            <h2>Encounters</h2>
+            <div id="encounter-list"></div>
+            <div class="encounter-builder">
+                <select id="encounter-species" aria-label="Monster for this encounter"><option value="">Pick a monster…</option></select>
+                <div class="encounter-input-row">
+                    <input id="encounter-count" type="number" min="1" max="12" step="1" value="3" aria-label="How many">
+                    <button type="button" id="encounter-add" class="menu-button">Add</button>
+                </div>
+                <div id="encounter-tokens"></div>
+                <div class="encounter-input-row">
+                    <input id="encounter-name" type="text" maxlength="40" placeholder="Encounter name" aria-label="Encounter name">
+                    <button type="button" id="encounter-save" class="menu-button">Save</button>
+                </div>
+                <p id="encounter-status" role="alert"></p>
+            </div>
         </div>
 
         <div id="character-menu-container">
