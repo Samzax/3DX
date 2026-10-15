@@ -26,11 +26,11 @@ import {
     monsterAppearanceVariant, monsterAppearanceVariants, monsterChallengeLabel, monsterColor,
     monsterCombatStats, monsterStatBlockHTML, monsterTokenSnapshot
 } from '../shared/monsters.js';
-import { AbilityTargeting, CombatTracker, CombatOverlays, attackPayloadOptions, deriveCombatStats, EFFECTS, remainingFeet } from '../shared/combat.js';
+import { AbilityTargeting, CombatTracker, CombatOverlays, attackPayloadOptions, deriveCombatStats, EFFECTS, moveModesOf, remainingFeet } from '../shared/combat.js';
 import { combatInteger } from '../shared/combat-safety.js';
-import { tickRigCharacters } from '../shared/charmesh.js';
+import { syncCharacterStances, tickRigCharacters } from '../shared/charmesh.js';
 import { configureGrounding, tickGrounding } from '../shared/grounding.js';
-import { pathCost, describeCost, normalizeMovement } from '../shared/ground.js';
+import { pathCost, describeCost, normalizeMovement, MOVE_RULES } from '../shared/ground.js';
 import {
     buildWallRun, buildFloorPatch, buildStaircase, buildRoofPatch, disposeBuiltObject,
     wallGesturePath, wallSegmentCount, structureTileCount,
@@ -908,7 +908,7 @@ function initSocket() {
 
     // Live terrain edits (echo to other GM tabs; players handle this too).
     socket.on('terrain-updated', (data) => {
-        if (terrain) { terrain.applyData(data); syncWaterControls(); }
+        if (terrain) { terrain.applyData(data); syncWaterControls(); updateFlyStances(); }
     });
 
     // Chunk deletion and water removal are one server transaction. The sender
@@ -940,7 +940,7 @@ function initSocket() {
             hexTree = { ...hexTree, [key]: layer };
             terrain.setBiomeOverrides(hexTree);
             clearTimeout(regenTimer);
-            regenTimer = setTimeout(() => terrain.regenerate(), 400);
+            regenTimer = setTimeout(() => { terrain.regenerate(); updateFlyStances(); }, 400);
         }
     });
 
@@ -972,6 +972,7 @@ function initSocket() {
             createObjectFromData(data.id, data);
             syncCharacterSenses();
         }
+        if (['token', 'character', 'floor', 'stair', 'roof'].includes(data.type)) updateFlyStances();
         // Refresh the tracker's "+ add to combat" candidates.
         if (combatTracker && combatState) combatTracker.setState(combatState);
     });
@@ -982,6 +983,7 @@ function initSocket() {
             object.position.set(data.position.x, data.position.y, data.position.z);
             updateObjectPositionData(object);
             if (selectedObject === object) renderSelectionInspector({ open: false });
+            updateFlyStances();
         }
     });
 
@@ -1000,12 +1002,13 @@ function initSocket() {
         if (updated === object) updateObjectPresentation(object, patch);
         if (objectNameplates) objectNameplates.sync(objects);
         if (selectedObject === updated) renderSelectionInspector({ open: false });
+        if (geometryChanged && ['floor', 'stair', 'roof'].includes(type)) updateFlyStances();
     });
 
     // Atomic building/storey edits arrive as one canonical batch. The server
     // must not require clients to infer a group from positions or replay the
     // source transform independently.
-    socket.on('structure-batch-applied', (result) => applyStructureBatchResult(result));
+    socket.on('structure-batch-applied', (result) => { applyStructureBatchResult(result); updateFlyStances(); });
     socket.on('structure-batch-rejected', ({ requestId, reason } = {}) => {
         if (requestId) pendingStructureBatches.delete(requestId);
         setBuildBuildingStatus(reason || 'Building edit was rejected by the server.', true);
@@ -1022,6 +1025,7 @@ function initSocket() {
             objects = objects.filter(o => o.userData.syncId !== data.id);
             if (objectNameplates) objectNameplates.sync(objects);
             syncBuildControls();
+            if (['token', 'character', 'floor', 'stair', 'roof'].includes(object.userData.objectData?.type)) updateFlyStances();
         }
     });
 
@@ -1798,6 +1802,7 @@ function finishHeightDrag() {
         const position = { x: selectedObject.position.x, y: selectedObject.position.y, z: selectedObject.position.z };
         updateObjectPositionData(selectedObject);
         socket.emit('move-object', { id: selectedObject.userData.syncId, position });
+        updateFlyStances();
     }
     deselectObject();
 }
@@ -1808,7 +1813,10 @@ function dropCarried(support = null) {
     if (!selectedObject) return;
     const docId = selectedObject.userData.syncId;
     if (docId) {
-        if (support) selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0);
+        if (support) {
+            const held = flyClearance(selectedObject);
+            selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0) + held;
+        }
         const finalPosition = snapToCurrentGrid(selectedObject.position);
         selectedObject.position.x = finalPosition.x;
         selectedObject.position.z = finalPosition.z;
@@ -1821,6 +1829,7 @@ function dropCarried(support = null) {
                 z: finalPosition.z
             }
         });
+        updateFlyStances();
     }
     focusCameraOn(selectedObject.position);
     deselectObject();
@@ -2484,6 +2493,7 @@ function renderSelectionInspector({ open = true } = {}) {
         object.position.set(position.x, position.y, position.z);
         updateObjectPositionData(object);
         socket.emit('move-object', { id, position });
+        updateFlyStances();
         renderSelectionInspector({ open: false });
     });
 
@@ -2586,7 +2596,7 @@ function setCombat(combat) {
     if (combatTracker) combatTracker.setState(combat);
     if (combatOverlays) combatOverlays.sync(combat);
     if (zoneLayer) zoneLayer.sync(combat && combat.zones);
-    syncMonsterStances(combat); // 'flying' combatants take to the air
+    updateFlyStances();
     answerStatsPending();
     const toggle = document.getElementById('btn-combat-toggle');
     if (toggle) toggle.classList.toggle('hidden', !!combat);
@@ -2668,7 +2678,7 @@ function updateMoveCostTooltip(event) {
     const priced = rules.terrain && terrain && flat <= 600 ? pathCost(
         { x: dragStartPos.x, y: dragStartPos.y - soles, z: dragStartPos.z },
         { x: selectedObject.position.x, y: selectedObject.position.y - soles, z: selectedObject.position.z },
-        terrain.costGround(), { modes: c.moveModes || [], snow: rules.snow }) : null;
+        terrain.costGround(), { modes: moveModesOf(c), snow: rules.snow }) : null;
     const feet = priced ? priced.cost : flat;
     const over = priced && feet > flat + 0.5 ? describeCost(priced) : '';
     const left = c.speedFeet + c.dashFeet - c.movementUsedFeet;
@@ -4581,6 +4591,7 @@ function applyTerrainResetResult(result = {}) {
         terrain.applyData(result);
         syncWaterControls();
         applyBuildLevelVisibility();
+        updateFlyStances();
         return;
     }
 
@@ -4615,6 +4626,7 @@ function applyTerrainResetResult(result = {}) {
     syncTerrainResetButton();
     syncWaterControls();
     applyBuildLevelVisibility();
+    updateFlyStances();
 }
 
 function emitChunkPayloadBatches(keys, batchSize = 40) {
@@ -4622,6 +4634,49 @@ function emitChunkPayloadBatches(keys, batchSize = 40) {
     for (let i = 0; i < keys.length; i += batchSize) {
         socket.emit('update-terrain', terrain.payloadForKeys(keys.slice(i, i + batchSize)));
     }
+}
+
+const _flyFrom = new THREE.Vector3();
+const FLY_DOWN = new THREE.Vector3(0, -1, 0);
+
+function supportUnderToken(token) {
+    const structures = objects.filter(o => o.visible && ['floor', 'stair', 'roof'].includes(o.userData.objectType));
+    const targets = [...structures];
+    if (!buildCutawayState) {
+        if (terrain && terrain.group.visible) targets.push(terrain.chunkGroup);
+        targets.push(plane);
+    }
+    if (!targets.length) return null;
+    const origin = terrain ? terrain.worldOrigin : { x: 0, z: 0 };
+    _flyFrom.set(token.position.x - origin.x, token.position.y + 0.5, token.position.z - origin.z);
+    raycaster.set(_flyFrom, FLY_DOWN);
+    const hit = raycaster.intersectObjects(targets, true)[0];
+    return hit ? hit.point.y : null;
+}
+
+function tokenIsAirborne(token) {
+    return flyClearance(token) > 0;
+}
+
+// How far the token's soles hang free of the support below (0 = standing on it).
+function flyClearance(token) {
+    const support = supportUnderToken(token);
+    if (support == null) return 0;
+    const clear = token.position.y - (token.userData.halfHeight || 0) - support;
+    return clear > MOVE_RULES.airborne ? clear : 0;
+}
+
+// Recompute which tokens hang free of their support and hand the result to the
+// stance syncs: those hover (fly clip) whether or not combat is running.
+function updateFlyStances() {
+    const airborne = new Set();
+    for (const token of objects) {
+        const data = token.userData;
+        if (!data || !(data.rigCharacter || data.monsterIndex) || !token.visible || !token.parent) continue;
+        if (tokenIsAirborne(token)) airborne.add(data.syncId);
+    }
+    syncMonsterStances(combatState, airborne);
+    syncCharacterStances(combatState, airborne);
 }
 
 // Floors, stair treads and visible roofs are gameplay surfaces. Raycast them alongside the

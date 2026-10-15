@@ -61,6 +61,7 @@ const reacts = [];             // save results: { fx, findMesh } — the target 
 const timers = [];             // { at, run } — fired from the tick, never setTimeout
 const queued = new Map();      // `${actor}|${action}` → { fx, targets: Set, findMesh }
 const flying = new Set();      // combatant ids carrying the 'flying' condition
+let airborne = new Set();      // token ids whose soles hang free of their support
 const unscaled = new WeakMap(); // clip → the same clip without scale tracks
 const clock = new THREE.Clock();
 let now = 0;
@@ -102,7 +103,7 @@ export function attachMonsterRig(wrapper, holder, model, entry, clips) {
         rig.busy = false;
         playLoop(rig, rig.stance, 0.3);
     });
-    if (flying.has(wrapper.userData.syncId)) rig.stance = 'fly'; // the model landed after the combat state did
+    if (flyStance(wrapper.userData.syncId)) rig.stance = 'fly'; // the model landed after the combat state did
     playLoop(rig, rig.stance, 0);
     rigs.add(rig);
     wrapper.userData.monsterRig = rig;
@@ -137,16 +138,22 @@ function setStance(rig, stance) {
     if (!rig.busy) playLoop(rig, stance, 0.5);
 }
 
+function flyStance(id) {
+    return flying.has(id) || airborne.has(id);
+}
+
 // Hand over each combat state (or null when combat ends): combatants with the
-// 'flying' condition take to the air, everyone else lands.
-export function syncMonsterStances(combat) {
+// 'flying' condition take to the air, everyone else lands. `airborneIds` is
+// what the pages measured — tokens whose soles hang free of any support.
+export function syncMonsterStances(combat, airborneIds) {
     flying.clear();
+    airborne = airborneIds || new Set();
     const combatants = combat && combat.combatants && typeof combat.combatants === 'object' ? combat.combatants : {};
     for (const combatant of Object.values(combatants)) {
         const effects = combatant && Array.isArray(combatant.effects) ? combatant.effects : [];
         if (effects.some(effect => effect && effect.key === 'flying')) flying.add(combatant.id);
     }
-    for (const rig of rigs) setStance(rig, flying.has(rig.wrapper.userData.syncId) ? 'fly' : 'idle');
+    for (const rig of rigs) setStance(rig, flyStance(rig.wrapper.userData.syncId) ? 'fly' : 'idle');
 }
 
 function crossTo(rig, action, fade) {

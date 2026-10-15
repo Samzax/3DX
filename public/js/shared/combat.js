@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { ABILITIES } from './srd.js';
 import { buildSheet } from './rules.js';
+import { MOVE_MODES } from './ground.js';
 import { spellDice } from './spellinfo.js';
 import { AREA_KINDS, describeShape, normalizeShape, shapeNeedsPoint } from './aoe.js';
 import {
@@ -235,8 +236,15 @@ export function deriveCombatStats(char, SRD) {
         ...(pact ? { pact } : {}),
         abilities: kit.abilities, riders: kit.riders, resources: kit.resources,
         attacksPerAction: kit.attacksPerAction, critRange: kit.critRange,
-        saveMods: sheet.rollMods.save
+        saveMods: sheet.rollMods.save,
+        moveModes: MOVE_MODES.filter(mode => Number(sheet.speeds[mode]) > 0)
     };
+}
+
+export function moveModesOf(c) {
+    const modes = Array.isArray(c && c.moveModes) ? c.moveModes.slice() : [];
+    if (c && Array.isArray(c.effects) && c.effects.some(e => e && e.key === 'flying') && !modes.includes('fly')) modes.push('fly');
+    return modes;
 }
 
 // Where a spell reaches and what it covers, from the SRD record: "150 feet" +

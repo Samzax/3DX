@@ -14,9 +14,9 @@ import { Trees } from '../shared/trees.js';
 import { GroundCover } from '../shared/groundcover.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, isCameraClick, styleGroundForTerrain, setGroundCut, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, CameraFly, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { buildObjectFromData, applyMove } from '../shared/models.js';
-import { tickRigCharacters } from '../shared/charmesh.js';
+import { syncCharacterStances, tickRigCharacters } from '../shared/charmesh.js';
 import { configureGrounding, tickGrounding } from '../shared/grounding.js';
-import { pathCost, describeCost, normalizeMovement } from '../shared/ground.js';
+import { pathCost, describeCost, normalizeMovement, MOVE_RULES } from '../shared/ground.js';
 import { RulerTool } from '../shared/rulers.js';
 import { bindLongPress, dismissSubmenusOnOutsideClick } from '../shared/ui.js';
 import { attachTouchInput, createTouchBar, touchHint } from '../shared/touch.js';
@@ -24,7 +24,7 @@ import { setupLoginModal, storedUsername } from '../shared/login.js';
 import {
     AbilityTargeting, CombatTracker, CombatOverlays, attackAvailable, attackPayloadOptions,
     combatAbilityButtonsHTML, combatAttackDamageLabel, combatOptionsHTML, deriveCombatStats,
-    remainingFeet, toggleAttackOption, EFFECTS, spellRounds, spellArea, aimShapeOf, spellForm, spellLight, spellSummon
+    moveModesOf, remainingFeet, toggleAttackOption, EFFECTS, spellRounds, spellArea, aimShapeOf, spellForm, spellLight, spellSummon
 } from '../shared/combat.js';
 import { buildSheet, weaponProfile } from '../shared/rules.js';
 import { combatInteger, combatModifier, combatSpellLevel } from '../shared/combat-safety.js';
@@ -811,6 +811,7 @@ function finishHeightDrag() {
         const position = { x: selectedObject.position.x, y: selectedObject.position.y, z: selectedObject.position.z };
         updateObjectPositionData(selectedObject);
         socket.emit('move-object', { id: selectedObject.userData.syncId, position });
+        updateFlyStances();
     }
     deselectObject();
 }
@@ -829,7 +830,10 @@ function dropCarried(support = null) {
             notify('The way is blocked: walls, bars and shut doors stop you');
             return;
         }
-        if (support) selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0);
+        if (support) {
+            const held = flyClearance(selectedObject);
+            selectedObject.position.y = support.point.y + (selectedObject.userData.halfHeight || 0) + held;
+        }
         const finalPosition = snapToGrid(selectedObject.position);
         selectedObject.position.x = finalPosition.x;
         selectedObject.position.z = finalPosition.z;
@@ -853,6 +857,7 @@ function dropCarried(support = null) {
                 z: finalPosition.z
             }
         });
+        updateFlyStances();
     }
     focusCameraOn(selectedObject.position);
     deselectObject();
@@ -1183,6 +1188,49 @@ function updatePlayerHintBar() {
 // Scene <-> world conversion at the raycast/camera boundary (floating origin).
 function sceneToWorld(p) {
     return new THREE.Vector3(p.x + terrain.worldOrigin.x, p.y, p.z + terrain.worldOrigin.z);
+}
+
+const _flyFrom = new THREE.Vector3();
+const FLY_DOWN = new THREE.Vector3(0, -1, 0);
+
+function supportUnderToken(token) {
+    const structures = objects.filter(o => o.visible && ['floor', 'stair', 'roof'].includes(o.userData.objectType));
+    const targets = [...structures];
+    if (!levelCutawayState) {
+        if (terrain && terrain.group.visible) targets.push(terrain.chunkGroup);
+        targets.push(plane);
+    }
+    if (!targets.length) return null;
+    const origin = terrain ? terrain.worldOrigin : { x: 0, z: 0 };
+    _flyFrom.set(token.position.x - origin.x, token.position.y + 0.5, token.position.z - origin.z);
+    raycaster.set(_flyFrom, FLY_DOWN);
+    const hit = raycaster.intersectObjects(targets, true)[0];
+    return hit ? hit.point.y : null;
+}
+
+function tokenIsAirborne(token) {
+    return flyClearance(token) > 0;
+}
+
+// How far the token's soles hang free of the support below (0 = standing on it).
+function flyClearance(token) {
+    const support = supportUnderToken(token);
+    if (support == null) return 0;
+    const clear = token.position.y - (token.userData.halfHeight || 0) - support;
+    return clear > MOVE_RULES.airborne ? clear : 0;
+}
+
+// Recompute which tokens hang free of their support and hand the result to the
+// stance syncs: those hover (fly clip) whether or not combat is running.
+function updateFlyStances() {
+    const airborne = new Set();
+    for (const token of objects) {
+        const data = token.userData;
+        if (!data || !(data.rigCharacter || data.monsterIndex) || !token.visible || !token.parent) continue;
+        if (tokenIsAirborne(token)) airborne.add(data.syncId);
+    }
+    syncMonsterStances(combatState, airborne);
+    syncCharacterStances(combatState, airborne);
 }
 
 function pickPlayerSupportSurface(event, { exclude = null } = {}) {
@@ -1786,7 +1834,7 @@ function setCombat(combat) {
     answerStatsPending();
     if (combatOverlays) combatOverlays.sync(combat);
     if (zoneLayer) zoneLayer.sync(combat && combat.zones);
-    syncMonsterStances(combat); // 'flying' combatants take to the air
+    updateFlyStances();
     renderHUD(); // the Actions panel reflects turn state
     const endBtn = document.getElementById('btn-end-turn');
     if (endBtn) {
@@ -1891,7 +1939,7 @@ function updateMoveCostTooltip(event) {
     const priced = rules.terrain && terrain && flat <= 600 ? pathCost(
         { x: dragStartPos.x, y: dragStartPos.y - soles, z: dragStartPos.z },
         { x: selectedObject.position.x, y: selectedObject.position.y - soles, z: selectedObject.position.z },
-        terrain.costGround(), { modes: c.moveModes || [], snow: rules.snow }) : null;
+        terrain.costGround(), { modes: moveModesOf(c), snow: rules.snow }) : null;
     const feet = priced ? priced.cost : flat;
     const over = priced && feet > flat + 0.5 ? describeCost(priced) : '';
     const left = c.speedFeet + c.dashFeet - c.movementUsedFeet;
@@ -2888,6 +2936,7 @@ function initSocket() {
             terrain.group.visible = true;
             styleGroundForTerrain(plane, true);
             applyPlayerLevelVisibility();
+            updateFlyStances();
         }
     });
 
@@ -2903,6 +2952,7 @@ function initSocket() {
             terrain.group.visible = true;
             styleGroundForTerrain(plane, true);
             applyPlayerLevelVisibility();
+            updateFlyStances();
         }
     });
 
@@ -2941,6 +2991,7 @@ function initSocket() {
             createObjectFromData(data.id, data);
             syncOwnSenses();
         }
+        if (['token', 'character', 'floor', 'stair', 'roof'].includes(data.type)) updateFlyStances();
     });
 
     socket.on('object-moved', (data) => {
@@ -2949,6 +3000,7 @@ function initSocket() {
             object.position.set(data.position.x, data.position.y, data.position.z);
             updateObjectPositionData(object);
             if (selectedObject === object && !playerOwnsObject(object)) renderPlayerSelectionInspector({ open: false });
+            updateFlyStances();
         }
     });
 
@@ -2967,9 +3019,10 @@ function initSocket() {
         if (updated === object) updateObjectPresentation(object, patch);
         if (objectNameplates) objectNameplates.sync(objects);
         if (selectedObject === updated && !playerOwnsObject(updated)) renderPlayerSelectionInspector({ open: false });
+        if (geometryChanged && ['floor', 'stair', 'roof'].includes(type)) updateFlyStances();
     });
 
-    socket.on('structure-batch-applied', (result) => applyStructureBatchResult(result));
+    socket.on('structure-batch-applied', (result) => { applyStructureBatchResult(result); updateFlyStances(); });
 
     socket.on('object-deleted', (data) => {
         const object = objects.find(o => o.userData.syncId === data.id);
@@ -2979,6 +3032,7 @@ function initSocket() {
             worldGroup.remove(object);
             disposeBuiltObject(object);
             objects = objects.filter(o => o.userData.syncId !== data.id);
+            if (['token', 'character', 'floor', 'stair', 'roof'].includes(object.userData.objectData?.type)) updateFlyStances();
             applyPlayerLevelVisibility();
             if (objectNameplates) objectNameplates.sync(objects);
         }

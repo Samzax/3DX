@@ -5594,10 +5594,12 @@ io.on('connection', (socket) => {
         const priced = flat <= MAX_PRICED_MOVE_FEET && movementGround(key);
         if (priced) {
           const soles = controlledObject.type === 'character' ? CHARACTER_SOLE_DEPTH : TOKEN_SOLE_DEPTH;
+          let modes = c.moveModes || [];
+          if (hasEffect(c, 'flying') && !modes.includes('fly')) modes = modes.concat('fly');
           const result = groundModel.pathCost(
             { x: old.x, y: old.y - soles, z: old.z },
             { x: position.x, y: position.y - soles, z: position.z },
-            priced.ground, { modes: c.moveModes || [], snow: priced.rules.snow });
+            priced.ground, { modes, snow: priced.rules.snow });
           feet = result.cost;
           over = groundModel.describeCost(result);
         }
@@ -6576,6 +6578,7 @@ io.on('connection', (socket) => {
     c.abilities = normalizeAbilities(payload.abilities);
     c.riders = normalizeRiders(payload.riders);
     c.resources = normalizeResources(payload.resources);
+    c.moveModes = normalizeMoveModes(payload.moveModes);
     // A character walks into the fight with what it has left (pools.json);
     // per-fight and per-turn pools, and monsters, start full.
     const carried = c.kind === 'character' && c.charId && hasOwn(poolsDB(), c.charId) ? poolsDB()[c.charId] : null;

@@ -96,6 +96,11 @@ test('pathCost prices slopes, water and snow the 5e way', async () => {
   // Both ends on the ground: the mover follows it through the dip between.
   const dip = pathCost({ ...from, y: 0 }, { ...to, y: 0 }, flatGround(x => -Math.sin(x / 6 * Math.PI) * 4));
   assert.ok(dip.cost > 45, `a ravine is not flown over: ${dip.cost}`);
+  // ...unless the mover has a fly speed: ground, water and snow never price.
+  const flyer = pathCost(from, to, flatGround(x => x * 0.7, { snow: true, water: 2 }), { modes: ['fly'] });
+  close(flyer.cost, 30, 'fly speed');
+  assert.deepEqual(flyer.kinds, {});
+  close(pathCost(from, to, flatGround(x => -Math.sin(x / 6 * Math.PI) * 4), { modes: ['fly'] }).cost, 30, 'fly speed clears the dip');
 });
 
 test('waterDepthAt reads the sea and authored bodies', async () => {

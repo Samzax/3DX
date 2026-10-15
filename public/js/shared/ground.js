@@ -229,7 +229,7 @@ export function pathCost(from, to, ground, { modes = [], snow = true } = {}) {
   const dx = to.x - from.x, dz = to.z - from.z;
   const length = Math.hypot(dx, dz);
   const kinds = {};
-  if (!(length > 0) || !ground) return { feet: length * FEET_PER_UNIT || 0, cost: length * FEET_PER_UNIT || 0, kinds };
+  if (!(length > 0) || !ground || modes.includes('fly')) return { feet: length * FEET_PER_UNIT || 0, cost: length * FEET_PER_UNIT || 0, kinds };
   const R = MOVE_RULES;
   const climber = modes.includes('climb'), swimmer = modes.includes('swim');
   const steps = Math.max(1, Math.ceil(length / R.step));

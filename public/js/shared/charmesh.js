@@ -201,7 +201,7 @@ const GLIDE_MAX = 40;                     // further than this is a teleport, no
 const _motions = new Set();
 const _delta = new THREE.Vector3(), _groupQ = new THREE.Quaternion();
 function installMotion(group, node) {
-    const motion = { group, node, base: node.position.clone(), offset: new THREE.Vector3(), last: null, rate: 0, gait: null };
+    const motion = { group, node, base: node.position.clone(), offset: new THREE.Vector3(), last: null, rate: 0, gait: null, hover: 0, hoverH: 0 };
     group.userData.motion = motion;
     _motions.add(motion);
     // Turn the figure toward a world-space point (an attacker faces its target).
@@ -209,6 +209,12 @@ function installMotion(group, node) {
         const local = group.worldToLocal(_delta.copy(point));
         if (local.x * local.x + local.z * local.z > 1e-4) node.rotation.y = Math.atan2(local.x, local.z);
     };
+}
+function attachFigure(group, inner) {
+    const lift = new THREE.Group();
+    lift.add(inner);
+    group.add(lift);
+    group.userData.lift = lift;
 }
 // Furniture poses (`userData.pose`, set by the pages from the synced record: the server's
 // `use-prop`). The token sits on the prop's cell; the figure walks there like any move, then lies
@@ -279,9 +285,43 @@ function tickMotion(m, dt) {
 // head hangs low and forward (a big cat's) would be straightened by them and tear at the neck, so
 // its neck and head are pulled most of the way back to the pose they were sculpted in.
 const _neckHolds = new Set(); // { bones: [{ bone, rest }], hold }
+const HOVER_HEIGHT = 0.55;
+const _flying = new Set();
+let _airborne = new Set();
+
+export function syncCharacterStances(combat, airborneIds) {
+    _flying.clear();
+    _airborne = airborneIds || new Set();
+    const combatants = combat && combat.combatants && typeof combat.combatants === 'object' ? combat.combatants : {};
+    for (const combatant of Object.values(combatants)) {
+        const effects = combatant && Array.isArray(combatant.effects) ? combatant.effects : [];
+        if (effects.some(effect => effect && effect.key === 'flying')) _flying.add(combatant.id);
+    }
+}
+
+function hoverHeight(m) {
+    if (!m.hoverH) {
+        m.node.updateWorldMatrix(true, true);
+        _poseBox.setFromObject(m.node);
+        m.hoverH = Math.max(0.6, Math.min(2.4, _poseBox.max.y - _poseBox.min.y)) || 1.15;
+    }
+    return m.hoverH * HOVER_HEIGHT;
+}
+
+function tickHover(m, dt) {
+    const lift = m.group.userData.lift;
+    if (!lift) return;
+    const id = m.group.userData.syncId;
+    const target = (_flying.has(id) || _airborne.has(id)) ? hoverHeight(m) : 0;
+    const rise = target - m.hover;
+    m.hover = Math.abs(rise) > 1e-3 ? m.hover + rise * Math.min(1, dt * 2.5) : target;
+    lift.position.y = m.hover;
+    m.group.userData.airborne = m.hover > 0.02;
+}
+
 export function tickRigCharacters() {
     const dt = Math.min(0.1, _clock.getDelta());
-    for (const m of _motions) tickMotion(m, dt);
+    for (const m of _motions) { tickMotion(m, dt); tickHover(m, dt); }
     for (const m of _mixers) m.update(dt);
     for (const h of _neckHolds) for (const { bone, rest } of h.bones) bone.quaternion.slerp(rest, h.hold);
     for (const c of _carriages) applyCarriage(c);
@@ -655,7 +695,7 @@ async function buildKitCharacter(group, charData, footY) {
     const s = UNITS_PER_METRE * recipe.size;
     inner.scale.setScalar(s);
     inner.position.y = footY;
-    group.add(inner);
+    attachFigure(group, inner);
     group.userData.owned = owned;
     group.userData.recipe = recipe;
 
@@ -780,7 +820,7 @@ function buildLookCharacter(group, charData, entry, gltf, animGltf, footY) {
     const s = ((Number(entry.height) || 1.15) * num(ap.height, 1)) / size;
     inner.scale.setScalar(s);
     inner.position.set(-(box.min.x + box.max.x) / 2 * s, footY - box.min.y * s, -(box.min.z + box.max.z) / 2 * s);
-    group.add(inner);
+    attachFigure(group, inner);
     group.userData.owned = { materials: [], geometries: [] };
     const weight = entry.outline === undefined ? 1 : Number(entry.outline) || 0;
     if (entry.toon) toonLook(inner, group.userData.owned, size, weight);
