@@ -67,8 +67,11 @@ create the host account, and the host then adds the other players.
   cloned as a template.
 
 **The table**
-- Character creator with a parametric 3D body (MakeHuman-style morphs, fitted
-  clothing, armour that follows the sheet) and Aurora Builder import.
+- Character creator with a parametric 3D body (MakeHuman-style morphs and
+  fitted clothing) and Aurora Builder import. The sculpted armour sets and
+  non-human race bodies in the screenshots are private add-ons that this
+  repository does not include. Without them, characters wear their clothes
+  and dragonborn or tabaxi use the base body.
 - Shared roll log, dice macros, chat with private whispers, a journal, a
   treasury, XP awards and session recaps.
 - Players get an in-game SRD reference and a campaign hall to start from.

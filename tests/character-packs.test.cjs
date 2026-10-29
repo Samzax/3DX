@@ -157,7 +157,7 @@ test('the server keeps only known look fields on a saved appearance', () => {
     assert.doesNotMatch(JSON.stringify(body), /[<>]/);
 });
 
-// Checked as the server serves it: the owner's private race parts are not in a
+// Checked as the server serves it: the owner's private parts are not in a
 // clone, and loadCharacterKit drops whichever of them this checkout lacks.
 test('the committed character kit is whole', () => {
     const dir = path.join(repoRoot, 'public/assets/characters/mh');
@@ -188,7 +188,7 @@ test('the committed character kit is whole', () => {
     for (const id of ['young-light-male', 'young-light-female', 'old-light-male', 'old-light-female']) assert.ok(kit.skins[id], id);
 });
 
-test('the served kit drops private race parts whose files are missing, and nothing else', () => {
+test('the served kit drops private parts whose files are missing, and nothing else', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-kit-'));
     try {
         const touch = (rel) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), ''); };

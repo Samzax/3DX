@@ -169,7 +169,7 @@ let characterLooksManifest = JSON.stringify({ version: 1, looks: {} });
 let characterKitJSON;
 {
   const { kit, dropped } = loadCharacterKit(path.join(__dirname, 'public', 'assets', 'characters', 'mh'));
-  if (dropped.length) console.log(`[Characters] Private race parts not in this checkout: ${dropped.join(', ')}`);
+  if (dropped.length) console.log(`[Characters] Private parts not in this checkout: ${dropped.join(', ')}`);
   characterKitJSON = JSON.stringify(kit);
 }
 if (!MONSTER_VARIANT_IDS.ape) registerMonsterVariants('ape', [
@@ -1745,7 +1745,7 @@ app.get('/assets/monsters/manifest.json', (req, res, next) => {
 app.get('/assets/characters/manifest.json', (req, res) => {
   res.set('Cache-Control', 'no-cache').type('application/json').send(characterLooksManifest);
 });
-// The character kit without the private race parts this checkout lacks
+// The character kit without the private parts this checkout lacks
 // (lib/character-packs.cjs loadCharacterKit), ahead of the static mount.
 app.get('/assets/characters/mh/kit.json', (req, res) => {
   res.set('Cache-Control', 'no-cache').type('application/json').send(characterKitJSON);

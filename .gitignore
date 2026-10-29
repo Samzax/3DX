@@ -16,3 +16,7 @@ public/assets/characters/mh/assets/dragonborn-*/
 public/assets/characters/mh/assets/tabaxi-*/
 public/assets/characters/mh/targets/dragonborn-*.bin
 public/assets/characters/mh/targets/tabaxi-*.bin
+# Owner-private armour sculpts (plate/mail/leather sets; license "private" in kit.json)
+public/assets/characters/mh/assets/plate-*/
+public/assets/characters/mh/assets/mail-*/
+public/assets/characters/mh/assets/leather-*/
