@@ -824,7 +824,8 @@ function main() {
     const json = serialize(entries);
 
     if (CHECK_ONLY) {
-        const current = existsSync(OUT_PATH) ? readFileSync(OUT_PATH, 'utf8') : '';
+        // A Windows checkout (core.autocrlf) holds the file with CRLF line endings.
+        const current = existsSync(OUT_PATH) ? readFileSync(OUT_PATH, 'utf8').replace(/\r\n/g, '\n') : '';
         if (current !== json) {
             console.error('public/assets/monsters/manifest.json is stale — run: node tools/gen-monster-manifest.mjs');
             process.exit(1);

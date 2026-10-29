@@ -19,7 +19,7 @@ const {
   normalizeTurnState, riderApplies
 } = require('./lib/combat-kit.cjs');
 const { loadMonsterPacks } = require('./lib/monster-packs.cjs');
-const { loadCharacterPacks, LOOK_KEY_RE } = require('./lib/character-packs.cjs');
+const { loadCharacterPacks, loadCharacterKit, LOOK_KEY_RE } = require('./lib/character-packs.cjs');
 
 // Pure ES modules shared with the browser: the line-of-sight/light/senses
 // model, the sky clock, the ground (heights + what crossing them costs),
@@ -165,6 +165,12 @@ let characterLooksManifest = JSON.stringify({ version: 1, looks: {} });
   packs.warnings.forEach(warning => console.warn(`[Characters] Pack ${warning}`));
   packs.packs.forEach(pack => console.log(`[Characters] Pack "${pack.name}": ${pack.count} look(s)`));
   characterLooksManifest = JSON.stringify({ version: 1, looks: packs.looks, props: packs.props });
+}
+let characterKitJSON;
+{
+  const { kit, dropped } = loadCharacterKit(path.join(__dirname, 'public', 'assets', 'characters', 'mh'));
+  if (dropped.length) console.log(`[Characters] Private race parts not in this checkout: ${dropped.join(', ')}`);
+  characterKitJSON = JSON.stringify(kit);
 }
 if (!MONSTER_VARIANT_IDS.ape) registerMonsterVariants('ape', [
   { id: 'silverback' }, { id: 'highland' }, { id: 'albino' }
@@ -1738,6 +1744,11 @@ app.get('/assets/monsters/manifest.json', (req, res, next) => {
 });
 app.get('/assets/characters/manifest.json', (req, res) => {
   res.set('Cache-Control', 'no-cache').type('application/json').send(characterLooksManifest);
+});
+// The character kit without the private race parts this checkout lacks
+// (lib/character-packs.cjs loadCharacterKit), ahead of the static mount.
+app.get('/assets/characters/mh/kit.json', (req, res) => {
+  res.set('Cache-Control', 'no-cache').type('application/json').send(characterKitJSON);
 });
 app.use('/packs', express.static(MONSTER_PACKS_DIR, { dotfiles: 'ignore', index: false }));
 app.use(express.static(PUBLIC_DIR));

@@ -11,7 +11,7 @@ const { pathToFileURL } = require('node:url');
 const { test } = require('node:test');
 
 const repoRoot = path.resolve(__dirname, '..');
-const { loadCharacterPacks, LOOK_KEY_RE } = require('../lib/character-packs.cjs');
+const { loadCharacterPacks, loadCharacterKit, LOOK_KEY_RE } = require('../lib/character-packs.cjs');
 const { loadMonsterPacks } = require('../lib/monster-packs.cjs');
 
 function makePacks(packs) {
@@ -157,9 +157,11 @@ test('the server keeps only known look fields on a saved appearance', () => {
     assert.doesNotMatch(JSON.stringify(body), /[<>]/);
 });
 
+// Checked as the server serves it: the owner's private race parts are not in a
+// clone, and loadCharacterKit drops whichever of them this checkout lacks.
 test('the committed character kit is whole', () => {
     const dir = path.join(repoRoot, 'public/assets/characters/mh');
-    const kit = JSON.parse(fs.readFileSync(path.join(dir, 'kit.json'), 'utf8'));
+    const { kit } = loadCharacterKit(dir);
     assert.equal(kit.vertexCount, 19158);
     assert.equal(fs.statSync(path.join(dir, 'base.bin')).size, kit.vertexCount * 12);
     assert.equal(kit.rig.length, kit.bones.length);
@@ -184,6 +186,35 @@ test('the committed character kit is whole', () => {
         assert.ok(kit.assets[id], id);
     }
     for (const id of ['young-light-male', 'young-light-female', 'old-light-male', 'old-light-female']) assert.ok(kit.skins[id], id);
+});
+
+test('the served kit drops private race parts whose files are missing, and nothing else', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), '3dx-kit-'));
+    try {
+        const touch = (rel) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), ''); };
+        fs.writeFileSync(path.join(dir, 'kit.json'), JSON.stringify({
+            assets: {
+                'form-here': { slot: 'bodyform', license: 'private', target: 'form-here' },
+                'form-gone': { slot: 'bodyform', license: 'private', target: 'form-gone' },
+                'tunic': { slot: 'top', license: 'CC0' },
+                'cape': { slot: 'top', license: 'CC0' }   // missing CC0 file: stays, so the kit test catches it
+            },
+            targets: { 'form-here': {}, 'form-gone': {}, 'nose-hump': {} },
+            sliders: {
+                'form-here': { group: 'form', neg: [], pos: ['form-here'] },
+                'form-gone': { group: 'form', neg: [], pos: ['form-gone'] },
+                'nose-hump': { group: 'nose', neg: [], pos: ['nose-hump'] }
+            }
+        }));
+        for (const rel of ['assets/form-here/mesh.bin', 'assets/tunic/mesh.bin', 'targets/form-here.bin', 'targets/nose-hump.bin']) touch(rel);
+        const { kit, dropped } = loadCharacterKit(dir);
+        assert.deepEqual(dropped, ['form-gone']);
+        assert.deepEqual(Object.keys(kit.assets).sort(), ['cape', 'form-here', 'tunic']);
+        assert.deepEqual(Object.keys(kit.targets).sort(), ['form-here', 'nose-hump']);
+        assert.deepEqual(Object.keys(kit.sliders).sort(), ['form-here', 'nose-hump']);
+    } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
 });
 
 test('macro shape weights partition the adult body space', async () => {
