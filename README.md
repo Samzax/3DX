@@ -1,100 +1,122 @@
 # 3DX
 
-A D&D 5e virtual tabletop with a procedural, infinite 3D world.
+**A D&D 5e virtual tabletop in a 3D world that doesn't end.**
 
-Node/Express + Socket.IO server with vanilla-JS ES-module clients
-(three.js vendored locally, no build step). All state is shared live over
-sockets: the GM shapes the world, players roam it, and the server referees
-combat.
+The GM zooms from a 60-mile continent hex down to a 5-foot square on the same
+ground. Players walk their characters through it, and the server referees the
+fight: it rolls every die, enforces turns and movement, and resolves areas and
+saving throws. Everything runs in the browser with no build step, on a
+Node server with two dependencies.
 
-## Quick start
+![The hamlet of Thornbrook on the GM screen: the party in the square, a goblin war band beyond the barn, mountains on the horizon](docs/media/village.png)
 
-```
+## Try it
+
+```bash
 npm install
-npm start
+npm run demo
 ```
 
-Then open http://localhost:3000 — the home hub is the entry point for every
-screen (campaigns, invitations, characters, homebrew). The first visit from the
-host computer creates the host account; the host then adds every other player
-from the Host tab and approves new campaigns. Players cannot change their own
-password.
+Then open http://localhost:3000. The demo builds a ready-made table, *The
+Emberfall Marches*: a village, a level-5 party, a goblin war band, and a
+dungeon behind a portal. There are no passwords. Sign in as **`gm`** to run
+the game, or as **`player`** to play the party. Open the GM screen in one tab
+and the player screen in another to watch them sync.
 
-Run the dependency-free regression suite with `npm test`.
+The demo's state lives in `data/demo/`. Delete that folder to start fresh.
 
-## Routes
+For a real table, run `npm start`. On first visit from the host computer you
+create the host account, and the host then adds the other players.
 
-| Route       | What it is |
-|-------------|------------|
-| `/`         | Home hub (also `/lobby`): pick or create a campaign, then enter as GM or with selected characters |
-| `/creator`  | Character creator (SRD 5.1 rules, live 3D preview of the tabletop model); `?campaign=<id>` scopes the roster |
-| `/gm`       | GM screen: world map ladder (Continent → Kingdom → Province → Tactical), terrain editing, object placement, structures, combat tracker |
-| `/player`   | Player screen: shared map view + character-sheet HUD |
-| `/homebrew` | Homebrew builder: monsters, races, subraces, classes, subclasses, backgrounds, feats, spells and items |
+## What's in it
 
-`/gm` and `/player` require `?campaign=<id>`; lobby and workspace links always
-carry it.
+**The world**
+- One infinite procedural world, streamed in chunks with LOD rings and a
+  floating origin. Elevation, moisture and temperature drive biomes, snowlines,
+  frozen seas and an animated ocean.
+- The DMG map tiers (Continent 60 mi, Kingdom 6 mi, Province 1 mi, Tactical
+  5 ft) are zoom levels over the same ground, not separate maps.
+- Each campaign has its own seed, world presets, biome palette and spawn
+  point, chosen in a 5-step wizard with a live preview map.
+- A day/night clock, seeded weather (rain, snow, fog, storms, rainbows), fog
+  of war, and server-filtered token vision with darkvision, blindsight,
+  tremorsense and light sources.
 
-## Features
+**The GM's tools**
+- Heightmap and biome brushes. Painting a hex reshapes the generator, not
+  just its colour.
+- Lakes, rivers, and tile-brush buildings: walls with doors and windows,
+  multi-storey floors, stairs, and gable or hip roofs.
+- Furniture and light sources.
+- Portal-linked pocket maps for dungeons carved into real heightmaps.
 
-- **Campaigns** — a lobby browser with a 5-step worldbuilding wizard (name,
-  style + seed, biome palette, spawn point, party). Each campaign owns its
-  maps, roster, settings and presence with no cross-talk; region-style
-  campaigns lock navigation to a single province, and characters can be
-  exported/imported as JSON files.
-- **World settings per campaign** — presets (Continents, Archipelago,
-  Heartland, Highlands, Frozen North, Sunscorched, Classic) over fine-tune
-  knobs for ocean share, landmass size, ruggedness, rainfall, temperature,
-  climate bands and region size, with a live preview map you click to place
-  the spawn and an optional guaranteed homeland around it. Snow follows
-  temperature and altitude, cold seas freeze, and the GM can change the
-  season for the whole table without regenerating anything.
-- **One infinite procedural world** — elevation/moisture fields drive biomes,
-  streamed in chunks with LOD rings, animated ocean, floating origin. The hex
-  map tiers (Continent 60mi / Kingdom 6mi / Province 1mi, per the DMG ladder)
-  are zoom lenses over the same ground, not separate maps.
-- **GM world editing** — heightmap brushes, biome painting (which reshapes the
-  actual generator, not just colors), poured lakes and spline rivers,
-  multi-storey tile-brush structures (terrain-following or elevated/basement
-  floors, straight or L-shaped wall runs with layered procedural panels,
-  stairs, level cutaways,
-  per-cell doors/windows/gaps,
-  cut/restore floor and roof cells, flat/gable/hip roofs with ceiling
-  undersides, explicit building grouping, whole-storey duplication above or
-  below, and a seeded "scruffy"
-  ruins variant).
-- **Pocket maps** — portal-linked dungeon/interior maps separate from the
-  overworld.
-- **Server-authoritative 5e combat** — initiative tracker, turn/range
-  overlays, attack/dash/dodge/disengage actions and conditions; the server
-  rolls all dice and enforces turns and movement.
-- **Character creator & homebrew** — SRD 5.1 rules math (AC, HP, spell slots,
-  weapon attacks), plus custom monsters, races, subraces, classes, subclasses,
-  backgrounds, feats, spells and items shared to every screen. Features can
-  carry mechanics (passive bonuses, combat actions, bonus damage, resource
-  pools, pick-N choices), any SRD entry can be cloned as a template, and the
-  creator imports Aurora Builder `.dnd5e` characters. If you have Aurora
-  installed, `node tools/import-aurora-backgrounds.mjs` copies every background
-  it knows (proficiencies, features, equipment, personality tables) into your
-  local homebrew — restart the server afterwards.
-- **Monster library** — 334 CC-BY SRD 5.1 creatures plus table-made monsters,
-  searchable by name/type/CR and placeable as size-aware combat tokens. Their
-  AC, HP, speed, initiative, saves, and standard attacks seed encounters.
+![A dungeon room in the pocket map behind the portal](docs/media/dungeon.png)
 
-## Data & persistence
+**The rules**
+- Server-authoritative 5e combat: initiative, the full action economy
+  (action, bonus action, Extra Attack, riders, resource pools), conditions, and movement
+  priced by the terrain (slopes, snow, wading, climbing, flight).
+- Areas are aimed on the map: cones, lines, spheres and cubes.
+- Saves belong to whoever plays the creature.
+- Concentration checks, lingering zones, summoned spell objects, spell slots
+  and short and long rests that carry between fights.
+- 334 SRD monsters, each with a 3D model.
+- Homebrew builder for monsters, races, classes, subclasses, backgrounds,
+  feats, spells and items. Features carry real mechanics (bonuses, combat
+  actions, riders, resource pools, pick-N choices), and any SRD entry can be
+  cloned as a template.
 
-Runtime state (characters, maps, homebrew) is saved as JSON under
-`data/saves/` (gitignored), or under `THREEDX_DATA_DIR` when that environment
-variable is set. The default campaign stores its files directly in the saves
-dir; every other campaign gets its own `campaigns/<id>/` subdirectory.
-Writes use a flushed temporary file plus atomic rename and
-keep a parseable `.bak` recovery copy. GM/player mutation permissions and
-payload bounds are enforced server-side, but login still trusts the supplied
-username — this remains a trusted-table tool, not an internet-facing auth
-service.
+**The table**
+- Character creator with a parametric 3D body (MakeHuman-style morphs, fitted
+  clothing, armour that follows the sheet) and Aurora Builder import.
+- Shared roll log, dice macros, chat with private whispers, a journal, a
+  treasury, XP awards and session recaps.
+- Players get an in-game SRD reference and a campaign hall to start from.
+- Touch input on both tabletop screens.
 
-## Licensing
+![The party standing in the village square](docs/media/party.png)
 
-Game rules content comes from the System Reference Document 5.1 (SRD 5.1);
-see [data/srd/ATTRIBUTION.md](data/srd/ATTRIBUTION.md) for attribution and
-license details.
+| Character creator | Campaign hall (player screen) |
+|---|---|
+| ![The character creator with a plate-armoured fighter on a dais](docs/media/creator.png) | ![The player's briefing card over the live world](docs/media/hall.png) |
+
+## How it's built
+
+- **Server:** `server.js` is Express and Socket.IO with JSON-file persistence
+  (atomic writes plus a `.bak` copy). It holds the combat rules engine, and it
+  filters what each player may see (fog, vision, other players' sheets).
+- **Clients:** vanilla ES modules. three.js r132 is vendored and loaded through
+  an inline import map, so there is no bundler and no transpiler.
+- **Shared modules:** the pure ones (world generator, ground and movement
+  cost, walls, vision, areas, weather) run unchanged in the browser and on the
+  server, so both sides agree on every height, wall and line of sight.
+- **Tests:** `npm test` runs the `node:test` suite. It covers the socket
+  protocol, persistence, combat and the rules interpreter, and it pins
+  golden-value checks on the world generator.
+
+Routes: `/` is the lobby, `/gm` the GM screen, `/player` the player screen,
+`/creator` the character creator, and `/homebrew` the homebrew builder. `/gm`
+and `/player` take `?campaign=<id>`.
+
+## Data and accounts
+
+Runtime state is saved as JSON under `data/saves/`, or under
+`THREEDX_DATA_DIR` when that variable is set. Both are gitignored.
+
+Passwords are scrypt-hashed and can only be set by the host. Sessions are
+signed tokens that end on a password reset. Traffic is plain HTTP, so put a
+TLS proxy in front before exposing a table to the internet.
+
+## License
+
+The code is [MIT](LICENSE). Bundled content keeps its own license:
+
+- **Rules text:** System Reference Document 5.1 by Wizards of the Coast,
+  CC-BY-4.0 ([attribution](data/srd/ATTRIBUTION.md)).
+- **Monster models:** Quaternius, CC0
+  ([attribution](public/assets/monsters/ATTRIBUTION.md)).
+- **Character kit:** MakeHuman assets and the Quaternius Universal Animation
+  Library, CC0 ([attribution](public/assets/characters/ATTRIBUTION.md)).
+- **three.js:** MIT.
+
+3DX is unofficial fan content and is not affiliated with Wizards of the Coast.

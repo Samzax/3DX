@@ -185,7 +185,7 @@ export class Trees {
         const dummy = new THREE.Object3D();
         this.field = new ScatterField({
             terrain, meshes: this.species,
-            tileSize: TILE, radius: RADIUS, budgetMs: 2,
+            tileSize: TILE, radius: RADIUS, budgetMs: 2, clearance: 3.5,
             buildTile: (x0, z0, x1, z1, emit) => {
                 // Cell grid anchored to world multiples of STEP (independent of
                 // tile boundaries), half-open per tile so no seam double-plants.

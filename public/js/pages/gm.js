@@ -15,7 +15,8 @@ import { createWorldMap } from '../shared/worldmap.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { GroundCover } from '../shared/groundcover.js';
-import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, isCameraClick, styleGroundForTerrain, setGroundCut, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
+import { watchClearings } from '../shared/scatter.js';
+import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, isCameraClick, styleGroundForTerrain, setGroundCut, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, CameraFly, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { buildObjectFromData, applyMove } from '../shared/models.js';
 import { PROP_KINDS, propLight } from '../shared/props.js';
 import { loadSRD, loadSRDMonsters } from '../shared/srd.js';
@@ -213,6 +214,7 @@ let campaignContext = null;
 let accessDialog = null;              // privacy + invites (shared/access.js)
 let bookmarks = [];                   // saved camera spots (get-bookmarks)
 let pendingBookmarkPose = null;       // a jump whose map-state has not landed yet
+let cameraFly = null;                 // bookmark flights (created in init)
 let bookmarkPanelEl = null;           // the Bookmarks panel (built in initSocket)
 let encounters = [];                  // saved monster groups (get-encounters)
 let encounterBuild = [];              // rows staged in the encounter builder
@@ -566,8 +568,18 @@ function applyBookmarkPose(pose) {
     camera.position.set(pose.pos.x - o.x, pose.pos.y, pose.pos.z - o.z);
     controls.target.set(pose.look.x - o.x, pose.look.y, pose.look.z - o.z);
 }
+// Fly: an eased flight to a bookmark on this map (log-scale zoom when the
+// altitudes are far apart, so a continent-to-street descent reads as one move).
+// Another map has nothing to fly over, so that is still a jump.
+const BOOKMARK_FLIGHT_SECONDS = 7;
+function flyToBookmark(mark) {
+    if (!mark || !mark.pose || !mark.mapKey) return;
+    if (mark.mapKey !== currentMapKey || !cameraFly) { jumpToBookmark(mark); return; }
+    cameraFly.start(mark.pose, terrain.worldOrigin, BOOKMARK_FLIGHT_SECONDS);
+}
 function jumpToBookmark(mark) {
     if (!mark || !mark.pose || !mark.mapKey) return;
+    if (cameraFly) cameraFly.cancel();
     if (mark.mapKey !== currentMapKey) {
         if (outsideRegion(mark.mapKey)) { showBookmarkError('That map is outside this region'); return; }
         pendingBookmarkPose = mark.pose;
@@ -587,6 +599,7 @@ function renderBookmarks() {
         ? bookmarks.map(mark => `<div class="bookmark-row">
             <button type="button" class="bookmark-go" data-bookmark-id="${escHtml(mark.id)}" title="Jump to ${escHtml(mark.name)}">${escHtml(mark.name)}</button>
             <span class="bookmark-where">${escHtml(mark.mapKey)}</span>
+            <button type="button" class="bookmark-fly" data-bookmark-fly="${escHtml(mark.id)}" title="Fly there from here">Fly</button>
             <button type="button" class="bookmark-del" data-bookmark-del="${escHtml(mark.id)}" title="Forget this bookmark">&times;</button></div>`).join('')
         : '<p class="roll-empty">No bookmarks yet. Fly somewhere worth returning to, then "Save this view".</p>';
 }
@@ -729,6 +742,9 @@ function initSocket() {
             if (confirm('Forget this bookmark?')) socket.emit('delete-bookmark', { id: del.dataset.bookmarkDel });
             return;
         }
+        const fly = event.target.closest('[data-bookmark-fly]');
+        const flyMark = fly && bookmarks.find(known => known.id === fly.dataset.bookmarkFly);
+        if (flyMark) { setBookmarksOpen(false); flyToBookmark(flyMark); return; }
         const go = event.target.closest('[data-bookmark-id]');
         const mark = go && bookmarks.find(known => known.id === go.dataset.bookmarkId);
         if (mark) { setBookmarksOpen(false); jumpToBookmark(mark); }
@@ -1327,6 +1343,10 @@ function init() {
     ({ scene, camera, renderer, controls, plane, grid, raycaster, mouse, dirLight, worldGroup } =
         createTabletopScene(document.getElementById('scene-container')));
     objectNameplates = new ObjectNameplates();
+    cameraFly = new CameraFly(camera, controls);
+    // The GM's own hand on the camera ends a flight.
+    renderer.domElement.addEventListener('wheel', () => cameraFly.cancel(), { passive: true });
+    renderer.domElement.addEventListener('pointerdown', () => cameraFly.cancel());
 
     // Tactical terrain (heightmap + material paint + water). Hidden off-tactical.
     // The brush cursor is drawn by the terrain shader (terrain.setBrush).
@@ -1341,6 +1361,7 @@ function init() {
     grass = new Grass(terrain, scene);   // ground-cover, shown only at tactical zoom
     trees = new Trees(terrain, scene);   // biome-scattered low-poly trees
     groundCover = new GroundCover(terrain, scene); // close-up biome detail
+    watchClearings(terrain, () => objects);   // buildings clear the vegetation they stand on
     atmosphere = createAtmosphere({ scene, camera, renderer, dirLight }); // day/night + weather
     skyChip = createSkyChip();
     visionFx = createVisionFx({
@@ -1675,6 +1696,7 @@ function init() {
         renderer, scene, camera, controls,
         render: () => visionFx.render(),
         onTick: () => {
+            if (cameraFly && terrain) cameraFly.tick(terrain.worldOrigin); // a bookmark flight owns the camera this frame
             updateWorldFollow({ plane, grid, dirLight, camera }, controls.target); // ground/shadows follow
             if (combatOverlays) combatOverlays.tick(); // rings/badges track their tokens
             if (combatAim) combatAim.tick();           // the aimed template breathes

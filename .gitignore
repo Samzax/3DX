@@ -5,6 +5,9 @@ node_modules/
 # Runtime save state written by server.js (characters, map state, homebrew)
 data/saves/
 
+# The showcase table written by `npm run demo`
+data/demo/
+
 # Optional monster model packs (large GLBs, distributed separately)
 data/packs/
 

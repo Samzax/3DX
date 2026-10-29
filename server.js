@@ -1764,6 +1764,7 @@ app.get('/auth/status', (req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({
     open: auth.open,
+    ...(auth.open && process.env.THREEDX_DEMO === '1' ? { demo: true } : {}),   // npm run demo
     setup: auth.needsSetup() ? (isLoopbackAddress(req.socket.remoteAddress) ? 'here' : 'elsewhere') : null
   });
 });

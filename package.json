@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "description": "3DX virtual tabletop",
   "main": "server.js",
+  "license": "MIT",
   "scripts": {
     "start": "node server.js",
+    "demo": "node tools/demo.mjs",
     "test": "node --no-warnings --experimental-vm-modules --test --test-concurrency=1",
     "test:syntax": "node --test --test-concurrency=1 tests/syntax.test.cjs",
     "test:structures": "node --no-warnings --experimental-vm-modules --test --test-concurrency=1 tests/structures.test.cjs",

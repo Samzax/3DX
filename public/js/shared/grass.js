@@ -135,7 +135,7 @@ export class Grass {
         const dummy = new THREE.Object3D();
         const field = new ScatterField({
             terrain, meshes: [mesh],
-            tileSize: cfg.TILE, radius: cfg.RADIUS, budgetMs: 3,
+            tileSize: cfg.TILE, radius: cfg.RADIUS, budgetMs: 3, clearance: 0.2,
             buildTile: (x0, z0, x1, z1, emit) => {
                 // Cell grid anchored to world multiples of STEP (independent of
                 // tile boundaries), half-open per tile so no seam double-plants.

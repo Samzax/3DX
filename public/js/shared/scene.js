@@ -226,8 +226,14 @@ export class CameraFly {
             }
         };
         const dist = Math.hypot(pose.look.x - from.look.x, pose.look.z - from.look.z);
+        // A flight between altitudes far apart (continent lens down to a
+        // street) zooms on a log scale: interpolating position straight would
+        // spend the whole trip high up and then drop in the last few frames.
+        const reach = (p) => Math.hypot(p.pos.x - p.look.x, p.pos.y - p.look.y, p.pos.z - p.look.z);
+        const r0 = reach(from), r1 = reach(pose);
+        const zoom = r0 > 0 && r1 > 0 && Math.max(r0 / r1, r1 / r0) > 4 ? { r0, r1 } : null;
         this.flight = {
-            from, to: pose,
+            from, to: pose, zoom,
             t0: performance.now(),
             dur: 1000 * (duration || Math.min(2.5, 0.6 + dist / 1500))
         };
@@ -239,6 +245,20 @@ export class CameraFly {
         const t = Math.min(1, (performance.now() - f.t0) / f.dur);
         const e = t < 0.5 ? 2 * t * t : 1 - ((-2 * t + 2) ** 2) / 2; // easeInOutQuad
         const L = (a, b) => a + (b - a) * e;
+        if (f.zoom) {
+            // Look point eases across; the camera hangs off it along the
+            // blended viewing direction at a log-interpolated distance.
+            const look = { x: L(f.from.look.x, f.to.look.x), y: L(f.from.look.y, f.to.look.y), z: L(f.from.look.z, f.to.look.z) };
+            const dir = (p, r) => ({ x: (p.pos.x - p.look.x) / r, y: (p.pos.y - p.look.y) / r, z: (p.pos.z - p.look.z) / r });
+            const a = dir(f.from, f.zoom.r0), b = dir(f.to, f.zoom.r1);
+            const v = { x: L(a.x, b.x), y: L(a.y, b.y), z: L(a.z, b.z) };
+            const n = Math.hypot(v.x, v.y, v.z) || 1;
+            const r = Math.exp(L(Math.log(f.zoom.r0), Math.log(f.zoom.r1)));
+            this.camera.position.set(look.x + v.x / n * r - origin.x, look.y + v.y / n * r, look.z + v.z / n * r - origin.z);
+            this.controls.target.set(look.x - origin.x, look.y, look.z - origin.z);
+            if (t >= 1) this.flight = null;
+            return true;
+        }
         this.camera.position.set(
             L(f.from.pos.x, f.to.pos.x) - origin.x,
             L(f.from.pos.y, f.to.pos.y),

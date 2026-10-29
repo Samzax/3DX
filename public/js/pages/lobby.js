@@ -590,7 +590,7 @@ const login = setupLoginModal(() => {
         username = data.username;
         isHost = !!data.isGM;
         if (userLabel) userLabel.textContent = isHost ? `${username} (host)` : username;
-        document.title = `3D VTT - Campaigns (${username})`;
+        document.title = `3DX — Campaigns (${username})`;
         document.getElementById('tab-button-host').classList.toggle('hidden', !isHost);
         if (!isHost && !document.querySelector('.lobby-panel[data-panel="host"]').classList.contains('hidden')) {
             showTab('campaigns');

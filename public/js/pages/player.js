@@ -12,6 +12,7 @@ import { Terrain } from '../shared/terrain.js';
 import { Grass } from '../shared/grass.js';
 import { Trees } from '../shared/trees.js';
 import { GroundCover } from '../shared/groundcover.js';
+import { watchClearings } from '../shared/scatter.js';
 import { createTabletopScene, startRenderLoop, castFromPointer, snapToGrid, trackRightDrag, isCameraClick, styleGroundForTerrain, setGroundCut, buildBoundsRect, updateWorldFollow, setWorldOriginAt, maybeRebaseWorld, CameraFly, FOG_NEAR, FOG_FAR, GRID_CELL_SIZE, FEET_PER_GRID_CELL } from '../shared/scene.js';
 import { buildObjectFromData, applyMove } from '../shared/models.js';
 import { syncCharacterStances, tickRigCharacters } from '../shared/charmesh.js';
@@ -356,6 +357,7 @@ function init() {
     grass = new Grass(terrain, scene);   // ground-cover, shown only at tactical zoom
     trees = new Trees(terrain, scene);   // biome-scattered low-poly trees
     groundCover = new GroundCover(terrain, scene); // close-up biome detail
+    watchClearings(terrain, () => objects);   // buildings clear the vegetation they stand on
     atmosphere = createAtmosphere({ scene, camera, renderer, dirLight }); // day/night + weather
     skyChip = createSkyChip();
 
@@ -2635,7 +2637,7 @@ function initSocket() {
 
     socket.on('login-success', (userData) => {
         mapReload.onAuthenticated();
-        console.log('Jogador autenticado:', userData);
+        console.log('Player signed in:', userData);
         myUsername = userData.username;
         isHostUser = !!userData.isGM;
         if (combatTracker) combatTracker.username = myUsername;

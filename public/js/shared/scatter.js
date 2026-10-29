@@ -14,8 +14,68 @@
 //   center-relative scale, and this makes the fade free as the camera roams.
 // - terrain.rev bumps on any content edit; the field clears its cache ~350ms
 //   after edits settle, so sculpt/paint reshapes the vegetation.
+// - Built ground is cleared: a page hands the terrain its synced objects once
+//   (watchClearings), every floor, wall, stair, roof and prop (a village
+//   square's tables and fires) becomes a footprint, and no instance is planted
+//   within the field's `clearance` of one. The footprints
+//   are re-read twice a second; a change drops the cached tiles.
 
 import * as THREE from 'three';
+import { wallPathPoints } from './structures.js';
+
+const CLEARING_TYPES = new Set(['floor', 'wall', 'stair', 'roof', 'prop']);
+
+// Footprints (true-world rectangles) of the structures among `objects` (meshes
+// carrying userData.objectData, or plain records). Sight blockers run along
+// cliffs and cave walls, not buildings, so they clear nothing.
+export function structureFootprints(objects) {
+    const rects = [];
+    for (const item of objects || []) {
+        const d = item && item.userData ? item.userData.objectData : item;
+        if (!d || !CLEARING_TYPES.has(d.type) || !d.position || d.style === 'sight') continue;
+        const x = Number(d.position.x), z = Number(d.position.z);
+        if (!Number.isFinite(x) || !Number.isFinite(z)) continue;
+        if (d.type === 'floor' || d.type === 'roof') {
+            rects.push({ x0: x, z0: z, x1: x + (d.cols || 1), z1: z + (d.rows || 1) });
+        } else if (d.type === 'wall') {
+            let x0 = 0, z0 = 0, x1 = 0, z1 = 0;
+            for (const p of wallPathPoints(d)) {
+                x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x);
+                z0 = Math.min(z0, p.z); z1 = Math.max(z1, p.z);
+            }
+            rects.push({ x0: x + x0, z0: z + z0, x1: x + x1, z1: z + z1 });
+        } else if (d.type === 'prop') {
+            rects.push({ x0: x - 0.5, z0: z - 0.5, x1: x + 0.5, z1: z + 0.5 });
+        } else {
+            const bx = Number(d.bx) || 0, bz = Number(d.bz) || 0;
+            rects.push({ x0: x + Math.min(0, bx) - 0.5, z0: z + Math.min(0, bz) - 0.5,
+                         x1: x + Math.max(0, bx) + 0.5, z1: z + Math.max(0, bz) + 0.5 });
+        }
+    }
+    return rects;
+}
+
+// Tell the vegetation where the page keeps its synced objects (call once).
+export function watchClearings(terrain, getObjects) {
+    terrain._clearings = { getObjects, rects: [], key: '', rev: 0, readAt: -Infinity };
+}
+
+function refreshClearings(terrain, now) {
+    const c = terrain._clearings;
+    if (!c || now - c.readAt < 500) return c;
+    c.readAt = now;
+    const rects = structureFootprints(c.getObjects());
+    const key = rects.map(r => `${r.x0},${r.z0},${r.x1},${r.z1}`).join(';');
+    if (key !== c.key) { c.key = key; c.rects = rects; c.rev++; }
+    return c;
+}
+
+function cleared(rects, x, z, margin) {
+    for (const r of rects) {
+        if (x > r.x0 - margin && x < r.x1 + margin && z > r.z0 - margin && z < r.z1 + margin) return true;
+    }
+    return false;
+}
 
 export class ScatterField {
     // opts: {
@@ -23,9 +83,12 @@ export class ScatterField {
     //   tileSize, radius,           // world units
     //   buildTile(x0, z0, x1, z1, emit)  // deterministic; emit(meshIndex, matrix4, r, g, b)
     //   budgetMs = 3                 // per-frame tile-building budget
+    //   clearance = 0                // world units kept free around structures
     // }
     constructor(opts) {
         this.terrain = opts.terrain;
+        this.clearance = opts.clearance || 0;
+        this._clearRev = 0;
         this.meshes = opts.meshes;
         this.tileSize = opts.tileSize;
         this.radius = opts.radius;
@@ -57,6 +120,11 @@ export class ScatterField {
         if (this._revSeen !== this._appliedRev && now - this._revTime > 350) {
             this.tiles.clear();
             this._appliedRev = this._revSeen;
+        }
+        const clearings = refreshClearings(this.terrain, now);
+        if (clearings && clearings.rev !== this._clearRev) {
+            this._clearRev = clearings.rev;
+            this.tiles.clear();
         }
 
         const T = this.tileSize, R = this.radius, r2 = R * R;
@@ -114,7 +182,10 @@ export class ScatterField {
         const T = this.tileSize;
         // Growable staging, frozen into typed arrays per mesh.
         const staging = this.meshes.map(() => ({ mats: [], cols: [] }));
+        const rects = this.terrain._clearings ? this.terrain._clearings.rects : [];
+        const margin = this.clearance;
         const emit = (mi, matrix, r, g, b) => {
+            if (rects.length && cleared(rects, matrix.elements[12], matrix.elements[14], margin)) return;
             const s = staging[mi];
             for (let e = 0; e < 16; e++) s.mats.push(matrix.elements[e]);
             s.cols.push(r, g, b);

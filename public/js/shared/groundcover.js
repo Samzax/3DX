@@ -144,7 +144,7 @@ export class GroundCover {
         };
         this.field = new ScatterField({
             terrain, meshes: this.species,
-            tileSize: TILE, radius: RADIUS, budgetMs: 1.5,
+            tileSize: TILE, radius: RADIUS, budgetMs: 1.5, clearance: 0.4,
             buildTile: (x0, z0, x1, z1, emit) => {
                 const k0x = Math.ceil(x0 / STEP - 1e-9), k1x = Math.ceil(x1 / STEP - 1e-9);
                 const k0z = Math.ceil(z0 / STEP - 1e-9), k1z = Math.ceil(z1 / STEP - 1e-9);

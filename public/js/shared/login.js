@@ -86,7 +86,7 @@ export function setupLoginModal(connect) {
         button.textContent = mode === 'setup' ? 'Create host account' : 'Login';
     }
 
-    function applyMode(next) {
+    function applyMode(next, demo = false) {
         mode = next;
         const setup = mode === 'setup';
         password.classList.toggle('hidden', mode === 'open' || mode === 'blocked');
@@ -94,8 +94,12 @@ export function setupLoginModal(connect) {
         rememberRow.classList.toggle('hidden', mode === 'blocked');
         input.classList.toggle('hidden', mode === 'blocked');
         password.autocomplete = setup ? 'new-password' : 'current-password';
-        note.classList.toggle('hidden', !setup && mode !== 'blocked');
-        if (setup) {
+        note.classList.toggle('hidden', !setup && mode !== 'blocked' && mode !== 'open');
+        if (mode === 'open') {
+            note.textContent = demo
+                ? 'Demo table, no passwords. Sign in as gm to run the game, or as player to play the party.'
+                : 'Open table, no passwords. Sign in as gm to run the game; any other name joins as a player.';
+        } else if (setup) {
             note.textContent = 'First run: create the host account. The host adds every other ' +
                 'player and approves new campaigns. Passwords cannot be changed later, so keep it safe.';
         } else if (mode === 'blocked') {
@@ -112,7 +116,7 @@ export function setupLoginModal(connect) {
             .then(response => response.json())
             .then(status => applyMode(status.open ? 'open'
                 : status.setup === 'here' ? 'setup'
-                : status.setup === 'elsewhere' ? 'blocked' : 'password'))
+                : status.setup === 'elsewhere' ? 'blocked' : 'password', !!status.demo))
             .catch(() => applyMode('password'));
     }
 

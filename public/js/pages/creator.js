@@ -1037,16 +1037,17 @@ const PREVIEW_H = 380;
 function initPreview() {
   const canvas = $('preview-canvas');
   const w = canvas.clientWidth || 300, h = PREVIEW_H;
-  scene = new THREE.Scene(); scene.background = new THREE.Color(0x2b2b2b);
+  scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(40, w/h, 0.1, 1000); camera.position.set(0.9,0.85,2.3); camera.lookAt(0,0.6,0);
   renderer = new THREE.WebGLRenderer({ canvas, antialias:true }); renderer.setSize(w,h); renderer.setPixelRatio(window.devicePixelRatio);
   controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0,0.6,0); controls.enableDamping=true; controls.enablePan=false; controls.minDistance=0.8; controls.maxDistance=4;
+  controls.maxPolarAngle = Math.PI * 0.53;  // never under the floor
   scene.add(new THREE.HemisphereLight(0xfff4e0, 0x445566, 0.9));
   const dl = new THREE.DirectionalLight(0xffffff,0.9); dl.position.set(2,5,3); scene.add(dl);
+  const rim = new THREE.DirectionalLight(0xffc98a, 0.55); rim.position.set(-2.5, 3, -3); scene.add(rim);
   renderer.outputEncoding = THREE.sRGBEncoding; // PBR character textures need gamma out
   configureCharacterRendering({ gammaOut: true });
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(10,10), new THREE.MeshStandardMaterial({color:0x333333}));
-  ground.rotation.x=-Math.PI/2; scene.add(ground);
+  buildStage();
   buildModel();
   document.querySelectorAll('#preview-roles button').forEach(btn => btn.onclick = () => {
     if (model && model.userData.playRole) model.userData.playRole(btn.dataset.role);
@@ -1055,6 +1056,44 @@ function initPreview() {
   window.__dbg = { get scene(){return scene;}, get camera(){return camera;}, get renderer(){return renderer;}, get model(){return model;} };
   (function loop(){ requestAnimationFrame(loop); tickRigCharacters(); controls.update(); renderer.render(scene,camera); })();
   window.addEventListener('resize', () => { const ww=canvas.clientWidth||300; renderer.setSize(ww,PREVIEW_H); camera.aspect=ww/PREVIEW_H; camera.updateProjectionMatrix(); });
+}
+// The figure stands on a small brass-rimmed dais in a warm, dark studio (the
+// ink & brass of the rest of the chrome): a painted gradient for the
+// backdrop, fog that melts the floor into it, and a soft contact shadow.
+function paintedTexture(size, paint) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  paint(c.getContext('2d'), size);
+  const tex = new THREE.CanvasTexture(c); tex.encoding = THREE.sRGBEncoding;
+  return tex;
+}
+function buildStage() {
+  const srgb = (hex) => new THREE.Color(hex).convertSRGBToLinear();   // output is sRGB-encoded
+  scene.background = paintedTexture(256, (g, s) => {
+    const grad = g.createLinearGradient(0, 0, 0, s);
+    grad.addColorStop(0, '#2e241a'); grad.addColorStop(0.55, '#1a140e'); grad.addColorStop(1, '#0e0b08');
+    g.fillStyle = grad; g.fillRect(0, 0, s, s);
+    const glow = g.createRadialGradient(s / 2, s * 0.42, 0, s / 2, s * 0.42, s * 0.5);
+    glow.addColorStop(0, 'rgba(230,195,119,0.16)'); glow.addColorStop(1, 'rgba(230,195,119,0)');
+    g.fillStyle = glow; g.fillRect(0, 0, s, s);
+  });
+  scene.fog = new THREE.Fog(srgb(0x120e0a), 3.2, 7);
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(8, 48), new THREE.MeshStandardMaterial({ color: srgb(0x1c1712), roughness: 1 }));
+  floor.rotation.x = -Math.PI / 2; floor.position.y = -0.09; scene.add(floor);
+  const dais = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.68, 0.09, 64),
+    new THREE.MeshStandardMaterial({ color: srgb(0x3b3229), roughness: 0.85 }));
+  dais.position.y = -0.045; scene.add(dais);
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.625, 0.012, 8, 96),
+    new THREE.MeshStandardMaterial({ color: srgb(0xc9973a), metalness: 0.8, roughness: 0.35 }));
+  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.001; scene.add(ring);
+  const shadow = new THREE.Mesh(new THREE.CircleGeometry(0.42, 48), new THREE.MeshBasicMaterial({
+    transparent: true, depthWrite: false,
+    map: paintedTexture(128, (g, s) => {
+      const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+      grad.addColorStop(0, 'rgba(0,0,0,0.55)'); grad.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grad; g.fillRect(0, 0, s, s);
+    })
+  }));
+  shadow.rotation.x = -Math.PI / 2; shadow.position.y = 0.003; scene.add(shadow);
 }
 // The preview is the exact rigged character the tabletop shows (charmesh.js),
 // rebuilt and released on every tweak.
